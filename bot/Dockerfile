@@ -23,8 +23,6 @@ RUN npm prune --omit=dev
 # Create data directory for encrypted storage
 RUN mkdir -p /app/data
 
-VOLUME ["/app/data"]
-
 EXPOSE 3000
 
 CMD ["node", "dist/index.js"]
