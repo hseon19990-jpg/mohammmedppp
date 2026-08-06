@@ -2,25 +2,20 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-# Copy bot's package files explicitly (build context = repo root)
+# Copy bot package files (build context = repo root)
 COPY bot/package.json bot/package-lock.json* ./
 
-# Install all dependencies (dev + prod for build step)
+# Install all dependencies
 RUN npm install
 
-# Copy bot source code only
+# Copy bot source
 COPY bot/src ./src
 COPY bot/tsconfig.json ./tsconfig.json
-
-# Build TypeScript → dist/
-RUN ./node_modules/.bin/tsc
-
-# Remove dev dependencies after build
-RUN npm prune --production
 
 # Create data directory
 RUN mkdir -p /app/data
 
 EXPOSE 3000
 
-CMD ["node", "dist/index.js"]
+# Run TypeScript directly with tsx (no compile step needed)
+CMD ["node_modules/.bin/tsx", "src/index.ts"]
