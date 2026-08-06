@@ -3,24 +3,21 @@ FROM node:20-alpine
 WORKDIR /app
 
 # Copy package files
-COPY package.json ./
+COPY package.json package-lock.json* ./
 
-# Install dependencies
-RUN npm install --omit=dev --ignore-scripts
+# Install ALL dependencies (including dev for build)
+RUN npm install
 
-# Install tsx for build step
-RUN npm install tsx typescript @types/node @types/nodemailer --ignore-scripts
-
-# Copy source
+# Copy source code
 COPY . .
 
-# Build TypeScript
-RUN npx tsc
+# Build TypeScript → dist/
+RUN npm run build
 
 # Remove dev dependencies after build
-RUN npm prune --omit=dev
+RUN npm prune --production
 
-# Create data directory for encrypted storage
+# Create data directory
 RUN mkdir -p /app/data
 
 EXPOSE 3000
