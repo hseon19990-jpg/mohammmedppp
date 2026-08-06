@@ -6,7 +6,7 @@ WORKDIR /app
 COPY bot/package.json bot/package-lock.json* ./
 
 # Install production dependencies only
-RUN npm install --production
+RUN npm install
 
 # Copy pre-compiled JS (no compile step needed)
 COPY bot/dist ./dist
