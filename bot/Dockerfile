@@ -13,7 +13,7 @@ COPY bot/src ./src
 COPY bot/tsconfig.json ./tsconfig.json
 
 # Build TypeScript → dist/
-RUN npm run build
+RUN ./node_modules/.bin/tsc
 
 # Remove dev dependencies after build
 RUN npm prune --production
