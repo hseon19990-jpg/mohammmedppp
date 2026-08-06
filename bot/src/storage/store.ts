@@ -1,10 +1,9 @@
 import fs from 'fs';
 import path from 'path';
-import { encrypt, decrypt } from '../utils/crypto.js';
 import type { Account } from '../types.js';
 
 const DATA_DIR = process.env.DATA_DIR ?? path.join(process.cwd(), 'data');
-const DB_FILE = path.join(DATA_DIR, 'accounts.enc');
+const DB_FILE = path.join(DATA_DIR, 'accounts.json');
 
 function ensureDir(): void {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -14,8 +13,7 @@ export function loadAccounts(): Account[] {
   ensureDir();
   if (!fs.existsSync(DB_FILE)) return [];
   try {
-    const raw = fs.readFileSync(DB_FILE, 'utf8');
-    return JSON.parse(decrypt(raw)) as Account[];
+    return JSON.parse(fs.readFileSync(DB_FILE, 'utf8')) as Account[];
   } catch {
     return [];
   }
@@ -23,7 +21,7 @@ export function loadAccounts(): Account[] {
 
 function save(accounts: Account[]): void {
   ensureDir();
-  fs.writeFileSync(DB_FILE, encrypt(JSON.stringify(accounts, null, 2)), 'utf8');
+  fs.writeFileSync(DB_FILE, JSON.stringify(accounts, null, 2), 'utf8');
 }
 
 export function addAccount(data: Omit<Account, 'id' | 'createdAt' | 'updatedAt'>): Account {
