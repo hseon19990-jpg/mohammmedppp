@@ -2,13 +2,13 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-# Copy package files (build context = repo root)
-COPY bot/package.json bot/package-lock.json* ./
+# Copy only package.json — let npm resolve fresh (no lockfile conflicts)
+COPY bot/package.json ./
 
-# Install production dependencies only
-RUN npm install
+# Install all dependencies
+RUN npm install --no-package-lock
 
-# Copy pre-compiled JS (no compile step needed)
+# Copy pre-compiled JS
 COPY bot/dist ./dist
 
 # Create data directory
