@@ -2,14 +2,15 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-# Copy package files
-COPY package.json package-lock.json* ./
+# Copy bot's package files explicitly (build context = repo root)
+COPY bot/package.json bot/package-lock.json* ./
 
-# Install ALL dependencies (including dev for build)
+# Install all dependencies (dev + prod for build step)
 RUN npm install
 
-# Copy source code
-COPY . .
+# Copy bot source code only
+COPY bot/src ./src
+COPY bot/tsconfig.json ./tsconfig.json
 
 # Build TypeScript → dist/
 RUN npm run build
