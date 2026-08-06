@@ -1,4 +1,4 @@
-import 'dotenv/config';
+// Railway injects env vars directly — no dotenv needed in production
 import { createBot } from './bot.js';
 
 const bot = createBot();

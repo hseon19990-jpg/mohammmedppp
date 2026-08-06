@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-require("dotenv/config");
+// Railway injects env vars directly — no dotenv needed in production
 const bot_js_1 = require("./bot.js");
 const bot = (0, bot_js_1.createBot)();
 console.log('🤖 Starting bot...');
