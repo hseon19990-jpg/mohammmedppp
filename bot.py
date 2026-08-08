@@ -77,12 +77,7 @@ def save_user(user_id: int, user_data: dict):
     save_json(DATA_DIR / "users.json", users)
 
 def kb(*rows):
-    """Build a keyboard from either row arguments or a list of rows.
-
-    The owner menu uses the latter form while the main menu uses the former.
-    Supporting both keeps callback handlers consistent and avoids a runtime
-    unpacking error when the owner settings button is pressed.
-    """
+    """Build keyboards from both row arguments and a list of rows."""
     if (
         len(rows) == 1
         and isinstance(rows[0], list)
@@ -93,7 +88,10 @@ def kb(*rows):
 
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton(button_text, callback_data=callback_data) for button_text, callback_data in row]
+            [
+                InlineKeyboardButton(button_text, callback_data=callback_data)
+                for button_text, callback_data in row
+            ]
             for row in rows
         ]
     )
