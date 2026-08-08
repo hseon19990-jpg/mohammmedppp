@@ -1,12 +1,30 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.rejectNonOwnerCallback = rejectNonOwnerCallback;
+exports.isOwner = isOwner;
 exports.ownerOnly = ownerOnly;
-const OWNER_ID = Number(process.env.OWNER_TELEGRAM_ID);
-async function ownerOnly(ctx, next) {
+function getOwnerId() {
+    const rawOwnerId = process.env.OWNER_TELEGRAM_ID?.trim();
+    if (!rawOwnerId)
+        return null;
+    const ownerId = Number(rawOwnerId);
+    return Number.isSafeInteger(ownerId) ? ownerId : null;
+}
+function isOwner(ctx) {
     const userId = ctx.from?.id;
-    if (!userId || userId !== OWNER_ID) {
-        await ctx.reply('🚫 غير مصرح لك باستخدام هذا البوت.');
+    const ownerId = getOwnerId();
+    return userId !== undefined && ownerId !== null && userId === ownerId;
+}
+async function ownerOnly(ctx, next) {
+    if (!isOwner(ctx)) {
+        await ctx.reply('🚫 هذا الإجراء متاح للمالك فقط.');
         return;
     }
     await next();
+}
+async function rejectNonOwnerCallback(ctx) {
+    if (isOwner(ctx))
+        return false;
+    await ctx.answerCallbackQuery('🚫 هذا الإجراء متاح للمالك فقط.');
+    return true;
 }
