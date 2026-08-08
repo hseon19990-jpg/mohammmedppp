@@ -1,7 +1,35 @@
-node_modules/
-data/
-.env
-*.enc
+# Python
 __pycache__/
-*.py[cod]
-.venv/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+*.session
+*.session-journal
+
+# Data
+data/
+*.db
+*.json.bak
+*.tmp
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Railway
+.railway/
+
+# OS
+.DS_Store
+Thumbs.db
