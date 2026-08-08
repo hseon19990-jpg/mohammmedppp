@@ -42,7 +42,10 @@ except ImportError:
 
 # ==================== CONFIGURATION ====================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
-OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
+
+# 👑 تم تثبيت معرف المالك هنا مباشرةً (لا يحتاج متغيرات)
+OWNER_ID = 5957783780
+
 ADMIN_GROUP_ID = int(os.environ.get("ADMIN_GROUP_ID", "0"))
 PROXY_URL = os.environ.get("PROXY_URL", "").strip()
 MANDATORY_CHANNEL = os.environ.get("MANDATORY_CHANNEL", "").strip()
@@ -155,7 +158,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [("🛒 سحب", "withdraw_store")],
     ]
     
-    # ✅ إذا كان المستخدم هو المالك، يظهر زر إعدادات المالك
+    # ✅ إذا كان المستخدم هو المالك (أنت)، يظهر زر إعدادات المالك
     if user.id == OWNER_ID:
         rows.append([("⚙️ إعدادات المالك", "owner_panel")])
     
