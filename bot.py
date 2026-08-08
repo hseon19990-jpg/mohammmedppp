@@ -130,15 +130,23 @@ def kb(*rows):
 
 # ==================== MAIN MENU ====================
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # تحديد المستخدم (سواء من زر أو من أمر /start)
     if update.callback_query:
         user_id = update.callback_query.from_user.id
+        message = update.callback_query.message
+        edit = True
     else:
         user_id = update.effective_user.id
+        message = update.message
+        edit = False
         
+    # التحقق من القناة الإجبارية
     if not await check_mandatory_channel(update, context):
         return
         
     user = update.effective_user
+    
+    # الأزرار الأساسية للجميع
     rows = [
         [("➕ إضافة حساب", "add_account")],
         [("💰 أموالي", "my_wallet")],
@@ -146,15 +154,19 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [("📺 تعليم", "tutorials")],
         [("🛒 سحب", "withdraw_store")],
     ]
+    
+    # ✅ إذا كان المستخدم هو المالك، يظهر زر إعدادات المالك
     if user.id == OWNER_ID:
         rows.append([("⚙️ إعدادات المالك", "owner_panel")])
     
     text = "👋 مرحباً بك في متجر الحسابات!\nاختر من القائمة أدناه:"
-    if update.callback_query:
+    
+    if edit:
         await update.callback_query.edit_message_text(text, reply_markup=kb(*rows))
     else:
         await update.message.reply_text(text, reply_markup=kb(*rows))
-        # ==================== ADD ACCOUNT FLOW ====================
+
+# ==================== ADD ACCOUNT FLOW ====================
 async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     SESSIONS[uid] = Session(step="email")
@@ -321,7 +333,8 @@ async def videos_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [("🔙 إعدادات المالك", "owner_panel")]
         ])
     )
-    # ==================== ROUTER ====================
+
+# ==================== ROUTER ====================
 async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query:
@@ -446,10 +459,116 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Add account steps
     await add_account_step(update, context)
 
+# ==================== ADMIN SYSTEM & NEW COMMANDS ====================
+
+# قائمة الأدمن المساعدين (بجانب المالك)
+ADMINS = [OWNER_ID]  # المالك هو أدمن تلقائياً. يمكنك إضافة أرقام أخرى هنا.
+
+def is_admin(user_id: int) -> bool:
+    return user_id in ADMINS
+
+async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """أمر /admin للمالك والأدمن"""
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("🚫 هذا الأمر للمشرفين فقط.")
+        return
+
+    await update.message.reply_text(
+        "🛠️ *لوحة تحكم الأدمن*\n\n"
+        "📌 الأوامر المتاحة:\n"
+        "/add_admin [id] -> إضافة أدمن جديد\n"
+        "/remove_admin [id] -> حذف أدمن\n"
+        "/admins_list -> عرض قائمة الأدمن\n"
+        "/stats -> إحصائيات البوت",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != OWNER_ID:
+        await update.message.reply_text("🚫 المالك فقط يمكنه إضافة أدمن.")
+        return
+    
+    if not context.args:
+        await update.message.reply_text("❌ استخدم: /add_admin [معرف المستخدم]")
+        return
+    
+    try:
+        new_admin = int(context.args[0])
+        if new_admin in ADMINS:
+            await update.message.reply_text("⚠️ هذا المستخدم أدمن مسبقاً.")
+            return
+        ADMINS.append(new_admin)
+        await update.message.reply_text(f"✅ تم إضافة المستخدم `{new_admin}` كأدمن مساعد.", parse_mode=ParseMode.MARKDOWN)
+    except ValueError:
+        await update.message.reply_text("❌ يرجى إرسال معرف رقمي صحيح.")
+
+async def remove_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != OWNER_ID:
+        await update.message.reply_text("🚫 المالك فقط يمكنه حذف أدمن.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("❌ استخدم: /remove_admin [معرف المستخدم]")
+        return
+
+    try:
+        remove_id = int(context.args[0])
+        if remove_id == OWNER_ID:
+            await update.message.reply_text("⚠️ لا يمكنك حذف المالك.")
+            return
+        if remove_id not in ADMINS:
+            await update.message.reply_text("⚠️ هذا المستخدم ليس أدمن.")
+            return
+        ADMINS.remove(remove_id)
+        await update.message.reply_text(f"✅ تم حذف المستخدم `{remove_id}` من قائمة الأدمن.", parse_mode=ParseMode.MARKDOWN)
+    except ValueError:
+        await update.message.reply_text("❌ يرجى إرسال معرف رقمي صحيح.")
+
+async def admins_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("🚫 هذا الأمر للمشرفين فقط.")
+        return
+    
+    msg = "📋 *قائمة الأدمن الحاليين:*\n"
+    for admin_id in ADMINS:
+        msg += f"👤 `{admin_id}`\n"
+    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("🚫 هذا الأمر للمشرفين فقط.")
+        return
+
+    users = load_json(USERS_DB)
+    total_users = len(users)
+    total_requests = 0
+    total_approved = 0
+    for u_data in users.values():
+        total_requests += len(u_data.get("pending_requests", []))
+        total_approved += len(u_data.get("approved_accounts", []))
+
+    await update.message.reply_text(
+        f"📊 *إحصائيات البوت:*\n\n"
+        f"👥 عدد المستخدمين: {total_users}\n"
+        f"📥 طلبات معلقة: {total_requests}\n"
+        f"✅ حسابات مقبولة: {total_approved}",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
 # ==================== MAIN ====================
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", main_menu))
+    app.add_handler(CommandHandler("admin", admin_command))
+    app.add_handler(CommandHandler("add_admin", add_admin))
+    app.add_handler(CommandHandler("remove_admin", remove_admin))
+    app.add_handler(CommandHandler("admins_list", admins_list))
+    app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CallbackQueryHandler(router))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_input))
     app.add_handler(MessageHandler(filters.VIDEO, handle_video_upload))
