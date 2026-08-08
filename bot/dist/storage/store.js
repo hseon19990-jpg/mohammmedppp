@@ -10,8 +10,11 @@ exports.deleteAccount = deleteAccount;
 exports.getAccount = getAccount;
 const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
-const DATA_DIR = process.env.DATA_DIR ?? path_1.default.join(process.cwd(), 'data');
+const configuredDataDir = process.env.DATA_DIR?.trim();
+const railwayVolumeDir = process.env.RAILWAY_VOLUME_MOUNT_PATH?.trim();
+const DATA_DIR = path_1.default.resolve(configuredDataDir || railwayVolumeDir || path_1.default.join(process.cwd(), 'data'));
 const DB_FILE = path_1.default.join(DATA_DIR, 'accounts.json');
+const BACKUP_FILE = path_1.default.join(DATA_DIR, 'accounts.json.bak');
 function ensureDir() {
     if (!fs_1.default.existsSync(DATA_DIR))
         fs_1.default.mkdirSync(DATA_DIR, { recursive: true });
@@ -23,13 +26,28 @@ function loadAccounts() {
     try {
         return JSON.parse(fs_1.default.readFileSync(DB_FILE, 'utf8'));
     }
-    catch {
-        return [];
+    catch (error) {
+        throw new Error(`تعذر قراءة ${DB_FILE}. لم تتم الكتابة فوق الملف حفاظًا على البيانات. ` +
+            `يمكن استعادته من ${BACKUP_FILE} عند الحاجة. السبب: ${String(error)}`);
     }
 }
 function save(accounts) {
     ensureDir();
-    fs_1.default.writeFileSync(DB_FILE, JSON.stringify(accounts, null, 2), 'utf8');
+    const tempFile = `${DB_FILE}.${process.pid}.tmp`;
+    const serialized = JSON.stringify(accounts, null, 2);
+    const fileDescriptor = fs_1.default.openSync(tempFile, 'w', 0o600);
+    try {
+        fs_1.default.writeFileSync(fileDescriptor, serialized, 'utf8');
+        fs_1.default.fsyncSync(fileDescriptor);
+    }
+    finally {
+        fs_1.default.closeSync(fileDescriptor);
+    }
+    if (fs_1.default.existsSync(DB_FILE)) {
+        fs_1.default.copyFileSync(DB_FILE, BACKUP_FILE);
+    }
+    fs_1.default.renameSync(tempFile, DB_FILE);
+    fs_1.default.chmodSync(DB_FILE, 0o600);
 }
 function addAccount(data) {
     const accounts = loadAccounts();

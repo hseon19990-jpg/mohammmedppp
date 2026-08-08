@@ -2,8 +2,11 @@ import fs from 'fs';
 import path from 'path';
 import type { Account } from '../types.js';
 
-const DATA_DIR = process.env.DATA_DIR ?? path.join(process.cwd(), 'data');
+const configuredDataDir = process.env.DATA_DIR?.trim();
+const railwayVolumeDir = process.env.RAILWAY_VOLUME_MOUNT_PATH?.trim();
+const DATA_DIR = path.resolve(configuredDataDir || railwayVolumeDir || path.join(process.cwd(), 'data'));
 const DB_FILE = path.join(DATA_DIR, 'accounts.json');
+const BACKUP_FILE = path.join(DATA_DIR, 'accounts.json.bak');
 
 function ensureDir(): void {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -14,14 +17,34 @@ export function loadAccounts(): Account[] {
   if (!fs.existsSync(DB_FILE)) return [];
   try {
     return JSON.parse(fs.readFileSync(DB_FILE, 'utf8')) as Account[];
-  } catch {
-    return [];
+  } catch (error) {
+    throw new Error(
+      `تعذر قراءة ${DB_FILE}. لم تتم الكتابة فوق الملف حفاظًا على البيانات. ` +
+      `يمكن استعادته من ${BACKUP_FILE} عند الحاجة. السبب: ${String(error)}`,
+    );
   }
 }
 
 function save(accounts: Account[]): void {
   ensureDir();
-  fs.writeFileSync(DB_FILE, JSON.stringify(accounts, null, 2), 'utf8');
+
+  const tempFile = `${DB_FILE}.${process.pid}.tmp`;
+  const serialized = JSON.stringify(accounts, null, 2);
+  const fileDescriptor = fs.openSync(tempFile, 'w', 0o600);
+
+  try {
+    fs.writeFileSync(fileDescriptor, serialized, 'utf8');
+    fs.fsyncSync(fileDescriptor);
+  } finally {
+    fs.closeSync(fileDescriptor);
+  }
+
+  if (fs.existsSync(DB_FILE)) {
+    fs.copyFileSync(DB_FILE, BACKUP_FILE);
+  }
+
+  fs.renameSync(tempFile, DB_FILE);
+  fs.chmodSync(DB_FILE, 0o600);
 }
 
 export function addAccount(data: Omit<Account, 'id' | 'createdAt' | 'updatedAt'>): Account {

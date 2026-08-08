@@ -11,7 +11,8 @@ RUN npm install --no-package-lock
 # Copy pre-compiled JS
 COPY bot/dist ./dist
 
-# Create data directory
+# Create the default data directory. On Railway, attach a Volume at /app/data
+# so accounts survive deployments and container restarts.
 RUN mkdir -p /app/data
 
 EXPOSE 3000
