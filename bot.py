@@ -42,22 +42,28 @@ except ImportError:
     import requests
 
 # ==================== CONFIGURATION ====================
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
+def clean_env_value(name: str) -> str:
+    return os.environ.get(name, "").strip().strip("\"'")
+
+
+def parse_int_env(*names: str) -> int:
+    for name in names:
+        raw_value = clean_env_value(name)
+        match = re.search(r"-?\d+", raw_value)
+        if match:
+            return int(match.group())
+    return 0
+
+
+BOT_TOKEN = clean_env_value("BOT_TOKEN")
 
 # يقرأ المالك من إعدادات التشغيل. OWNER_ID مدعوم أيضاً للتوافق مع الإعدادات القديمة.
-OWNER_TELEGRAM_ID = (
-    os.environ.get("OWNER_TELEGRAM_ID", "").strip()
-    or os.environ.get("OWNER_ID", "").strip()
-)
-OWNER_ID = 0
-try:
-    OWNER_ID = int(OWNER_TELEGRAM_ID) if OWNER_TELEGRAM_ID else 0
-except ValueError:
-    OWNER_ID = 0
+OWNER_TELEGRAM_ID = clean_env_value("OWNER_TELEGRAM_ID") or clean_env_value("OWNER_ID")
+OWNER_ID = parse_int_env("OWNER_TELEGRAM_ID", "OWNER_ID", "TELEGRAM_OWNER_ID")
 
-ADMIN_GROUP_ID = int(os.environ.get("ADMIN_GROUP_ID", "0"))
-PROXY_URL = os.environ.get("PROXY_URL", "").strip()
-MANDATORY_CHANNEL = os.environ.get("MANDATORY_CHANNEL", "").strip()
+ADMIN_GROUP_ID = parse_int_env("ADMIN_GROUP_ID")
+PROXY_URL = clean_env_value("PROXY_URL")
+MANDATORY_CHANNEL = clean_env_value("MANDATORY_CHANNEL")
 DEFAULT_ACCOUNT_PRICE = float(os.environ.get("DEFAULT_ACCOUNT_PRICE", "5.0"))
 
 # Persistent Storage Directory (Railway Volume)
@@ -142,6 +148,20 @@ SESSIONS: Dict[int, Session] = {}
 # ==================== KEYBOARDS ====================
 def kb(*rows):
     return InlineKeyboardMarkup([[InlineKeyboardButton(b, callback_data=c) for b, c in row] for row in rows])
+
+
+def owner_panel_markup():
+    return kb(
+        [("💰 سعر كل حساب", "set_price")],
+        [("📋 الطلبات", "approval_requests")],
+        [("✅ ايميلات للتحقق", "verify_emails")],
+        [("📧 جميع الايميلات", "all_emails")],
+        [("🕐 اخر الايميلات المضافة", "recent_emails")],
+        [("📹 قسم الفيديوهات", "videos_section")],
+        [("🛒 المبيعات", "sales_section")],
+        [("🔙 القائمة الرئيسية", "main_menu")],
+    )
+
 
 # ==================== MAIN MENU ====================
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -286,16 +306,7 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         "⚙️ *لوحة تحكم المالك*\n\nاختر الإعداد الذي تريد تعديله:",
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([
-            [("💰 سعر كل حساب", "set_price")],
-            [("📋 الطلبات", "approval_requests")],
-            [("✅ ايميلات للتحقق", "verify_emails")],
-            [("📧 جميع الايميلات", "all_emails")],
-            [("🕐 اخر الايميلات المضافة", "recent_emails")],
-            [("📹 قسم الفيديوهات", "videos_section")],
-            [("🛒 المبيعات", "sales_section")],
-            [("🔙 القائمة الرئيسية", "main_menu")]
-        ])
+        reply_markup=owner_panel_markup(),
     )
 
 async def set_video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -537,6 +548,22 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN,
     )
 
+
+async def owner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يفتح لوحة المالك مباشرة بعد التحقق من رقم الحساب."""
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text(
+            "🚫 هذا الأمر للمالك فقط.\n"
+            "أرسل /debug لمعرفة رقم حسابك ورقم المالك الذي قرأه البوت."
+        )
+        return
+    await update.message.reply_text(
+        "⚙️ *لوحة تحكم المالك*\n\nاختر الإعداد الذي تريد تعديله:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=owner_panel_markup(),
+    )
+
+
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id not in ADMINS:
@@ -692,6 +719,7 @@ def main():
     app.add_handler(CommandHandler("start", main_menu))
     app.add_handler(CommandHandler("id", show_user_id))
     app.add_handler(CommandHandler("debug", debug_command))
+    app.add_handler(CommandHandler("owner", owner_command))
     
     # ✅ تم إضافة هذا السطر ليدعم الأمر /Admin و /admin معاً
     app.add_handler(CommandHandler(["admin", "Admin"], admin_command))
