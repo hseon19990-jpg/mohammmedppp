@@ -175,7 +175,8 @@ async def approve_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     email = data[2]
 
     user_data = get_user(uid)
-    price = float(load_json(DATA_DIR / "config.json").get("default_price", 5.0))
+    config = load_json(DATA_DIR / "config.json")
+    price = config.get("default_price", 5.0)
 
     for req in user_data["pending_requests"]:
         if req["email"] == email:
@@ -383,8 +384,13 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     SESSIONS[uid] = Session(step="email")
+    
+    # ✅ جلب السعر من ملف الإعدادات
+    config = load_json(DATA_DIR / "config.json")
+    price = config.get("default_price", 5.0)
+    
     await update.callback_query.edit_message_text(
-        "📧 *الخطوة 1/4*: أرسل الإيميل:",
+        f"📝 *إضافة حساب جديد*\n💵 *سعر الحساب الواحد هو ${price}*\n\n📧 *الخطوة 1/4*: أرسل الإيميل:",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=kb([("❌ إلغاء", "cancel")])
     )
