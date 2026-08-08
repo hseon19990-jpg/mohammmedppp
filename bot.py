@@ -265,6 +265,9 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer("🚫 مالك فقط.")
         return
     
+    # ✅ إنشاء المجلدات تلقائياً لضمان ظهور الأزرار
+    (DATA_DIR / "videos").mkdir(parents=True, exist_ok=True)
+    
     await update.callback_query.edit_message_text(
         "⚙️ *لوحة تحكم المالك*\n\nاختر الإعداد الذي تريد تعديله:",
         parse_mode=ParseMode.MARKDOWN,
