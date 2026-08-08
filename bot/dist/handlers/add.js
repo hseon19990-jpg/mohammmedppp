@@ -2,7 +2,6 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.startAddFlow = startAddFlow;
 exports.handleAddStep = handleAddStep;
-exports.handleSkipRecovery = handleSkipRecovery;
 exports.handleSkipAppPassword = handleSkipAppPassword;
 const store_js_1 = require("../storage/store.js");
 const totp_js_1 = require("../utils/totp.js");
@@ -11,7 +10,7 @@ const grammy_1 = require("grammy");
 async function startAddFlow(ctx) {
     ctx.session.step = 'add_email';
     ctx.session.pendingAccount = {};
-    await ctx.reply('📝 *إضافة حساب جديد*\n\nالخطوة 1/5 — أرسل الإيميل:', {
+    await ctx.reply('📝 *إضافة حساب جديد*\n\nالخطوة 1/4 — أرسل الإيميل:', {
         parse_mode: 'Markdown',
         reply_markup: new grammy_1.InlineKeyboard().text('❌ إلغاء', 'cancel'),
     });
@@ -26,13 +25,13 @@ async function handleAddStep(ctx) {
         pending.email = text;
         ctx.session.pendingAccount = pending;
         ctx.session.step = 'add_password';
-        await ctx.reply('🔑 الخطوة 2/5 — أرسل كلمة المرور:', { reply_markup: new grammy_1.InlineKeyboard().text('❌ إلغاء', 'cancel') });
+        await ctx.reply('🔑 الخطوة 2/4 — أرسل كلمة المرور:', { reply_markup: new grammy_1.InlineKeyboard().text('❌ إلغاء', 'cancel') });
     }
     else if (step === 'add_password') {
         pending.password = text;
         ctx.session.pendingAccount = pending;
         ctx.session.step = 'add_totp';
-        await ctx.reply('🔐 الخطوة 3/5 — أرسل مفتاح المصادقة الثنائية *(Secret Key)*\n\n' +
+        await ctx.reply('🔐 الخطوة 3/4 — أرسل مفتاح المصادقة الثنائية *(Secret Key)*\n\n' +
             '_هو المفتاح الذي تحصل عليه عند إعداد التحقق بخطوتين، وليس الكود المؤقت_', {
             parse_mode: 'Markdown',
             reply_markup: new grammy_1.InlineKeyboard().text('❌ إلغاء', 'cancel'),
@@ -46,27 +45,13 @@ async function handleAddStep(ctx) {
         }
         pending.totpSecret = secret;
         ctx.session.pendingAccount = pending;
-        ctx.session.step = 'add_recovery';
+        ctx.session.step = 'add_appPassword';
         const code = (0, totp_js_1.generateTOTP)(secret);
         const remaining = (0, totp_js_1.getRemainingSeconds)();
         await ctx.reply(`✅ مفتاح المصادقة صالح!\n\n` +
             `🔢 *الكود الحالي:* \`${code}\`\n` +
             `⏱ ينتهي خلال ${remaining} ثانية\n\n` +
-            '📋 الخطوة 4/5 — أرسل أكواد الاسترداد\n' +
-            '_يمكنك إرسالها مفصولة بفاصلة أو سطر جديد_', {
-            parse_mode: 'Markdown',
-            reply_markup: new grammy_1.InlineKeyboard().text('⏭ تخطي', 'skip_recovery').text('❌ إلغاء', 'cancel'),
-        });
-    }
-    else if (step === 'add_recovery') {
-        const codes = text
-            .split(/[\n,،]+/)
-            .map((c) => c.trim())
-            .filter(Boolean);
-        pending.recoveryCodes = codes;
-        ctx.session.pendingAccount = pending;
-        ctx.session.step = 'add_appPassword';
-        await ctx.reply('🗝 الخطوة 5/5 — أرسل كلمة مرور التطبيق *(App Password)*:', {
+            '🗝 الخطوة 4/4 — أرسل كلمة مرور التطبيق *(App Password)*:', {
             parse_mode: 'Markdown',
             reply_markup: new grammy_1.InlineKeyboard().text('⏭ تخطي', 'skip_app_password').text('❌ إلغاء', 'cancel'),
         });
@@ -76,17 +61,6 @@ async function handleAddStep(ctx) {
         ctx.session.pendingAccount = pending;
         await finishAdd(ctx);
     }
-}
-async function handleSkipRecovery(ctx) {
-    const pending = ctx.session.pendingAccount ?? {};
-    pending.recoveryCodes = [];
-    ctx.session.pendingAccount = pending;
-    ctx.session.step = 'add_appPassword';
-    await ctx.answerCallbackQuery();
-    await ctx.reply('🗝 الخطوة 5/5 — أرسل كلمة مرور التطبيق *(App Password)*:', {
-        parse_mode: 'Markdown',
-        reply_markup: new grammy_1.InlineKeyboard().text('⏭ تخطي', 'skip_app_password').text('❌ إلغاء', 'cancel'),
-    });
 }
 async function handleSkipAppPassword(ctx) {
     const pending = ctx.session.pendingAccount ?? {};

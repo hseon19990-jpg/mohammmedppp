@@ -3,7 +3,7 @@ import type { SessionData } from './types.js';
 import { rejectNonOwnerCallback } from './middleware/owner.js';
 import { handleStart } from './handlers/start.js';
 import { sendMainMenu } from './handlers/menu.js';
-import { startAddFlow, handleAddStep, handleSkipRecovery, handleSkipAppPassword } from './handlers/add.js';
+import { startAddFlow, handleAddStep, handleSkipAppPassword } from './handlers/add.js';
 import { handleViewAll, handleGetCode, handleDeleteConfirm, handleDeleteYes } from './handlers/view.js';
 import { handleEditList, handleEditAccount, handleEditField, handleEditValueInput } from './handlers/edit.js';
 import { handleVerifyList, handleVerifyAccount } from './handlers/verify.js';
@@ -35,7 +35,6 @@ export function createBot(): Bot<MyContext> {
   bot.callbackQuery('view_all',        async (ctx) => { if (await rejectNonOwnerCallback(ctx)) return; await ctx.answerCallbackQuery(); await handleViewAll(ctx); });
   bot.callbackQuery('edit_list',       async (ctx) => { if (await rejectNonOwnerCallback(ctx)) return; await ctx.answerCallbackQuery(); await handleEditList(ctx); });
   bot.callbackQuery('verify_list',     async (ctx) => { if (await rejectNonOwnerCallback(ctx)) return; await ctx.answerCallbackQuery(); await handleVerifyList(ctx); });
-  bot.callbackQuery('skip_recovery',   handleSkipRecovery);
   bot.callbackQuery('skip_app_password', handleSkipAppPassword);
   bot.callbackQuery('cancel',          async (ctx) => { await ctx.answerCallbackQuery(); await sendMainMenu(ctx, '❌ تم الإلغاء'); });
 
@@ -60,7 +59,6 @@ export function createBot(): Bot<MyContext> {
       step === 'add_email' ||
       step === 'add_password' ||
       step === 'add_totp' ||
-      step === 'add_recovery' ||
       step === 'add_appPassword'
     ) {
       await handleAddStep(ctx);

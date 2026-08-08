@@ -8,7 +8,7 @@ export async function startAddFlow(ctx: MyContext): Promise<void> {
   ctx.session.step = 'add_email';
   ctx.session.pendingAccount = {};
   await ctx.reply(
-    '📝 *إضافة حساب جديد*\n\nالخطوة 1/5 — أرسل الإيميل:',
+    '📝 *إضافة حساب جديد*\n\nالخطوة 1/4 — أرسل الإيميل:',
     {
       parse_mode: 'Markdown',
       reply_markup: new InlineKeyboard().text('❌ إلغاء', 'cancel'),
@@ -28,7 +28,7 @@ export async function handleAddStep(ctx: MyContext): Promise<void> {
     ctx.session.pendingAccount = pending;
     ctx.session.step = 'add_password';
     await ctx.reply(
-      '🔑 الخطوة 2/5 — أرسل كلمة المرور:',
+      '🔑 الخطوة 2/4 — أرسل كلمة المرور:',
       { reply_markup: new InlineKeyboard().text('❌ إلغاء', 'cancel') },
     );
 
@@ -37,7 +37,7 @@ export async function handleAddStep(ctx: MyContext): Promise<void> {
     ctx.session.pendingAccount = pending;
     ctx.session.step = 'add_totp';
     await ctx.reply(
-      '🔐 الخطوة 3/5 — أرسل مفتاح المصادقة الثنائية *(Secret Key)*\n\n' +
+      '🔐 الخطوة 3/4 — أرسل مفتاح المصادقة الثنائية *(Secret Key)*\n\n' +
       '_هو المفتاح الذي تحصل عليه عند إعداد التحقق بخطوتين، وليس الكود المؤقت_',
       {
         parse_mode: 'Markdown',
@@ -53,7 +53,7 @@ export async function handleAddStep(ctx: MyContext): Promise<void> {
     }
     pending.totpSecret = secret;
     ctx.session.pendingAccount = pending;
-    ctx.session.step = 'add_recovery';
+    ctx.session.step = 'add_appPassword';
 
     const code = generateTOTP(secret);
     const remaining = getRemainingSeconds();
@@ -61,24 +61,7 @@ export async function handleAddStep(ctx: MyContext): Promise<void> {
       `✅ مفتاح المصادقة صالح!\n\n` +
       `🔢 *الكود الحالي:* \`${code}\`\n` +
       `⏱ ينتهي خلال ${remaining} ثانية\n\n` +
-      '📋 الخطوة 4/5 — أرسل أكواد الاسترداد\n' +
-      '_يمكنك إرسالها مفصولة بفاصلة أو سطر جديد_',
-      {
-        parse_mode: 'Markdown',
-        reply_markup: new InlineKeyboard().text('⏭ تخطي', 'skip_recovery').text('❌ إلغاء', 'cancel'),
-      },
-    );
-
-  } else if (step === 'add_recovery') {
-    const codes = text
-      .split(/[\n,،]+/)
-      .map((c) => c.trim())
-      .filter(Boolean);
-    pending.recoveryCodes = codes;
-    ctx.session.pendingAccount = pending;
-    ctx.session.step = 'add_appPassword';
-    await ctx.reply(
-      '🗝 الخطوة 5/5 — أرسل كلمة مرور التطبيق *(App Password)*:',
+      '🗝 الخطوة 4/4 — أرسل كلمة مرور التطبيق *(App Password)*:',
       {
         parse_mode: 'Markdown',
         reply_markup: new InlineKeyboard().text('⏭ تخطي', 'skip_app_password').text('❌ إلغاء', 'cancel'),
@@ -90,21 +73,6 @@ export async function handleAddStep(ctx: MyContext): Promise<void> {
     ctx.session.pendingAccount = pending;
     await finishAdd(ctx);
   }
-}
-
-export async function handleSkipRecovery(ctx: MyContext): Promise<void> {
-  const pending = ctx.session.pendingAccount ?? {};
-  pending.recoveryCodes = [];
-  ctx.session.pendingAccount = pending;
-  ctx.session.step = 'add_appPassword';
-  await ctx.answerCallbackQuery();
-  await ctx.reply(
-    '🗝 الخطوة 5/5 — أرسل كلمة مرور التطبيق *(App Password)*:',
-    {
-      parse_mode: 'Markdown',
-      reply_markup: new InlineKeyboard().text('⏭ تخطي', 'skip_app_password').text('❌ إلغاء', 'cancel'),
-    },
-  );
 }
 
 export async function handleSkipAppPassword(ctx: MyContext): Promise<void> {

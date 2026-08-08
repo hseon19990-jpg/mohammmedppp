@@ -30,7 +30,6 @@ function createBot() {
         return; await ctx.answerCallbackQuery(); await (0, edit_js_1.handleEditList)(ctx); });
     bot.callbackQuery('verify_list', async (ctx) => { if (await (0, owner_js_1.rejectNonOwnerCallback)(ctx))
         return; await ctx.answerCallbackQuery(); await (0, verify_js_1.handleVerifyList)(ctx); });
-    bot.callbackQuery('skip_recovery', add_js_1.handleSkipRecovery);
     bot.callbackQuery('skip_app_password', add_js_1.handleSkipAppPassword);
     bot.callbackQuery('cancel', async (ctx) => { await ctx.answerCallbackQuery(); await (0, menu_js_1.sendMainMenu)(ctx, '❌ تم الإلغاء'); });
     // Dynamic callbacks
@@ -56,7 +55,6 @@ function createBot() {
         if (step === 'add_email' ||
             step === 'add_password' ||
             step === 'add_totp' ||
-            step === 'add_recovery' ||
             step === 'add_appPassword') {
             await (0, add_js_1.handleAddStep)(ctx);
             return;

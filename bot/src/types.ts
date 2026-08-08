@@ -14,7 +14,6 @@ export type AddStep =
   | 'add_email'
   | 'add_password'
   | 'add_totp'
-  | 'add_recovery'
   | 'add_appPassword';
 
 export type EditStep = 'edit_entering_value';
