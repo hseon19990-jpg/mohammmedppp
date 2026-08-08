@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Tuple
 import pyotp
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -43,8 +44,11 @@ except ImportError:
 # ==================== CONFIGURATION ====================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 
-# ✅ تم تعديل هذا الجزء ليقرأ المالك من متغيرات Railway، وليس من الكود
-OWNER_TELEGRAM_ID = os.environ.get("OWNER_TELEGRAM_ID", "").strip()
+# يقرأ المالك من إعدادات التشغيل. OWNER_ID مدعوم أيضاً للتوافق مع الإعدادات القديمة.
+OWNER_TELEGRAM_ID = (
+    os.environ.get("OWNER_TELEGRAM_ID", "").strip()
+    or os.environ.get("OWNER_ID", "").strip()
+)
 OWNER_ID = 0
 try:
     OWNER_ID = int(OWNER_TELEGRAM_ID) if OWNER_TELEGRAM_ID else 0
@@ -113,11 +117,14 @@ async def check_mandatory_channel(update: Update, context: ContextTypes.DEFAULT_
         if member.status in ["member", "administrator", "creator"]:
             return True
         else:
-            await update.message.reply_text(
+            message = update.effective_message
+            if message:
+                await message.reply_text(
                 f"⚠️ يجب عليك الاشتراك في القناة أولاً:\n{MANDATORY_CHANNEL}\n\nثم أعد تشغيل البوت (/start)."
-            )
+                )
             return False
-    except:
+    except Exception:
+        logger.exception("Mandatory channel check failed")
         return True
 
 # ==================== SESSION ====================
@@ -266,14 +273,15 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== OWNER PANEL ====================
 async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
     if update.effective_user.id != OWNER_ID:
-        await update.callback_query.answer("🚫 مالك فقط.")
+        await query.answer("🚫 مالك فقط.", show_alert=True)
         return
     
     # ✅ إنشاء المجلدات تلقائياً لضمان ظهور الأزرار
     (DATA_DIR / "videos").mkdir(parents=True, exist_ok=True)
     
-    await update.callback_query.edit_message_text(
+    await query.edit_message_text(
         "⚙️ *لوحة تحكم المالك*\n\nاختر الإعداد الذي تريد تعديله:",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=kb([
@@ -289,9 +297,10 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def set_video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        return
     query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
     video_type = query.data.split(":")[1]
     context.user_data["pending_video_type"] = video_type
     
@@ -322,9 +331,11 @@ async def handle_video_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("⚠️ يرجى إرسال فيديو صحيح.")
 
 async def videos_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
     if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
         return
-    await update.callback_query.edit_message_text(
+    await query.edit_message_text(
         "📹 *قسم الفيديوهات*\nاختر الفيديو الذي تريد تحديثه:",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=kb([
@@ -341,102 +352,130 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query:
         return
-    
-    await query.answer()
-    data = query.data
 
-    if data == "main_menu":
-        await main_menu(update, context)
-    elif data == "add_account":
-        await add_account_start(update, context)
-    elif data == "cancel":
-        await add_account_cancel(update, context)
-    elif data == "my_wallet":
-        user = get_user(query.from_user.id)
-        await query.edit_message_text(f"💰 *رصيدك الحالي:* ${user['balance']:.2f}", parse_mode=ParseMode.MARKDOWN)
-    elif data == "my_accounts":
-        user = get_user(query.from_user.id)
-        accs = user.get("approved_accounts", [])
-        if not accs:
-            await query.edit_message_text("📭 لا توجد حسابات لديك بعد.")
+    try:
+        await query.answer()
+        data = query.data or ""
+
+        if data == "main_menu":
+            await main_menu(update, context)
+        elif data == "add_account":
+            await add_account_start(update, context)
+        elif data == "cancel":
+            await add_account_cancel(update, context)
+        elif data == "my_wallet":
+            user = get_user(query.from_user.id)
+            await query.edit_message_text(f"💰 *رصيدك الحالي:* ${user['balance']:.2f}", parse_mode=ParseMode.MARKDOWN)
+        elif data == "my_accounts":
+            user = get_user(query.from_user.id)
+            accs = user.get("approved_accounts", [])
+            if not accs:
+                await query.edit_message_text("📭 لا توجد حسابات لديك بعد.")
+            else:
+                msg = "📋 *حساباتك:*\n"
+                for a in accs:
+                    msg += f"📧 `{a.get('email', '')}`\n"
+                await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN)
+        elif data == "tutorials":
+            config = get_config()
+            rows = []
+            if config.get("video_email"): rows.append([("📹 فيديو إنشاء إيميل", "play_video:email")])
+            if config.get("video_password"): rows.append([("📹 فيديو تغيير الباسورد", "play_video:password")])
+            if config.get("video_totp"): rows.append([("📹 فيديو 2FA", "play_video:totp")])
+            if config.get("video_app_pass"): rows.append([("📹 فيديو كلمة مرور التطبيق", "play_video:app_pass")])
+            rows.append([("🔙 القائمة الرئيسية", "main_menu")])
+            await query.edit_message_text("📺 *اختر الدرس التعليمي:*", parse_mode=ParseMode.MARKDOWN, reply_markup=kb(*rows))
+        elif data.startswith("play_video:"):
+            vtype = data.split(":", 1)[1]
+            config = get_config()
+            path = config.get(f"video_{vtype}")
+            if path and Path(path).exists():
+                await query.edit_message_text("📤 جاري إرسال الفيديو...")
+                await context.bot.send_video(chat_id=query.from_user.id, video=open(path, "rb"))
+            else:
+                await query.edit_message_text("⚠️ الفيديو غير موجود.", reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")]))
+        elif data == "owner_panel":
+            await owner_panel(update, context)
+        elif data == "set_price":
+            if query.from_user.id != OWNER_ID:
+                await query.answer("🚫 مالك فقط.", show_alert=True)
+                return
+            await query.edit_message_text("💰 أرسل السعر الجديد للحساب الواحد (رقم فقط):")
+            context.user_data["awaiting_price"] = True
+        elif data == "approval_requests":
+            if query.from_user.id != OWNER_ID:
+                await query.answer("🚫 مالك فقط.", show_alert=True)
+                return
+            users = load_json(USERS_DB)
+            msg = "📋 *طلبات الموافقة المعلقة:*\n\n"
+            found = False
+            for uid, u_data in users.items():
+                for req in u_data.get("pending_requests", []):
+                    msg += f"👤 المستخدم: {uid}\n📧 {req['email']}\n🔑 {req['password']}\n🔐 {req['totp']}\n🗝 {req['app_pass']}\n\n"
+                    found = True
+            if not found:
+                msg = "📭 لا توجد طلبات حالياً."
+            await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb([("🔙 إعدادات المالك", "owner_panel")]))
+        elif data == "all_emails":
+            if query.from_user.id != OWNER_ID:
+                await query.answer("🚫 مالك فقط.", show_alert=True)
+                return
+            users = load_json(USERS_DB)
+            msg = "📧 *جميع الإيميلات المخزنة:*\n\n"
+            emails_found = False
+            for uid, u_data in users.items():
+                for req in u_data.get("pending_requests", []):
+                    msg += f"📧 {req['email']} (⏳ انتظار)\n"
+                    emails_found = True
+                for acc in u_data.get("approved_accounts", []):
+                    msg += f"📧 {acc.get('email', '')} (✅ مقبول)\n"
+                    emails_found = True
+            if not emails_found:
+                msg += "📭 لا توجد إيميلات."
+            await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb([("🔙 إعدادات المالك", "owner_panel")]))
+        elif data == "recent_emails":
+            if query.from_user.id != OWNER_ID:
+                await query.answer("🚫 مالك فقط.", show_alert=True)
+                return
+            users = load_json(USERS_DB)
+            msg = "🕐 *آخر الإيميلات المضافة:*\n\n"
+            recent = []
+            for uid, u_data in users.items():
+                for req in u_data.get("pending_requests", []):
+                    recent.append(f"📧 {req['email']} (⏳ {req.get('timestamp', '')})")
+                for acc in u_data.get("approved_accounts", []):
+                    recent.append(f"📧 {acc.get('email', '')} (✅ {acc.get('timestamp', '')})")
+            recent = sorted(recent, reverse=True)[:10]
+            if not recent:
+                msg += "📭 لا توجد إيميلات حديثة."
+            else:
+                msg += "\n".join(recent)
+            await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb([("🔙 إعدادات المالك", "owner_panel")]))
+        elif data == "videos_section":
+            await videos_section(update, context)
+        elif data.startswith("set_video:"):
+            await set_video_callback(update, context)
+        elif data == "sales_section":
+            if query.from_user.id != OWNER_ID:
+                await query.answer("🚫 مالك فقط.", show_alert=True)
+                return
+            await query.edit_message_text("🛒 *قسم المبيعات*\nقيد التطوير...", parse_mode=ParseMode.MARKDOWN, reply_markup=kb([("🔙 إعدادات المالك", "owner_panel")]))
+        elif data == "withdraw_store":
+            await query.edit_message_text("🛒 *قسم السحب*\nقيد التطوير...", parse_mode=ParseMode.MARKDOWN, reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")]))
         else:
-            msg = "📋 *حساباتك:*\n"
-            for a in accs:
-                msg += f"📧 `{a.get('email', '')}`\n"
-            await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN)
-    elif data == "tutorials":
-        config = get_config()
-        rows = []
-        if config.get("video_email"): rows.append([("📹 فيديو إنشاء إيميل", "play_video:email")])
-        if config.get("video_password"): rows.append([("📹 فيديو تغيير الباسورد", "play_video:password")])
-        if config.get("video_totp"): rows.append([("📹 فيديو 2FA", "play_video:totp")])
-        if config.get("video_app_pass"): rows.append([("📹 فيديو كلمة مرور التطبيق", "play_video:app_pass")])
-        rows.append([("🔙 القائمة الرئيسية", "main_menu")])
-        await query.edit_message_text("📺 *اختر الدرس التعليمي:*", parse_mode=ParseMode.MARKDOWN, reply_markup=kb(*rows))
-    elif data.startswith("play_video:"):
-        vtype = data.split(":")[1]
-        config = get_config()
-        path = config.get(f"video_{vtype}")
-        if path and Path(path).exists():
-            await query.edit_message_text("📤 جاري إرسال الفيديو...")
-            await context.bot.send_video(chat_id=query.from_user.id, video=open(path, "rb"))
-        else:
-            await query.edit_message_text("⚠️ الفيديو غير موجود.", reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")]))
-    elif data == "owner_panel":
-        await owner_panel(update, context)
-    elif data == "set_price":
-        await query.edit_message_text("💰 أرسل السعر الجديد للحساب الواحد (رقم فقط):")
-        context.user_data["awaiting_price"] = True
-    elif data == "approval_requests":
-        users = load_json(USERS_DB)
-        msg = "📋 *طلبات الموافقة المعلقة:*\n\n"
-        found = False
-        for uid, u_data in users.items():
-            for req in u_data.get("pending_requests", []):
-                msg += f"👤 المستخدم: {uid}\n📧 {req['email']}\n🔑 {req['password']}\n🔐 {req['totp']}\n🗝 {req['app_pass']}\n\n"
-                found = True
-        if not found:
-            msg = "📭 لا توجد طلبات حالياً."
-        await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb([("🔙 إعدادات المالك", "owner_panel")]))
-    elif data == "all_emails":
-        users = load_json(USERS_DB)
-        msg = "📧 *جميع الإيميلات المخزنة:*\n\n"
-        emails_found = False
-        for uid, u_data in users.items():
-            for req in u_data.get("pending_requests", []):
-                msg += f"📧 {req['email']} (⏳ انتظار)\n"
-                emails_found = True
-            for acc in u_data.get("approved_accounts", []):
-                msg += f"📧 {acc.get('email', '')} (✅ مقبول)\n"
-                emails_found = True
-        if not emails_found:
-            msg += "📭 لا توجد إيميلات."
-        await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb([("🔙 إعدادات المالك", "owner_panel")]))
-    elif data == "recent_emails":
-        users = load_json(USERS_DB)
-        msg = "🕐 *آخر الإيميلات المضافة:*\n\n"
-        recent = []
-        for uid, u_data in users.items():
-            for req in u_data.get("pending_requests", []):
-                recent.append(f"📧 {req['email']} (⏳ {req.get('timestamp', '')})")
-            for acc in u_data.get("approved_accounts", []):
-                recent.append(f"📧 {acc.get('email', '')} (✅ {acc.get('timestamp', '')})")
-        recent = sorted(recent, reverse=True)[:10]
-        if not recent:
-            msg += "📭 لا توجد إيميلات حديثة."
-        else:
-            msg += "\n".join(recent)
-        await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb([("🔙 إعدادات المالك", "owner_panel")]))
-    elif data == "videos_section":
-        await videos_section(update, context)
-    elif data.startswith("set_video:"):
-        await set_video_callback(update, context)
-    elif data == "sales_section":
-        await query.edit_message_text("🛒 *قسم المبيعات*\nقيد التطوير...", reply_markup=kb([("🔙 إعدادات المالك", "owner_panel")]))
-    elif data == "withdraw_store":
-        await query.edit_message_text("🛒 *قسم السحب*\nقيد التطوير...", parse_mode=ParseMode.MARKDOWN)
-    else:
-        await query.edit_message_text("⚠️ خيار غير معروف.")
+            await query.edit_message_text("⚠️ خيار غير معروف.", reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")]))
+    except BadRequest as exc:
+        logger.warning("Telegram rejected callback %s: %s", query.data, exc)
+        try:
+            await query.answer("تعذر تنفيذ الطلب، أرسل /start وحاول مرة أخرى.", show_alert=True)
+        except Exception:
+            pass
+    except Exception:
+        logger.exception("Unhandled callback error: %s", query.data)
+        try:
+            await query.answer("حدث خطأ مؤقت. أرسل /start وحاول مرة أخرى.", show_alert=True)
+        except Exception:
+            pass
 
 # ==================== TEXT INPUT HANDLER ====================
 async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -464,10 +503,18 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==================== ADMIN SYSTEM & NEW COMMANDS ====================
 
 # قائمة الأدمن المساعدين (بجانب المالك)
-ADMINS = [OWNER_ID]  # المالك هو أدمن تلقائياً. يمكنك إضافة أرقام أخرى هنا.
+ADMINS = {OWNER_ID} if OWNER_ID else set()
 
 def is_admin(user_id: int) -> bool:
     return user_id in ADMINS
+
+async def show_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يساعد المالك على معرفة الرقم المطلوب وضعه في OWNER_TELEGRAM_ID."""
+    if update.effective_user:
+        await update.message.reply_text(
+            f"🆔 رقم حسابك في تيليجرام هو:\n`{update.effective_user.id}`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
 
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """أمر /admin للمالك والأدمن"""
@@ -501,7 +548,7 @@ async def add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if new_admin in ADMINS:
             await update.message.reply_text("⚠️ هذا المستخدم أدمن مسبقاً.")
             return
-        ADMINS.append(new_admin)
+        ADMINS.add(new_admin)
         await update.message.reply_text(f"✅ تم إضافة المستخدم `{new_admin}` كأدمن مساعد.", parse_mode=ParseMode.MARKDOWN)
     except ValueError:
         await update.message.reply_text("❌ يرجى إرسال معرف رقمي صحيح.")
@@ -564,8 +611,16 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== MAIN ====================
 def main():
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN غير مضبوط. أضف توكن البوت من BotFather.")
+    if not OWNER_ID:
+        raise RuntimeError(
+            "OWNER_TELEGRAM_ID غير مضبوط أو غير رقمي. أرسل /id للبوت لمعرفة الرقم ثم أضفه في الإعدادات."
+        )
+
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", main_menu))
+    app.add_handler(CommandHandler("id", show_user_id))
     
     # ✅ تم إضافة هذا السطر ليدعم الأمر /Admin و /admin معاً
     app.add_handler(CommandHandler(["admin", "Admin"], admin_command))
