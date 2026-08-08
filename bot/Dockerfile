@@ -1,15 +1,10 @@
-FROM python:3.12-slim
+FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install Python dependencies before copying application code for better layer caching.
-COPY bot/requirements.txt ./
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Create the default data directory. On Railway, attach a Volume at /app/data
-# so accounts survive deployments and container restarts.
-RUN mkdir -p /app/data
-
-COPY bot/main.py ./
+COPY . .
 
 CMD ["python", "main.py"]
