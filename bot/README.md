@@ -6,10 +6,17 @@ This bot is implemented in Python and runs with `python-telegram-bot`.
 
 - `BOT_TOKEN` — token from BotFather.
 - `OWNER_TELEGRAM_ID` — Telegram user ID that can view, edit, verify, and delete accounts.
-- `DATA_DIR` — optional data directory. Defaults to `RAILWAY_VOLUME_MOUNT_PATH`, then `./data`.
+- `DATA_DIR` — optional data directory. If it is not set, the bot uses
+  `RAILWAY_VOLUME_MOUNT_PATH`, then `/app/data`.
 
-The bot keeps the existing `accounts.json` format. Attach a Railway volume at
-`/app/data` if account data must survive deployments.
+The bot stores users, balances, requests, settings, and uploaded videos in this
+directory. It also writes a `.bak` copy of each JSON file and saves changes
+atomically, so restarts and interrupted writes do not erase the data.
+
+To keep data after Railway redeploys, attach a **Railway Volume** to the bot
+service and mount it at `/app/data` (or set `DATA_DIR` to the volume mount path).
+The code automatically migrates existing files from the old data paths when the
+new persistent directory is empty. Do not delete the volume.
 
 ## Run locally
 

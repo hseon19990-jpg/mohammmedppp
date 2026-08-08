@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -37,12 +38,12 @@ load_dotenv()
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 OWNER_ID = int(os.environ.get("OWNER_TELEGRAM_ID", "0"))
 
-DATA_DIR = Path(os.environ.get("DATA_DIR", "/railway/volume/data")).resolve()
+configured_data_dir = os.environ.get("DATA_DIR", "").strip()
+railway_volume_dir = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
+DATA_DIR = Path(
+    configured_data_dir or railway_volume_dir or "/app/data"
+).resolve()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
-USERS_DB = DATA_DIR / "users.json"
-
-VIDEOS_DIR = DATA_DIR / "videos"
-VIDEOS_DIR.mkdir(exist_ok=True)
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -50,17 +51,71 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+def migrate_legacy_data():
+    """Copy old data into the persistent directory without overwriting it."""
+    legacy_dirs = {
+        Path("/railway/volume/data"),
+        Path("/app/data"),
+        Path.cwd() / "data",
+        Path(__file__).resolve().parent / "data",
+    }
+    legacy_dirs.discard(DATA_DIR)
+
+    for legacy_dir in legacy_dirs:
+        if not legacy_dir.exists():
+            continue
+
+        for filename in ("users.json", "config.json"):
+            source = legacy_dir / filename
+            destination = DATA_DIR / filename
+            if source.is_file() and not destination.exists():
+                shutil.copy2(source, destination)
+                logger.info("Migrated %s to persistent storage.", filename)
+
+        source_videos = legacy_dir / "videos"
+        destination_videos = DATA_DIR / "videos"
+        if source_videos.is_dir():
+            for source_video in source_videos.iterdir():
+                destination_video = destination_videos / source_video.name
+                if source_video.is_file() and not destination_video.exists():
+                    destination_videos.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source_video, destination_video)
+                    logger.info("Migrated video %s to persistent storage.", source_video.name)
+
+
+migrate_legacy_data()
+USERS_DB = DATA_DIR / "users.json"
+VIDEOS_DIR = DATA_DIR / "videos"
+VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
+
 # ==================== DATA HELPERS ====================
 def load_json(path: Path) -> dict:
-    if not path.exists():
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except:
-        return {}
+    backup_path = path.with_name(f"{path.name}.bak")
+    for candidate in (path, backup_path):
+        if not candidate.exists():
+            continue
+        try:
+            value = json.loads(candidate.read_text(encoding="utf-8"))
+            if isinstance(value, dict):
+                return value
+        except (OSError, json.JSONDecodeError):
+            logger.exception("Could not read JSON data from %s.", candidate)
+    return {}
 
 def save_json(path: Path, data: dict):
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_name(f".{path.name}.tmp")
+    backup_path = path.with_name(f"{path.name}.bak")
+    payload = json.dumps(data, indent=2, ensure_ascii=False)
+
+    with temporary_path.open("w", encoding="utf-8") as temporary_file:
+        temporary_file.write(payload)
+        temporary_file.flush()
+        os.fsync(temporary_file.fileno())
+
+    if path.exists():
+        shutil.copy2(path, backup_path)
+    os.replace(temporary_path, path)
 
 def get_user(user_id: int) -> dict:
     users = load_json(DATA_DIR / "users.json")
