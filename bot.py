@@ -194,17 +194,35 @@ async def approve_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_data = get_user(uid)
     config = load_json(DATA_DIR / "config.json")
-    price = config.get("default_price", 5.0)
+    default_price = float(config.get("default_price", 5.0))
 
-    for req in user_data["pending_requests"]:
-        if req["email"] == email:
-            user_data["approved_accounts"].append(req)
-            user_data["pending_balance"] += price
-            break
-    user_data["pending_requests"] = [r for r in user_data["pending_requests"] if r["email"] != email]
+    approved_request = next(
+        (req for req in user_data.get("pending_requests", []) if req["email"] == email),
+        None,
+    )
+    if not approved_request:
+        await query.edit_message_text(
+            "⚠️ هذا الطلب غير موجود أو تمت معالجته مسبقاً.",
+            reply_markup=kb([("🔙 إعدادات المالك", "owner_panel")]),
+        )
+        return
+
+    price = float(approved_request.get("amount", default_price))
+    user_data.setdefault("approved_accounts", []).append(approved_request)
+    user_data["pending_balance"] = max(
+        0.0,
+        float(user_data.get("pending_balance", 0.0)) - price,
+    )
+    user_data["balance"] = float(user_data.get("balance", 0.0)) + price
+    user_data["pending_requests"] = [
+        req for req in user_data.get("pending_requests", []) if req["email"] != email
+    ]
     save_user(uid, user_data)
 
-    await query.edit_message_text(f"✅ تم قبول الحساب `{email}`!\n💰 تم إضافة ${price} لرصيد المستخدم.", parse_mode=ParseMode.MARKDOWN)
+    await query.edit_message_text(
+        f"✅ تم قبول الحساب `{email}`!\n💰 تم نقل ${price:.2f} من قيد الانتظار إلى الرصيد المملوك.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
 
 async def reject_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -217,10 +235,29 @@ async def reject_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     email = data[2]
 
     user_data = get_user(uid)
-    user_data["pending_requests"] = [r for r in user_data["pending_requests"] if r["email"] != email]
+    pending_requests = user_data.get("pending_requests", [])
+    rejected_requests = [req for req in pending_requests if req["email"] == email]
+    if not rejected_requests:
+        await query.edit_message_text(
+            "⚠️ هذا الطلب غير موجود أو تمت معالجته مسبقاً.",
+            reply_markup=kb([("🔙 إعدادات المالك", "owner_panel")]),
+        )
+        return
+
+    rejected_total = sum(float(req.get("amount", 0.0)) for req in rejected_requests)
+    user_data["pending_balance"] = max(
+        0.0,
+        float(user_data.get("pending_balance", 0.0)) - rejected_total,
+    )
+    user_data["pending_requests"] = [
+        req for req in pending_requests if req["email"] != email
+    ]
     save_user(uid, user_data)
 
-    await query.edit_message_text(f"❌ تم رفض الحساب `{email}`.", parse_mode=ParseMode.MARKDOWN)
+    await query.edit_message_text(
+        f"❌ تم رفض الحساب `{email}` وإزالة المبلغ من قيد الانتظار.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
 
 # ==================== OWNER PANEL: VIDEO SECTION ====================
 async def videos_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -455,17 +492,23 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif session.step == "app_pass":
         session.app_pass = text
         user_data = get_user(uid)
+        config = load_json(DATA_DIR / "config.json")
+        price = float(config.get("default_price", 5.0))
         user_data["pending_requests"].append({
             "email": session.email,
             "password": session.password,
             "totp": session.totp,
             "app_pass": session.app_pass,
+            "amount": price,
             "timestamp": datetime.now(timezone.utc).isoformat()
         })
+        user_data["pending_balance"] = float(
+            user_data.get("pending_balance", 0.0)
+        ) + price
         save_user(uid, user_data)
         SESSIONS.pop(uid, None)
         await update.message.reply_text(
-            "✅ تم إرسال الطلب للمالك للموافقة!",
+            f"✅ تم إرسال الطلب للمالك للموافقة!\n⏳ تمت إضافة ${price:.2f} إلى الأموال قيد الانتظار.",
             reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")])
         )
 
@@ -548,7 +591,7 @@ async def my_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = get_user(query.from_user.id)
     await query.edit_message_text(
-        f"💰 *أموالي*\n\n⏳ قيد الانتظار: ${user['pending_balance']:.2f}\n✅ المستلم: ${user['balance']:.2f}",
+        f"💰 *أموالي*\n\n⏳ قيد الانتظار: ${float(user.get('pending_balance', 0.0)):.2f}\n✅ الرصيد المملوك: ${float(user.get('balance', 0.0)):.2f}",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")])
     )
