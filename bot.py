@@ -133,21 +133,12 @@ def kb(*rows):
 
 # ==================== MAIN MENU ====================
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # تحديد المستخدم (سواء من زر أو من أمر /start)
-    if update.callback_query:
-        user_id = update.callback_query.from_user.id
-        message = update.callback_query.message
-        edit = True
-    else:
-        user_id = update.effective_user.id
-        message = update.message
-        edit = False
-        
+    # تحديد المستخدم
+    user = update.effective_user
+    
     # التحقق من القناة الإجبارية
     if not await check_mandatory_channel(update, context):
         return
-        
-    user = update.effective_user
     
     # الأزرار الأساسية للجميع
     rows = [
@@ -158,13 +149,13 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [("🛒 سحب", "withdraw_store")],
     ]
     
-    # ✅ إذا كان المستخدم هو المالك (أنت)، يظهر زر إعدادات المالك
+    # إذا كان المستخدم هو المالك، أضف زر إعدادات المالك
     if user.id == OWNER_ID:
         rows.append([("⚙️ إعدادات المالك", "owner_panel")])
     
     text = "👋 مرحباً بك في متجر الحسابات!\nاختر من القائمة أدناه:"
     
-    if edit:
+    if update.callback_query:
         await update.callback_query.edit_message_text(text, reply_markup=kb(*rows))
     else:
         await update.message.reply_text(text, reply_markup=kb(*rows))
