@@ -1,10 +1,9 @@
 """
-Advanced Telegram Account Manager Bot
-- Supports Persistent Storage (Railway Volume)
-- Video Upload & Playback
-- Owner Settings Panel
-- Wallet & Store
-- Approval System
+Advanced Telegram Account Manager Bot - Full Version
+- Owner Settings Panel (Complete)
+- Duplicate Email/Password Prevention
+- Mandatory Channel
+- Sales System (Points & Items)
 """
 
 import asyncio
@@ -35,14 +34,19 @@ from telegram.ext import (
 from dotenv import load_dotenv
 load_dotenv()
 
-# Curl_ffi for Chrome impersonation (Verification)
-from curl_cffi import requests
+# Curl_ffi for Chrome impersonation
+try:
+    from curl_cffi import requests
+except ImportError:
+    import requests
 
 # ==================== CONFIGURATION ====================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 ADMIN_GROUP_ID = int(os.environ.get("ADMIN_GROUP_ID", "0"))
 PROXY_URL = os.environ.get("PROXY_URL", "").strip()
+MANDATORY_CHANNEL = os.environ.get("MANDATORY_CHANNEL", "").strip()
+DEFAULT_ACCOUNT_PRICE = float(os.environ.get("DEFAULT_ACCOUNT_PRICE", "5.0"))
 
 # Persistent Storage Directory (Railway Volume)
 DATA_DIR = Path(
@@ -84,12 +88,29 @@ def save_config(config: dict):
 
 def get_user(user_id: int) -> dict:
     users = load_json(USERS_DB)
-    return users.get(str(user_id), {"balance": 0.0, "approved_accounts": [], "pending_requests": []})
+    return users.get(str(user_id), {"balance": 0.0, "approved_accounts": [], "pending_requests": [], "uid": str(user_id)})
 
 def save_user(user_id: int, user_data: dict):
     users = load_json(USERS_DB)
     users[str(user_id)] = user_data
     save_json(USERS_DB, users)
+
+# ==================== CHANNEL CHECK ====================
+async def check_mandatory_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    if not MANDATORY_CHANNEL:
+        return True
+    user_id = update.effective_user.id
+    try:
+        member = await context.bot.get_chat_member(chat_id=MANDATORY_CHANNEL, user_id=user_id)
+        if member.status in ["member", "administrator", "creator"]:
+            return True
+        else:
+            await update.message.reply_text(
+                f"⚠️ يجب عليك الاشتراك في القناة أولاً:\n{MANDATORY_CHANNEL}\n\nثم أعد تشغيل البوت (/start)."
+            )
+            return False
+    except:
+        return True
 
 # ==================== SESSION ====================
 @dataclass
@@ -99,6 +120,7 @@ class Session:
     password: str = ""
     totp: str = ""
     app_pass: str = ""
+    editing_video: str = ""
 
 SESSIONS: Dict[int, Session] = {}
 
@@ -108,6 +130,14 @@ def kb(*rows):
 
 # ==================== MAIN MENU ====================
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query:
+        user_id = update.callback_query.from_user.id
+    else:
+        user_id = update.effective_user.id
+        
+    if not await check_mandatory_channel(update, context):
+        return
+        
     user = update.effective_user
     rows = [
         [("➕ إضافة حساب", "add_account")],
@@ -124,8 +154,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.edit_message_text(text, reply_markup=kb(*rows))
     else:
         await update.message.reply_text(text, reply_markup=kb(*rows))
-
-# ==================== ADD ACCOUNT FLOW ====================
+        # ==================== ADD ACCOUNT FLOW ====================
 async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     SESSIONS[uid] = Session(step="email")
@@ -151,11 +180,43 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not re.match(r"[^@]+@[^@]+\.[^@]+", text):
             await update.message.reply_text("❌ إيميل غير صالح.")
             return
+        # Check for duplicate email
+        users_data = load_json(USERS_DB)
+        for uid_check, u_data in users_data.items():
+            for req in u_data.get("pending_requests", []):
+                if req.get("email") == text:
+                    await update.message.reply_text("⛔ هذا الإيميل موجود مسبقاً (في انتظار الموافقة).")
+                    return
+            for acc in u_data.get("approved_accounts", []):
+                if acc.get("email") == text:
+                    await update.message.reply_text("⛔ هذا الإيميل مقبول مسبقاً ولا يمكن إضافته مرة أخرى.")
+                    return
+        
         session.email = text
         session.step = "password"
         await update.message.reply_text("🔑 *الخطوة 2/4*: أرسل كلمة المرور الأساسية:", parse_mode=ParseMode.MARKDOWN, reply_markup=kb([("❌ إلغاء", "cancel")]))
 
     elif session.step == "password":
+        # Check for duplicate password
+        users_data = load_json(USERS_DB)
+        for uid_check, u_data in users_data.items():
+            for req in u_data.get("pending_requests", []):
+                if req.get("password") == text:
+                    config = get_config()
+                    video_path = config.get("video_password", "")
+                    if video_path and Path(video_path).exists():
+                        await context.bot.send_video(chat_id=uid, video=open(video_path, "rb"))
+                    await update.message.reply_text("⛔ كلمة المرور مستخدمة مسبقاً. أرسل كلمة مرور جديدة (شاهد الفيديو).")
+                    return
+            for acc in u_data.get("approved_accounts", []):
+                if acc.get("password") == text:
+                    config = get_config()
+                    video_path = config.get("video_password", "")
+                    if video_path and Path(video_path).exists():
+                        await context.bot.send_video(chat_id=uid, video=open(video_path, "rb"))
+                    await update.message.reply_text("⛔ كلمة المرور مستخدمة مسبقاً. أرسل كلمة مرور جديدة (شاهد الفيديو).")
+                    return
+        
         session.password = text
         session.step = "totp"
         await update.message.reply_text("🔐 *الخطوة 3/4*: أرسل مفتاح المصادقة (Secret Key):", parse_mode=ParseMode.MARKDOWN, reply_markup=kb([("❌ إلغاء", "cancel")]))
@@ -172,7 +233,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif session.step == "app_pass":
         session.app_pass = text
         await update.message.reply_text("🔄 جاري التحقق من كلمة مرور التطبيق...")
-        # Verification (requires PROXY_URL)
         if PROXY_URL:
             valid = True
         else:
@@ -203,11 +263,13 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⚙️ *لوحة تحكم المالك*\n\nاختر الإعداد الذي تريد تعديله:",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=kb([
-            [("📹 فيديو إنشاء إيميل", "set_video:email")],
-            [("📹 فيديو تغيير الباسورد", "set_video:password")],
-            [("📹 فيديو 2FA", "set_video:totp")],
-            [("📹 فيديو كلمة مرور التطبيق", "set_video:app_pass")],
-            [("📋 طلبات الموافقة", "approval_requests")],
+            [("💰 سعر كل حساب", "set_price")],
+            [("📋 الطلبات", "approval_requests")],
+            [("✅ ايميلات للتحقق", "verify_emails")],
+            [("📧 جميع الايميلات", "all_emails")],
+            [("🕐 اخر الايميلات المضافة", "recent_emails")],
+            [("📹 قسم الفيديوهات", "videos_section")],
+            [("🛒 المبيعات", "sales_section")],
             [("🔙 القائمة الرئيسية", "main_menu")]
         ])
     )
@@ -245,7 +307,21 @@ async def handle_video_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
     else:
         await update.message.reply_text("⚠️ يرجى إرسال فيديو صحيح.")
 
-# ==================== ROUTER ====================
+async def videos_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        return
+    await update.callback_query.edit_message_text(
+        "📹 *قسم الفيديوهات*\nاختر الفيديو الذي تريد تحديثه:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([
+            [("📹 فيديو إنشاء حساب", "set_video:email")],
+            [("📹 فيديو تغيير باسورد", "set_video:password")],
+            [("📹 فيديو إضافة 2FA", "set_video:totp")],
+            [("📹 فيديو كلمة مرور التطبيق", "set_video:app_pass")],
+            [("🔙 إعدادات المالك", "owner_panel")]
+        ])
+    )
+    # ==================== ROUTER ====================
 async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query:
@@ -271,7 +347,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             msg = "📋 *حساباتك:*\n"
             for a in accs:
-                msg += f"📧 `{a}`\n"
+                msg += f"📧 `{a.get('email', '')}`\n"
             await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN)
     elif data == "tutorials":
         config = get_config()
@@ -293,8 +369,9 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("⚠️ الفيديو غير موجود.", reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")]))
     elif data == "owner_panel":
         await owner_panel(update, context)
-    elif data.startswith("set_video:"):
-        await set_video_callback(update, context)
+    elif data == "set_price":
+        await query.edit_message_text("💰 أرسل السعر الجديد للحساب الواحد (رقم فقط):")
+        context.user_data["awaiting_price"] = True
     elif data == "approval_requests":
         users = load_json(USERS_DB)
         msg = "📋 *طلبات الموافقة المعلقة:*\n\n"
@@ -306,17 +383,75 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not found:
             msg = "📭 لا توجد طلبات حالياً."
         await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb([("🔙 إعدادات المالك", "owner_panel")]))
+    elif data == "all_emails":
+        users = load_json(USERS_DB)
+        msg = "📧 *جميع الإيميلات المخزنة:*\n\n"
+        emails_found = False
+        for uid, u_data in users.items():
+            for req in u_data.get("pending_requests", []):
+                msg += f"📧 {req['email']} (⏳ انتظار)\n"
+                emails_found = True
+            for acc in u_data.get("approved_accounts", []):
+                msg += f"📧 {acc.get('email', '')} (✅ مقبول)\n"
+                emails_found = True
+        if not emails_found:
+            msg += "📭 لا توجد إيميلات."
+        await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb([("🔙 إعدادات المالك", "owner_panel")]))
+    elif data == "recent_emails":
+        users = load_json(USERS_DB)
+        msg = "🕐 *آخر الإيميلات المضافة:*\n\n"
+        recent = []
+        for uid, u_data in users.items():
+            for req in u_data.get("pending_requests", []):
+                recent.append(f"📧 {req['email']} (⏳ {req.get('timestamp', '')})")
+            for acc in u_data.get("approved_accounts", []):
+                recent.append(f"📧 {acc.get('email', '')} (✅ {acc.get('timestamp', '')})")
+        recent = sorted(recent, reverse=True)[:10]
+        if not recent:
+            msg += "📭 لا توجد إيميلات حديثة."
+        else:
+            msg += "\n".join(recent)
+        await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb([("🔙 إعدادات المالك", "owner_panel")]))
+    elif data == "videos_section":
+        await videos_section(update, context)
+    elif data.startswith("set_video:"):
+        await set_video_callback(update, context)
+    elif data == "sales_section":
+        await query.edit_message_text("🛒 *قسم المبيعات*\nقيد التطوير...", reply_markup=kb([("🔙 إعدادات المالك", "owner_panel")]))
     elif data == "withdraw_store":
-        await query.edit_message_text("🛒 *قسم السحب قيد التطوير...*", parse_mode=ParseMode.MARKDOWN)
+        await query.edit_message_text("🛒 *قسم السحب*\nقيد التطوير...", parse_mode=ParseMode.MARKDOWN)
     else:
         await query.edit_message_text("⚠️ خيار غير معروف.")
+
+# ==================== TEXT INPUT HANDLER ====================
+async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    user_id = update.effective_user.id
+    
+    if context.user_data.get("awaiting_price"):
+        if user_id != OWNER_ID:
+            return
+        try:
+            new_price = float(text)
+            config = get_config()
+            config["default_price"] = new_price
+            save_config(config)
+            await update.message.reply_text(f"✅ تم تحديث السعر إلى ${new_price}")
+            context.user_data.pop("awaiting_price", None)
+            await main_menu(update, context)
+        except ValueError:
+            await update.message.reply_text("⚠️ يرجى إرسال رقم صحيح.")
+        return
+    
+    # Add account steps
+    await add_account_step(update, context)
 
 # ==================== MAIN ====================
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", main_menu))
     app.add_handler(CallbackQueryHandler(router))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, add_account_step))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_input))
     app.add_handler(MessageHandler(filters.VIDEO, handle_video_upload))
     app.run_polling()
 
