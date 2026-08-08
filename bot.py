@@ -732,7 +732,4 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_input))
     app.add_handler(MessageHandler(filters.VIDEO, handle_video_upload))
     app.add_error_handler(error_handler)
-    app.run_polling()
-
-if __name__ == "__main__":
-    main()
+    app.run_polling
