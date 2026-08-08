@@ -3,8 +3,9 @@ Advanced Telegram Account Manager Bot - Full Version
 - Owner Panel (Fully Fixed)
 - Add Account Flow
 - Video System (Upload & Play)
-- Store System (Categories & Services)
+- Store System (Categories & Services) - UPDATED
 - Wallet & Balance
+- Forced Channel
 """
 
 import asyncio
@@ -175,20 +176,34 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user.id == OWNER_ID:
         rows.append([("⚙️ إعدادات المالك", "owner_panel")])
 
+    # Check forced channel
+    config = load_json(DATA_DIR / "config.json")
+    forced_channel = config.get("forced_channel", "")
+    if forced_channel:
+        try:
+            member = await context.bot.get_chat_member(forced_channel, user.id)
+            if member.status not in ["member", "administrator", "creator"]:
+                await update.message.reply_text(
+                    f"📢 *يرجى الانضمام إلى القناة أولاً:*\n{forced_channel}\n\nثم اضغط /start مرة أخرى.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return
+        except:
+            pass
+
     text = "👋 مرحباً بك!\nاختر من القائمة أدناه:"
     if update.callback_query:
         await update.callback_query.edit_message_text(text, reply_markup=kb(*rows))
     else:
         await update.message.reply_text(text, reply_markup=kb(*rows))
 
-# ==================== OWNER PANEL (FULLY FIXED) ====================
+# ==================== OWNER PANEL ====================
 async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
 
-    # ✅ إظهار الأزرار الكاملة للمالك
     await query.edit_message_text(
         "⚙️ *لوحة تحكم المالك*\n\nاختر الإعداد الذي تريد تعديله:",
         parse_mode=ParseMode.MARKDOWN,
@@ -197,6 +212,7 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [("📋 الطلبات", "approval_requests")],
             [("📹 قسم الفيديوهات", "videos_section")],
             [("🛒 المبيعات", "store_section")],
+            [("📢 قناة إجبارية", "forced_channel")],
             [("🔙 القائمة الرئيسية", "main_menu")]
         ])
     )
@@ -364,21 +380,29 @@ async def handle_video_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
     else:
         await update.message.reply_text("⚠️ يرجى إرسال فيديو صحيح.")
 
-# ==================== OWNER PANEL: STORE SECTION ====================
+# ==================== OWNER PANEL: STORE SECTION (UPDATED) ====================
 async def owner_store_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
 
+    # عرض الفئات الموجودة مع خيار الإضافة
+    config = load_json(DATA_DIR / "config.json")
+    categories = config.get("store_categories", [])
+    
+    rows = []
+    if categories:
+        for cat in categories:
+            rows.append([(f"📂 {cat['name']}", f"store_category:{cat['id']}")])
+    
+    rows.append([("➕ إضافة فئة جديدة", "store_add_category")])
+    rows.append([("🔙 إعدادات المالك", "owner_panel")])
+    
     await query.edit_message_text(
-        "🛒 *إدارة المبيعات*\n\nاختر إجراءً:",
+        "🛒 *إدارة المبيعات*\n\nاختر فئة لعرض مبيعاتها أو أضف فئة جديدة:",
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([
-            [("➕ إضافة فئة", "store_add_category")],
-            [("📋 عرض الفئات", "store_list_categories")],
-            [("🔙 إعدادات المالك", "owner_panel")]
-        ])
+        reply_markup=kb(*rows)
     )
 
 async def store_add_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -386,28 +410,13 @@ async def store_add_category(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
-    await query.edit_message_text("✏️ أرسل اسم الفئة الجديدة:")
+    
+    await query.edit_message_text(
+        "✏️ *إضافة فئة جديدة*\n\nأرسل اسم الفئة (مثال: حسابات، اشتراكات، أدوات):",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([("🔙 إلغاء", "store_section")])
+    )
     context.user_data["store_action"] = "add_category"
-
-async def store_list_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-
-    config = load_json(DATA_DIR / "config.json")
-    categories = config.get("store_categories", [])
-    if not categories:
-        await query.edit_message_text("📭 لا توجد فئات.", reply_markup=kb([("🔙 إدارة المبيعات", "owner_store_section")]))
-        return
-
-    msg = "📋 *الفئات:*\n\n"
-    rows = []
-    for cat in categories:
-        msg += f"📂 {cat['name']}\n"
-        rows.append([(f"📂 {cat['name']}", f"store_category:{cat['id']}")])
-    rows.append([("🔙 إدارة المبيعات", "owner_store_section")])
-    await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb(*rows))
 
 async def store_category_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -418,25 +427,30 @@ async def store_category_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
     cat_id = query.data.split(":", 1)[1]
     config = load_json(DATA_DIR / "config.json")
     category = next((c for c in config.get("store_categories", []) if c["id"] == cat_id), None)
+    
     if not category:
-        await query.edit_message_text("⚠️ الفئة غير موجودة.", reply_markup=kb([("🔙 إدارة المبيعات", "owner_store_section")]))
+        await query.edit_message_text("⚠️ الفئة غير موجودة.", reply_markup=kb([("🔙 المبيعات", "store_section")]))
         return
 
-    msg = f"📂 *{category['name']}*\n\n"
     services = category.get("services", [])
+    msg = f"📂 *{category['name']}*\n\n"
+    
     if services:
-        for s in services:
-            msg += f"🛒 {s['name']} - ${s['price']:.2f}\n"
+        for idx, s in enumerate(services, 1):
+            msg += f"{idx}. 🛒 {s['name']} - 💰 ${s['price']:.2f}\n"
     else:
-        msg += "لا توجد خدمات في هذه الفئة.\n"
-
+        msg += "📭 لا توجد مبيعات في هذه الفئة.\n"
+    
+    rows = [
+        [("➕ إضافة مبيعة", f"store_add_service:{cat_id}")],
+        [("🗑️ حذف مبيعة", f"store_delete_service:{cat_id}")],
+        [("🔙 المبيعات", "store_section")]
+    ]
+    
     await query.edit_message_text(
         msg,
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([
-            [("➕ إضافة خدمة", f"store_add_service:{cat_id}")],
-            [("🔙 عرض الفئات", "store_list_categories")]
-        ])
+        reply_markup=kb(*rows)
     )
 
 async def store_add_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -444,58 +458,112 @@ async def store_add_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
+    
     cat_id = query.data.split(":", 1)[1]
     context.user_data["current_category_id"] = cat_id
     context.user_data["store_action"] = "add_service_name"
-    await query.edit_message_text("✏️ أرسل اسم الخدمة:")
+    
+    await query.edit_message_text(
+        "✏️ *إضافة مبيعة جديدة*\n\n📌 الخطوة 1/2: أرسل اسم المبيعة:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([("🔙 إلغاء", f"store_category:{cat_id}")])
+    )
 
-async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ==================== DELETE SERVICE ====================
+async def store_delete_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
     if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
         return
+    
+    cat_id = query.data.split(":", 1)[1]
+    config = load_json(DATA_DIR / "config.json")
+    category = next((c for c in config.get("store_categories", []) if c["id"] == cat_id), None)
+    
+    if not category:
+        await query.edit_message_text("⚠️ الفئة غير موجودة.")
+        return
+    
+    services = category.get("services", [])
+    if not services:
+        await query.edit_message_text("📭 لا توجد مبيعات لحذفها.", reply_markup=kb([("🔙 الفئة", f"store_category:{cat_id}")]))
+        return
+    
+    rows = []
+    for s in services:
+        rows.append([(f"❌ {s['name']} - ${s['price']:.2f}", f"delete_service:{cat_id}:{s['id']}")])
+    rows.append([("🔙 الفئة", f"store_category:{cat_id}")])
+    
+    await query.edit_message_text(
+        "🗑️ *حذف مبيعة*\nاختر المبيعة للحذف:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb(*rows)
+    )
 
-    text = update.message.text.strip()
-    action = context.user_data.get("store_action")
+async def delete_service_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    parts = query.data.split(":")
+    cat_id = parts[1]
+    service_id = parts[2]
+    
+    config = load_json(DATA_DIR / "config.json")
+    for cat in config.get("store_categories", []):
+        if cat["id"] == cat_id:
+            cat["services"] = [s for s in cat["services"] if s["id"] != service_id]
+            break
+    
+    save_json(DATA_DIR / "config.json", config)
+    await query.edit_message_text(
+        "✅ تم حذف المبيعة بنجاح.",
+        reply_markup=kb([("🔙 الفئة", f"store_category:{cat_id}")])
+    )
 
-    if action == "add_category":
-        config = load_json(DATA_DIR / "config.json")
-        if "store_categories" not in config: config["store_categories"] = []
-        config["store_categories"].append({"id": str(time.time_ns()), "name": text, "services": []})
-        save_json(DATA_DIR / "config.json", config)
-        await update.message.reply_text(f"✅ تم إضافة الفئة: {text}")
-        context.user_data.pop("store_action", None)
-        await main_menu(update, context)
+# ==================== FORCED CHANNEL ====================
+async def forced_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    config = load_json(DATA_DIR / "config.json")
+    current_channel = config.get("forced_channel", "")
+    
+    await query.edit_message_text(
+        "📢 *إعدادات القناة الإجبارية*\n\n"
+        f"📌 القناة الحالية: {current_channel if current_channel else 'لا توجد'}\n\n"
+        "✏️ أرسل معرف القناة الجديدة (مثال: @my_channel):",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([
+            [("🗑️ إلغاء القناة", "remove_channel")],
+            [("🔙 إعدادات المالك", "owner_panel")]
+        ])
+    )
+    context.user_data["store_action"] = "set_channel"
 
-    elif action == "add_service_name":
-        context.user_data["store_service_name"] = text
-        context.user_data["store_action"] = "add_service_price"
-        await update.message.reply_text("💰 أرسل السعر:")
-
-    elif action == "add_service_price":
-        try:
-            price = float(text)
-            name = context.user_data["store_service_name"]
-            cat_id = context.user_data["current_category_id"]
-            
-            config = load_json(DATA_DIR / "config.json")
-            for cat in config["store_categories"]:
-                if cat["id"] == cat_id:
-                    cat["services"].append({"id": str(time.time_ns()), "name": name, "price": price})
-                    break
-            save_json(DATA_DIR / "config.json", config)
-            await update.message.reply_text(f"✅ تم إضافة الخدمة: {name} بسعر ${price:.2f}")
-            context.user_data.pop("store_action", None)
-            context.user_data.pop("store_service_name", None)
-            context.user_data.pop("current_category_id", None)
-            await main_menu(update, context)
-        except ValueError:
-            await update.message.reply_text("⚠️ يرجى إرسال رقم صحيح.")
+async def remove_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    config = load_json(DATA_DIR / "config.json")
+    config["forced_channel"] = ""
+    save_json(DATA_DIR / "config.json", config)
+    
+    await query.edit_message_text(
+        "✅ تم إلغاء القناة الإجبارية.",
+        reply_markup=kb([("🔙 إعدادات المالك", "owner_panel")])
+    )
 
 # ==================== ADD ACCOUNT FLOW ====================
 async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     SESSIONS[uid] = Session(step="email")
     
-    # ✅ جلب السعر من ملف الإعدادات
     config = load_json(DATA_DIR / "config.json")
     price = config.get("default_price", 5.0)
     
@@ -688,6 +756,84 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await add_account_step(update, context)
 
+async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        return
+
+    text = update.message.text.strip()
+    action = context.user_data.get("store_action")
+
+    if action == "add_category":
+        config = load_json(DATA_DIR / "config.json")
+        if "store_categories" not in config: 
+            config["store_categories"] = []
+        
+        # التحقق من عدم تكرار الاسم
+        if any(cat["name"].lower() == text.lower() for cat in config["store_categories"]):
+            await update.message.reply_text("⚠️ هذه الفئة موجودة مسبقاً!")
+            return
+        
+        config["store_categories"].append({
+            "id": str(time.time_ns()), 
+            "name": text, 
+            "services": []
+        })
+        save_json(DATA_DIR / "config.json", config)
+        await update.message.reply_text(f"✅ تم إضافة الفئة: {text}")
+        context.user_data.pop("store_action", None)
+        await main_menu(update, context)
+
+    elif action == "set_channel":
+        config = load_json(DATA_DIR / "config.json")
+        config["forced_channel"] = text
+        save_json(DATA_DIR / "config.json", config)
+        await update.message.reply_text(f"✅ تم تعيين القناة: {text}")
+        context.user_data.pop("store_action", None)
+        await main_menu(update, context)
+
+    elif action == "add_service_name":
+        context.user_data["store_service_name"] = text
+        context.user_data["store_action"] = "add_service_price"
+        await update.message.reply_text(
+            "💰 *الخطوة 2/2*: أرسل سعر المبيعة (رقم فقط):",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=kb([("🔙 إلغاء", f"store_category:{context.user_data.get('current_category_id')}")])
+        )
+
+    elif action == "add_service_price":
+        try:
+            price = float(text)
+            if price <= 0:
+                await update.message.reply_text("⚠️ السعر يجب أن يكون أكبر من 0!")
+                return
+                
+            name = context.user_data["store_service_name"]
+            cat_id = context.user_data["current_category_id"]
+            
+            config = load_json(DATA_DIR / "config.json")
+            for cat in config["store_categories"]:
+                if cat["id"] == cat_id:
+                    cat["services"].append({
+                        "id": str(time.time_ns()), 
+                        "name": name, 
+                        "price": price
+                    })
+                    break
+            save_json(DATA_DIR / "config.json", config)
+            
+            await update.message.reply_text(
+                f"✅ تم إضافة المبيعة بنجاح!\n"
+                f"📌 الاسم: {name}\n"
+                f"💰 السعر: ${price:.2f}"
+            )
+            context.user_data.pop("store_action", None)
+            context.user_data.pop("store_service_name", None)
+            context.user_data.pop("current_category_id", None)
+            await main_menu(update, context)
+            
+        except ValueError:
+            await update.message.reply_text("⚠️ يرجى إرسال رقم صحيح (مثال: 10.50)")
+
 # ==================== TUTORIALS ====================
 async def tutorials(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -736,6 +882,10 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "store_list_categories": await store_list_categories(update, context)
     elif data.startswith("store_category:"): await store_category_menu(update, context)
     elif data.startswith("store_add_service:"): await store_add_service(update, context)
+    elif data.startswith("store_delete_service:"): await store_delete_service(update, context)
+    elif data.startswith("delete_service:"): await delete_service_execute(update, context)
+    elif data == "forced_channel": await forced_channel(update, context)
+    elif data == "remove_channel": await remove_channel(update, context)
     elif data == "withdraw_store": await withdraw_store(update, context)
     elif data.startswith("user_category:"): await user_category_menu(update, context)
     elif data.startswith("user_buy:"): await user_buy_service(update, context)
@@ -768,9 +918,14 @@ async def owner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [("📋 الطلبات", "approval_requests")],
             [("📹 قسم الفيديوهات", "videos_section")],
             [("🛒 المبيعات", "store_section")],
+            [("📢 قناة إجبارية", "forced_channel")],
             [("🔙 القائمة الرئيسية", "main_menu")]
         ])
     )
+
+async def store_list_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Legacy function - kept for compatibility"""
+    await owner_store_section(update, context)
 
 # ==================== MAIN ====================
 def main():
