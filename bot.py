@@ -1,10 +1,9 @@
 """
 Advanced Telegram Account Manager Bot - Full Store System
-- Owner Approval System with Price
-- Wallet System (Pending & Available)
-- Store System (Games, Cards, etc.)
-- Integrated Video Tutorials (Upload & Playback)
+- Categories & Services
+- Video System (Owner Upload & User View)
 - Automatic App Password Verification
+- Wallet System
 """
 
 import asyncio
@@ -32,11 +31,9 @@ from telegram.ext import (
     filters,
 )
 
-# Load environment variables
 from dotenv import load_dotenv
 load_dotenv()
 
-# Curl_ffi for Chrome impersonation
 try:
     from curl_cffi import requests
 except ImportError:
@@ -60,12 +57,6 @@ PROXY_URL = clean_env_value("PROXY_URL")
 MANDATORY_CHANNEL = clean_env_value("MANDATORY_CHANNEL")
 DEFAULT_ACCOUNT_PRICE = float(os.environ.get("DEFAULT_ACCOUNT_PRICE", "5.0"))
 
-# Video file names (will be stored in DATA_DIR/videos)
-VIDEO_EMAIL = clean_env_value("VIDEO_EMAIL")
-VIDEO_PASSWORD = clean_env_value("VIDEO_PASSWORD")
-VIDEO_2FA = clean_env_value("VIDEO_2FA")
-VIDEO_APP_PASS = clean_env_value("VIDEO_APP_PASS")
-
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/railway/volume/data")).resolve()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -75,7 +66,6 @@ CONFIG_DB = DATA_DIR / "config.json"
 VIDEOS_DIR = DATA_DIR / "videos"
 VIDEOS_DIR.mkdir(exist_ok=True)
 
-# ==================== LOGGING ====================
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     level=logging.INFO,
@@ -118,28 +108,6 @@ def save_user(user_id: int, user_data: dict):
 def kb(*rows):
     return InlineKeyboardMarkup([[InlineKeyboardButton(b, callback_data=c) for b, c in row] for row in rows])
 
-def owner_panel_markup():
-    return kb(
-        [("💰 سعر كل حساب", "set_price")],
-        [("📋 الطلبات", "approval_requests")],
-        [("📧 جميع الايميلات", "all_emails")],
-        [("📹 قسم الفيديوهات", "videos_section")],
-        [("🛒 المبيعات", "store_section")],
-        [("🔙 القائمة الرئيسية", "main_menu")],
-    )
-
-# ==================== SESSION ====================
-@dataclass
-class Session:
-    step: str = ""
-    email: str = ""
-    password: str = ""
-    totp: str = ""
-    app_pass: str = ""
-    is_owner_pending: bool = False
-
-SESSIONS: Dict[int, Session] = {}
-
 # ==================== MAIN MENU ====================
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -159,12 +127,145 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(text, reply_markup=kb(*rows))
 
-# ==================== ADD ACCOUNT FLOW ====================
+# ==================== OWNER PANEL ====================
+async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    await query.edit_message_text(
+        "⚙️ *لوحة تحكم المالك*\n\nاختر الإعداد الذي تريد تعديله:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([
+            [("💰 سعر كل حساب", "set_price")],
+            [("📋 الطلبات", "approval_requests")],
+            [("📧 جميع الايميلات", "all_emails")],
+            [("📹 قسم الفيديوهات", "videos_section")],
+            [("🛒 قسم المبيعات", "store_section")],
+            [("🔙 القائمة الرئيسية", "main_menu")]
+        ])
+    )
+
+async def set_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    await query.edit_message_text("💰 أرسل السعر الجديد للحساب الواحد (رقم فقط):")
+    context.user_data["awaiting_price"] = True
+
+async def approval_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    users = load_json(USERS_DB)
+    msg = "📋 *طلبات الموافقة المعلقة:*\n\n"
+    found = False
+    for uid, u_data in users.items():
+        for req in u_data.get("pending_requests", []):
+            msg += f"👤 المستخدم: {uid}\n📧 {req['email']}\n🔑 {req['password']}\n🔐 {req['totp']}\n🗝 {req['app_pass']}\n\n"
+            msg += "🔽 اختر إجراءً:\n"
+            found = True
+    
+    if not found:
+        msg = "📭 لا توجد طلبات حالياً."
+        await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb([("🔙 إعدادات المالك", "owner_panel")]))
+        return
+
+    for uid, u_data in users.items():
+        for req in u_data.get("pending_requests", []):
+            await query.message.reply_text(
+                f"📋 *طلب موافقة*\n👤 المستخدم: {uid}\n📧 {req['email']}\n🔑 {req['password']}\n🔐 {req['totp']}\n🗝 {req['app_pass']}",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=kb(
+                    [("✅ قبول", f"approve:{uid}:{req['email']}")],
+                    [("❌ رفض", f"reject:{uid}:{req['email']}")]
+                )
+            )
+    
+    await query.edit_message_text("📋 *تم عرض الطلبات أعلاه.*", reply_markup=kb([("🔙 إعدادات المالك", "owner_panel")]))
+
+async def approve_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    data = query.data.split(":")
+    uid = int(data[1])
+    email = data[2]
+    
+    user_data = get_user(uid)
+    config = get_config()
+    price = config.get("default_price", DEFAULT_ACCOUNT_PRICE)
+    
+    for req in user_data.get("pending_requests", []):
+        if req["email"] == email:
+            user_data["approved_accounts"].append(req)
+            user_data["pending_balance"] = user_data.get("pending_balance", 0.0) + price
+            break
+    
+    user_data["pending_requests"] = [r for r in user_data.get("pending_requests", []) if r["email"] != email]
+    save_user(uid, user_data)
+    
+    await query.edit_message_text(
+        f"✅ تم قبول الحساب `{email}`!\n💰 تم إضافة ${price} إلى رصيد المستخدم (قيد الانتظار).",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def reject_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    data = query.data.split(":")
+    uid = int(data[1])
+    email = data[2]
+    
+    user_data = get_user(uid)
+    user_data["pending_requests"] = [r for r in user_data.get("pending_requests", []) if r["email"] != email]
+    save_user(uid, user_data)
+    
+    await query.edit_message_text(
+        f"❌ تم رفض الحساب `{email}`.\nلم يتم إضافة أي نقاط.",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def all_emails(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    users = load_json(USERS_DB)
+    msg = "📧 *جميع الإيميلات المخزنة:*\n\n"
+    found = False
+    for uid, u_data in users.items():
+        for acc in u_data.get("approved_accounts", []):
+            msg += f"📧 {acc.get('email', '')} (✅ مقبول - صاحبها: {uid})\n"
+            found = True
+    if not found:
+        msg += "📭 لا توجد إيميلات مقبولة بعد."
+    await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb([("🔙 إعدادات المالك", "owner_panel")]))
+
+# ==================== SESSION FOR ADDING ACCOUNT ====================
+@dataclass
+class Session:
+    step: str = ""
+    email: str = ""
+    password: str = ""
+    totp: str = ""
+    app_pass: str = ""
+
+SESSIONS: Dict[int, Session] = {}
+
 async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     SESSIONS[uid] = Session(step="email")
-    
-    # جلب سعر الحساب الحالي
     config = get_config()
     price = config.get("default_price", DEFAULT_ACCOUNT_PRICE)
     
@@ -240,8 +341,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif session.step == "app_pass":
         session.app_pass = text
-        
-        # ✅ التحقق التلقائي من الإيميل وكلمة مرور التطبيق
         await update.message.reply_text("🔄 جاري التحقق من صحة البيانات...")
         is_valid, message = await verify_app_password(session.email, session.app_pass)
         
@@ -252,7 +351,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        # إذا كان التحقق ناجحاً، أضف الطلب إلى قائمة المالك
         user_data = get_user(uid)
         user_data["pending_requests"].append({
             "email": session.email,
@@ -268,130 +366,7 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")])
         )
 
-# ==================== OWNER PANEL ====================
-async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    
-    await query.edit_message_text(
-        "⚙️ *لوحة تحكم المالك*\n\nاختر الإعداد الذي تريد تعديله:",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=owner_panel_markup(),
-    )
-
-async def set_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    await query.edit_message_text("💰 أرسل السعر الجديد للحساب الواحد (رقم فقط):")
-    context.user_data["awaiting_price"] = True
-
-async def approval_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    
-    users = load_json(USERS_DB)
-    msg = "📋 *طلبات الموافقة المعلقة:*\n\n"
-    found = False
-    for uid, u_data in users.items():
-        for req in u_data.get("pending_requests", []):
-            msg += f"👤 المستخدم: {uid}\n📧 {req['email']}\n🔑 {req['password']}\n🔐 {req['totp']}\n🗝 {req['app_pass']}\n\n"
-            msg += "🔽 اختر إجراءً:\n"
-            found = True
-    
-    if not found:
-        msg = "📭 لا توجد طلبات حالياً."
-        await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb([("🔙 إعدادات المالك", "owner_panel")]))
-        return
-
-    # عرض الإيميلات الأولى فقط مع أزرار القبول والرفض
-    for uid, u_data in users.items():
-        for req in u_data.get("pending_requests", []):
-            await query.message.reply_text(
-                f"📋 *طلب موافقة*\n👤 المستخدم: {uid}\n📧 {req['email']}\n🔑 {req['password']}\n🔐 {req['totp']}\n🗝 {req['app_pass']}",
-                parse_mode=ParseMode.MARKDOWN,
-                reply_markup=kb(
-                    [("✅ قبول", f"approve:{uid}:{req['email']}")],
-                    [("❌ رفض", f"reject:{uid}:{req['email']}")]
-                )
-            )
-    
-    await query.edit_message_text("📋 *تم عرض الطلبات أعلاه.*", reply_markup=kb([("🔙 إعدادات المالك", "owner_panel")]))
-
-async def approve_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    
-    data = query.data.split(":")
-    uid = int(data[1])
-    email = data[2]
-    
-    user_data = get_user(uid)
-    config = get_config()
-    price = config.get("default_price", DEFAULT_ACCOUNT_PRICE)
-    
-    # إضافة الحساب إلى القائمة المقبولة
-    for req in user_data.get("pending_requests", []):
-        if req["email"] == email:
-            user_data["approved_accounts"].append(req)
-            user_data["pending_balance"] = user_data.get("pending_balance", 0.0) + price
-            break
-    
-    # إزالة الطلب من قائمة المعلقة
-    user_data["pending_requests"] = [r for r in user_data.get("pending_requests", []) if r["email"] != email]
-    save_user(uid, user_data)
-    
-    await query.edit_message_text(
-        f"✅ تم قبول الحساب `{email}`!\n💰 تم إضافة ${price} إلى رصيد المستخدم (قيد الانتظار).",
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-async def reject_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    
-    data = query.data.split(":")
-    uid = int(data[1])
-    email = data[2]
-    
-    user_data = get_user(uid)
-    
-    # إزالة الطلب من قائمة المعلقة (بدون إضافة نقاط)
-    user_data["pending_requests"] = [r for r in user_data.get("pending_requests", []) if r["email"] != email]
-    save_user(uid, user_data)
-    
-    await query.edit_message_text(
-        f"❌ تم رفض الحساب `{email}`.\nلم يتم إضافة أي نقاط.",
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-async def all_emails(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    
-    users = load_json(USERS_DB)
-    msg = "📧 *جميع الإيميلات المخزنة:*\n\n"
-    found = False
-    for uid, u_data in users.items():
-        for acc in u_data.get("approved_accounts", []):
-            msg += f"📧 {acc.get('email', '')} (✅ مقبول - صاحبها: {uid})\n"
-            found = True
-    if not found:
-        msg += "📭 لا توجد إيميلات مقبولة بعد."
-    await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb([("🔙 إعدادات المالك", "owner_panel")]))
-
-# ==================== VIDEO SYSTEM (OWNER UPLOAD & USER VIEW) ====================
+# ==================== VIDEO SYSTEM ====================
 async def videos_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
@@ -438,13 +413,10 @@ async def handle_video_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
     else:
         await update.message.reply_text("⚠️ يرجى إرسال فيديو صحيح.")
 
-# ==================== TUTORIALS (USER VIEW) ====================
 async def tutorials_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     config = get_config()
     rows = []
-    
-    # قم ببناء قائمة الفيديوهات بناءً على ما تم رفعه في config
     if config.get("video_email"):
         rows.append([("📹 طريقة انشاء ايميل", "play_video:email")])
     if config.get("video_password"):
@@ -453,11 +425,9 @@ async def tutorials_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rows.append([("📹 طريقة إضافة رمز مصادقة ثنائية", "play_video:totp")])
     if config.get("video_app_pass"):
         rows.append([("📹 طريقة الحصول على كلمة مرور التطبيق", "play_video:app_pass")])
-    
     if not rows:
         await query.edit_message_text("📺 لا توجد فيديوهات تعليمية متاحة حالياً.", reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")]))
         return
-    
     rows.append([("🔙 القائمة الرئيسية", "main_menu")])
     await query.edit_message_text("📺 *اختر الدرس التعليمي:*", parse_mode=ParseMode.MARKDOWN, reply_markup=kb(*rows))
 
@@ -472,6 +442,248 @@ async def play_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await query.edit_message_text("⚠️ الفيديو غير موجود.", reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")]))
 
+# ==================== STORE SYSTEM (CATEGORIES & SERVICES) ====================
+async def owner_store_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    await query.edit_message_text(
+        "🛒 *إدارة المبيعات*\n\nاختر إجراءً:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([
+            [("➕ إضافة فئة", "store_add_category")],
+            [("📋 عرض الفئات", "store_list_categories")],
+            [("🔙 إعدادات المالك", "owner_panel")]
+        ])
+    )
+
+async def store_add_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    await query.edit_message_text("✏️ أرسل اسم الفئة الجديدة (مثال: شدات ببجي):")
+    context.user_data["store_action"] = "add_category"
+
+async def store_list_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    config = get_config()
+    categories = config.get("store_categories", [])
+    if not categories:
+        await query.edit_message_text("📭 لا توجد فئات مضافة.", reply_markup=kb([("🔙 إدارة المبيعات", "owner_store_section")]))
+        return
+    
+    msg = "📋 *الفئات الموجودة:*\n\n"
+    rows = []
+    for cat in categories:
+        msg += f"📂 {cat['name']}\n"
+        rows.append([(f"📂 {cat['name']}", f"store_category:{cat['id']}")])
+    rows.append([("🔙 إدارة المبيعات", "owner_store_section")])
+    
+    await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb(*rows))
+
+async def store_category_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    cat_id = query.data.split(":", 1)[1]
+    context.user_data["current_category_id"] = cat_id
+    
+    config = get_config()
+    category = None
+    for cat in config.get("store_categories", []):
+        if cat["id"] == cat_id:
+            category = cat
+            break
+    
+    if not category:
+        await query.edit_message_text("⚠️ الفئة غير موجودة.", reply_markup=kb([("🔙 عرض الفئات", "store_list_categories")]))
+        return
+    
+    msg = f"📂 *{category['name']}*\n\n"
+    services = category.get("services", [])
+    if services:
+        for s in services:
+            msg += f"🛒 {s['name']} - ${s['price']:.2f}\n"
+    else:
+        msg += "لا توجد خدمات في هذه الفئة.\n"
+    
+    await query.edit_message_text(
+        msg,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([
+            [("➕ إضافة خدمة", f"store_add_service:{cat_id}")],
+            [("🔙 عرض الفئات", "store_list_categories")]
+        ])
+    )
+
+async def store_add_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    cat_id = query.data.split(":", 1)[1]
+    context.user_data["current_category_id"] = cat_id
+    context.user_data["store_action"] = "add_service_name"
+    await query.edit_message_text("✏️ أرسل اسم الخدمة (مثال: 60 شدات):")
+
+async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        return
+    
+    text = update.message.text.strip()
+    action = context.user_data.get("store_action")
+    
+    if action == "add_category":
+        config = get_config()
+        if "store_categories" not in config:
+            config["store_categories"] = []
+        new_cat = {
+            "id": str(time.time_ns()),
+            "name": text,
+            "services": []
+        }
+        config["store_categories"].append(new_cat)
+        save_config(config)
+        await update.message.reply_text(f"✅ تم إضافة الفئة: {text}")
+        context.user_data.pop("store_action", None)
+        await main_menu(update, context)
+        
+    elif action == "add_service_name":
+        context.user_data["store_service_name"] = text
+        context.user_data["store_action"] = "add_service_price"
+        await update.message.reply_text("💰 أرسل سعر الخدمة (رقم فقط):")
+        
+    elif action == "add_service_price":
+        try:
+            price = float(text)
+            name = context.user_data.get("store_service_name")
+            cat_id = context.user_data.get("current_category_id")
+            
+            config = get_config()
+            for cat in config.get("store_categories", []):
+                if cat["id"] == cat_id:
+                    if "services" not in cat:
+                        cat["services"] = []
+                    cat["services"].append({
+                        "id": str(time.time_ns()),
+                        "name": name,
+                        "price": price
+                    })
+                    break
+            save_config(config)
+            await update.message.reply_text(f"✅ تم إضافة الخدمة: {name} بسعر ${price:.2f}")
+            context.user_data.pop("store_action", None)
+            context.user_data.pop("store_service_name", None)
+            context.user_data.pop("current_category_id", None)
+            await main_menu(update, context)
+        except ValueError:
+            await update.message.reply_text("⚠️ يرجى إرسال رقم صحيح.")
+
+# ==================== USER WITHDRAW STORE ====================
+async def withdraw_store(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    config = get_config()
+    categories = config.get("store_categories", [])
+    
+    if not categories:
+        await query.edit_message_text("🛒 *قسم السحب*\n\nلا توجد فئات متاحة حالياً.", reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")]))
+        return
+    
+    rows = []
+    for cat in categories:
+        rows.append([(f"📂 {cat['name']}", f"user_category:{cat['id']}")])
+    rows.append([("🔙 القائمة الرئيسية", "main_menu")])
+    
+    await query.edit_message_text(
+        "🛒 *قسم السحب*\nاختر الفئة التي تريد الشراء منها:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb(*rows)
+    )
+
+async def user_category_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    cat_id = query.data.split(":", 1)[1]
+    
+    config = get_config()
+    category = None
+    for cat in config.get("store_categories", []):
+        if cat["id"] == cat_id:
+            category = cat
+            break
+    
+    if not category:
+        await query.edit_message_text("⚠️ الفئة غير موجودة.", reply_markup=kb([("🔙 قسم السحب", "withdraw_store")]))
+        return
+    
+    services = category.get("services", [])
+    if not services:
+        await query.edit_message_text("📭 لا توجد خدمات في هذه الفئة.", reply_markup=kb([("🔙 قسم السحب", "withdraw_store")]))
+        return
+    
+    rows = []
+    for s in services:
+        rows.append([(f"🛒 {s['name']} - ${s['price']:.2f}", f"user_buy:{s['id']}:{cat_id}")])
+    rows.append([("🔙 قسم السحب", "withdraw_store")])
+    
+    await query.edit_message_text(
+        f"📂 *{category['name']}*\nاختر الخدمة للشراء:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb(*rows)
+    )
+
+async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    parts = query.data.split(":")
+    service_id = parts[1]
+    cat_id = parts[2]
+    user_id = query.from_user.id
+    
+    config = get_config()
+    service = None
+    for cat in config.get("store_categories", []):
+        if cat["id"] == cat_id:
+            for s in cat.get("services", []):
+                if s["id"] == service_id:
+                    service = s
+                    break
+            break
+    
+    if not service:
+        await query.edit_message_text("⚠️ الخدمة غير موجودة.", reply_markup=kb([("🔙 قسم السحب", "withdraw_store")]))
+        return
+    
+    user_data = get_user(user_id)
+    balance = user_data.get("balance", 0.0)
+    price = service["price"]
+    
+    if balance < price:
+        await query.edit_message_text(f"❌ رصيدك غير كافٍ. لديك ${balance:.2f}، والخدمة تكلف ${price:.2f}.", reply_markup=kb([("🔙 قسم السحب", "withdraw_store")]))
+        return
+    
+    # خصم الرصيد وشراء الخدمة
+    user_data["balance"] = balance - price
+    save_user(user_id, user_data)
+    
+    await query.edit_message_text(
+        f"✅ تم شراء الخدمة بنجاح!\n🛒 {service['name']}\n💰 تم خصم ${price:.2f}\n📦 سيتم توفير الخدمة قريباً (تواصل مع المالك).",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")])
+    )
+    # إشعار للمالك
+    await context.bot.send_message(
+        chat_id=OWNER_ID,
+        text=f"🛒 *طلب شراء جديد*\n👤 المستخدم: {user_id}\n🛒 الخدمة: {service['name']}\n💰 السعر: ${price:.2f}"
+    )
+
 # ==================== MY WALLET ====================
 async def my_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -482,134 +694,31 @@ async def my_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💰 *أموالي*\n\n"
         f"⏳ الأموال قيد الانتظار: ${pending:.2f}\n"
         f"✅ الأموال المستلمة: ${available:.2f}\n\n"
-        f"عندما يوافق المالك على حساباتك، تنتقل الأموال إلى الرصيد المستلم.",
+        f"عندما يوافق المالك على حساباتك، تنتقل الأموال إلى الرصيد المستلم.\n"
+        f"يمكنك استخدام الرصيد المستلم لشراء الخدمات من قسم السحب.",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=kb([("🛒 سحب", "withdraw_store"), ("🔙 القائمة الرئيسية", "main_menu")])
     )
 
-# ==================== WITHDRAW STORE ====================
-async def withdraw_store(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ==================== MY ACCOUNTS ====================
+async def my_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    # جلب المنتجات من الكونفيج
-    config = get_config()
-    store_items = config.get("store_items", [])
-    
-    if not store_items:
-        # إذا لم تكن هناك منتجات، عرض رسالة
-        await query.edit_message_text(
-            "🛒 *قسم السحب*\n\nلا توجد منتجات متاحة حالياً.",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")])
-        )
-        return
-    
-    rows = []
-    for item in store_items:
-        rows.append([(f"{item['name']} - ${item['price']}", f"buy_store:{item['id']}")])
-    rows.append([("🔙 القائمة الرئيسية", "main_menu")])
-    
-    await query.edit_message_text(
-        "🛒 *قسم السحب*\nاختر الخدمة التي تريد شراءها:",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb(*rows)
-    )
-
-# ==================== OWNER STORE MANAGEMENT ====================
-async def owner_store_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    
-    await query.edit_message_text(
-        "🛒 *إدارة المبيعات*\n\n"
-        "اختر إجراءً:",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([
-            [("➕ إضافة منتج", "store_add")],
-            [("📋 عرض المنتجات", "store_list")],
-            [("🔙 إعدادات المالك", "owner_panel")]
-        ])
-    )
-
-async def store_add_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    
-    await query.edit_message_text("📝 أرسل اسم الخدمة (مثال: شدات ببجي):")
-    context.user_data["store_action"] = "add_product_name"
-
-async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        return
-    
-    text = update.message.text.strip()
-    action = context.user_data.get("store_action")
-    
-    if action == "add_product_name":
-        context.user_data["store_product_name"] = text
-        context.user_data["store_action"] = "add_product_price"
-        await update.message.reply_text("💰 أرسل سعر الخدمة (رقم فقط):")
-        
-    elif action == "add_product_price":
-        try:
-            price = float(text)
-            name = context.user_data.get("store_product_name")
-            
-            config = get_config()
-            if "store_items" not in config:
-                config["store_items"] = []
-            
-            new_item = {
-                "id": str(time.time_ns()),
-                "name": name,
-                "price": price
-            }
-            config["store_items"].append(new_item)
-            save_config(config)
-            
-            await update.message.reply_text(f"✅ تم إضافة المنتج: {name} بسعر ${price:.2f}")
-            context.user_data.pop("store_action", None)
-            context.user_data.pop("store_product_name", None)
-            await main_menu(update, context)
-        except ValueError:
-            await update.message.reply_text("⚠️ يرجى إرسال رقم صحيح.")
-
-async def store_list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    
-    config = get_config()
-    items = config.get("store_items", [])
-    
-    if not items:
-        await query.edit_message_text("📭 لا توجد منتجات مضافة.", reply_markup=kb([("🔙 إدارة المبيعات", "owner_store_section")]))
-        return
-    
-    msg = "📋 *قائمة المنتجات:*\n\n"
-    for item in items:
-        msg += f"🛒 {item['name']} - ${item['price']:.2f}\n"
-    
-    await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb([("🔙 إدارة المبيعات", "owner_store_section")]))
+    user = get_user(query.from_user.id)
+    accs = user.get("approved_accounts", [])
+    if not accs:
+        await query.edit_message_text("📭 لا توجد حسابات لديك بعد.")
+    else:
+        msg = "📋 *حساباتك:*\n"
+        for a in accs:
+            msg += f"📧 `{a.get('email', '')}`\n"
+        await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")]))
 
 # ==================== VERIFICATION LOGIC ====================
 async def verify_app_password(email: str, app_pass: str) -> Tuple[bool, str]:
-    """
-    التحقق من صحة الإيميل وكلمة مرور التطبيق باستخدام smtp عبر البروكسي (إذا كان متاحاً)
-    أو مباشرة باستخدام curl_cffi.
-    """
-    # إذا كان البروكسي متاحاً، استخدمه للتحقق
     if PROXY_URL:
         try:
-            # هنا سنستخدم مكتبة curl_cffi مع البروكسي لمحاكاة طلب حقيقي
-            # لكن للتبسيط، سنقوم بفحص SMTP
             import smtplib
             import ssl
-            
             domain = email.split("@")[1]
             smtp_server = f"smtp.{domain}"
             if "gmail" in domain:
@@ -617,31 +726,47 @@ async def verify_app_password(email: str, app_pass: str) -> Tuple[bool, str]:
             elif "yahoo" in domain:
                 smtp_server = "smtp.mail.yahoo.com"
             else:
-                # محاولة عامة
                 smtp_server = f"smtp.{domain}"
-            
-            # محاولة الاتصال بخادم SMTP (فحص سريع)
-            # (في الواقع، التحقق من كلمة المرور يتطلب الاتصال بالخادم وتجربة تسجيل الدخول)
-            # سنقوم بمحاكاة التحقق هنا.
-            logger.info(f"Verifying {email} with proxy {PROXY_URL}")
-            
-            # سنقوم باختبار الاتصال بخادم SMTP
-            try:
-                context = ssl.create_default_context()
-                with smtplib.SMTP_SSL(smtp_server, 465, context=context, timeout=10) as server:
-                    server.login(email, app_pass)
-                return True, "✅ الإيميل وكلمة المرور صحيحة."
-            except smtplib.SMTPAuthenticationError:
-                return False, "❌ كلمة المرور غير صحيحة."
-            except Exception as e:
-                return False, f"❌ فشل التحقق: {e}"
+            context = ssl.create_default_context()
+            with smtplib.SMTP_SSL(smtp_server, 465, context=context, timeout=10) as server:
+                server.login(email, app_pass)
+            return True, "✅ الإيميل وكلمة المرور صحيحة."
+        except smtplib.SMTPAuthenticationError:
+            return False, "❌ كلمة المرور غير صحيحة."
         except Exception as e:
-            logger.error(f"Verification error: {e}")
-            return False, f"❌ فشل الاتصال بالخادم: {e}"
+            return False, f"❌ فشل التحقق: {e}"
     else:
-        # بدون بروكسي، سيكون التحقق سريعاً (لن نتحقق من صحة كلمة المرور)
-        # وبدلاً من ذلك، سنعتمد على أن المستخدم قد أدخل البيانات.
+        # بدون بروكسي، نقبل البيانات ونتحقق لاحقاً
         return True, "✅ (بدون بروكسي) تم استلام البيانات."
+
+# ==================== DEBUG COMMANDS ====================
+async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    await update.message.reply_text(
+        "🔎 *تشخيص البوت*\n\n"
+        f"🆔 رقم حسابك: `{user_id}`\n"
+        f"👑 رقم المالك المقروء: `{OWNER_ID}`\n"
+        f"✅ أنت المالك: {'نعم' if user_id == OWNER_ID else 'لا'}\n\n"
+        "إذا كان رقم المالك 0 أو مختلفاً، عدّل OWNER_TELEGRAM_ID في Railway.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+async def owner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("🚫 هذا الأمر للمالك فقط.")
+        return
+    await update.message.reply_text(
+        "⚙️ *لوحة تحكم المالك*\n\nاختر الإعداد الذي تريد تعديله:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([
+            [("💰 سعر كل حساب", "set_price")],
+            [("📋 الطلبات", "approval_requests")],
+            [("📧 جميع الايميلات", "all_emails")],
+            [("📹 قسم الفيديوهات", "videos_section")],
+            [("🛒 قسم المبيعات", "store_section")],
+            [("🔙 القائمة الرئيسية", "main_menu")]
+        ])
+    )
 
 # ==================== ROUTER ====================
 async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -662,17 +787,20 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == "my_wallet":
             await my_wallet(update, context)
         elif data == "my_accounts":
-            user = get_user(query.from_user.id)
-            accs = user.get("approved_accounts", [])
-            if not accs:
-                await query.edit_message_text("📭 لا توجد حسابات لديك بعد.")
-            else:
-                msg = "📋 *حساباتك:*\n"
-                for a in accs:
-                    msg += f"📧 `{a.get('email', '')}`\n"
-                await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")]))
+            await my_accounts(update, context)
         elif data == "tutorials":
             await tutorials_menu(update, context)
+        elif data.startswith("tutorial_"):
+            # For tutorial buttons inside add account flow
+            vtype = data.split("_", 1)[1]
+            config = get_config()
+            path = config.get(f"video_{vtype}")
+            if path and Path(path).exists():
+                await query.edit_message_text("📤 جاري إرسال الفيديو...")
+                await context.bot.send_video(chat_id=query.from_user.id, video=open(path, "rb"))
+            else:
+                await query.edit_message_text("⚠️ الفيديو غير موجود.", reply_markup=kb([("❌ إلغاء", "cancel")]))
+            return
         elif data.startswith("play_video:"):
             await play_video(update, context)
         elif data == "owner_panel":
@@ -691,14 +819,22 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await videos_section(update, context)
         elif data.startswith("set_video:"):
             await set_video_callback(update, context)
+        elif data == "store_section":
+            await owner_store_section(update, context)
+        elif data == "store_add_category":
+            await store_add_category(update, context)
+        elif data == "store_list_categories":
+            await store_list_categories(update, context)
+        elif data.startswith("store_category:"):
+            await store_category_menu(update, context)
+        elif data.startswith("store_add_service:"):
+            await store_add_service(update, context)
         elif data == "withdraw_store":
             await withdraw_store(update, context)
-        elif data == "owner_store_section":
-            await owner_store_section(update, context)
-        elif data == "store_add":
-            await store_add_product(update, context)
-        elif data == "store_list":
-            await store_list_products(update, context)
+        elif data.startswith("user_category:"):
+            await user_category_menu(update, context)
+        elif data.startswith("user_buy:"):
+            await user_buy_service(update, context)
         else:
             await query.edit_message_text("⚠️ خيار غير معروف.", reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")]))
     except BadRequest:
@@ -727,7 +863,6 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ يرجى إرسال رقم صحيح.")
         return
     
-    # التعامل مع إدخال المالك لإضافة منتج
     if context.user_data.get("store_action"):
         await handle_store_input(update, context)
         return
@@ -735,29 +870,7 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await add_account_step(update, context)
 
 # ==================== VIDEO UPLOAD HANDLER ====================
-# تم دمجه مع دوال الفيديو أعلاه
-
-# ==================== DEBUG COMMANDS ====================
-async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    await update.message.reply_text(
-        "🔎 *تشخيص البوت*\n\n"
-        f"🆔 رقم حسابك: `{user_id}`\n"
-        f"👑 رقم المالك المقروء: `{OWNER_ID}`\n"
-        f"✅ أنت المالك: {'نعم' if user_id == OWNER_ID else 'لا'}\n\n"
-        "إذا كان رقم المالك 0 أو مختلفاً، عدّل OWNER_TELEGRAM_ID في Railway.",
-        parse_mode=ParseMode.MARKDOWN,
-    )
-
-async def owner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("🚫 هذا الأمر للمالك فقط.")
-        return
-    await update.message.reply_text(
-        "⚙️ *لوحة تحكم المالك*\n\nاختر الإعداد الذي تريد تعديله:",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=owner_panel_markup(),
-    )
+# We defined handle_video_upload earlier, and it's added in main as a handler
 
 # ==================== MAIN ====================
 def main():
