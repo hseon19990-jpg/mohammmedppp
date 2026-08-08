@@ -164,6 +164,8 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # إذا كان المستخدم هو المالك، أضف زر إعدادات المالك
     if user.id == OWNER_ID:
         rows.append([("⚙️ إعدادات المالك", "owner_panel")])
+    if is_admin(user.id):
+        rows.append([("🛠️ لوحة الأدمن", "admin_panel")])
     
     text = "👋 مرحباً بك في متجر الحسابات!\nاختر من القائمة أدناه:"
     
@@ -396,6 +398,12 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text("⚠️ الفيديو غير موجود.", reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")]))
         elif data == "owner_panel":
             await owner_panel(update, context)
+        elif data == "admin_panel":
+            await admin_panel(update, context)
+        elif data == "admin_stats":
+            await admin_stats_callback(update, context)
+        elif data == "admin_list":
+            await admin_list_callback(update, context)
         elif data == "set_price":
             if query.from_user.id != OWNER_ID:
                 await query.answer("🚫 مالك فقط.", show_alert=True)
@@ -516,6 +524,68 @@ async def show_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.MARKDOWN,
         )
 
+async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يعرض تشخيص الصلاحيات دون كشف أي سر."""
+    user_id = update.effective_user.id
+    await update.message.reply_text(
+        "🔎 *تشخيص البوت*\n\n"
+        f"🆔 رقم حسابك: `{user_id}`\n"
+        f"👑 رقم المالك المقروء: `{OWNER_ID}`\n"
+        f"✅ أنت المالك: {'نعم' if user_id == OWNER_ID else 'لا'}\n"
+        f"🛠️ أنت أدمن: {'نعم' if is_admin(user_id) else 'لا'}\n\n"
+        "إذا كان رقم المالك 0 أو مختلفاً عن رقم حسابك، عدّل OWNER_TELEGRAM_ID في Railway.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id not in ADMINS:
+        await query.answer("🚫 هذا القسم للمشرفين فقط.", show_alert=True)
+        return
+    await query.edit_message_text(
+        "🛠️ *لوحة تحكم الأدمن*\n\nاختر إجراءً:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb(
+            [("📊 الإحصائيات", "admin_stats")],
+            [("📋 قائمة الأدمن", "admin_list")],
+            [("🔙 القائمة الرئيسية", "main_menu")],
+        ),
+    )
+
+async def admin_stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not is_admin(query.from_user.id):
+        await query.answer("🚫 هذا القسم للمشرفين فقط.", show_alert=True)
+        return
+    users = load_json(USERS_DB)
+    total_requests = sum(len(item.get("pending_requests", [])) for item in users.values())
+    total_approved = sum(len(item.get("approved_accounts", [])) for item in users.values())
+    await query.edit_message_text(
+        f"📊 *إحصائيات البوت:*\n\n"
+        f"👥 عدد المستخدمين: {len(users)}\n"
+        f"📥 طلبات معلقة: {total_requests}\n"
+        f"✅ حسابات مقبولة: {total_approved}",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([("🔙 لوحة الأدمن", "admin_panel")]),
+    )
+
+async def admin_list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not is_admin(query.from_user.id):
+        await query.answer("🚫 هذا القسم للمشرفين فقط.", show_alert=True)
+        return
+    message = "📋 *قائمة الأدمن الحاليين:*\n" + "\n".join(
+        f"👤 `{admin_id}`" for admin_id in sorted(ADMINS)
+    )
+    await query.edit_message_text(
+        message,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([("🔙 لوحة الأدمن", "admin_panel")]),
+    )
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.exception("Unhandled update error", exc_info=context.error)
+
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """أمر /admin للمالك والأدمن"""
     user_id = update.effective_user.id
@@ -621,6 +691,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", main_menu))
     app.add_handler(CommandHandler("id", show_user_id))
+    app.add_handler(CommandHandler("debug", debug_command))
     
     # ✅ تم إضافة هذا السطر ليدعم الأمر /Admin و /admin معاً
     app.add_handler(CommandHandler(["admin", "Admin"], admin_command))
@@ -632,6 +703,7 @@ def main():
     app.add_handler(CallbackQueryHandler(router))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_input))
     app.add_handler(MessageHandler(filters.VIDEO, handle_video_upload))
+    app.add_error_handler(error_handler)
     app.run_polling()
 
 if __name__ == "__main__":
