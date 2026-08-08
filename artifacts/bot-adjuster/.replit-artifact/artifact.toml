@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Bot Adjuster"
+description = "An Arabic-first account operations workspace inspired by the Bot Adjuster Telegram workflow. Lets an owner add accounts, inspect stored credentials, edit account fields, and run email verification checks from a focused dashboard."
+version = "1.0.0"
+id = "artifacts/bot-adjuster"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 23816
+
+[services.development]
+run = "pnpm --filter @workspace/bot-adjuster run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/bot-adjuster", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/bot-adjuster/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "23816"
+BASE_PATH = "/"
