@@ -140,69 +140,61 @@ async def verify_email_with_telethon(email: str, password: str = None) -> tuple[
         return False, f"❌ Telethon error: {e}"
 
 
-def verify_email_with_smtp(email: str, app_password: str = None) -> tuple[bool, str]:
+def check_email_format(email: str) -> bool:
+    """
+    🚀 تحقق سريع جداً (أقل من ثانية) من صيغة الإيميل ومن أن النطاق مدعوم.
+    هذا يمنع التأخير الناتج عن الاتصال بخوادم البريد.
+    """
+    # التحقق من الصيغة
+    if not re.match(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", email):
+        return False
+        
+    # التحقق من أن النطاق مدعوم في قائمتنا
+    domain = email.split("@", 1)[1].lower() if "@" in email else ""
+    return domain in SMTP_CONFIGS
+
+
+async def verify_email_exists(email: str) -> tuple[bool, str]:
+    """
+    تم تعديل هذه الدالة للتحقق السريع جداً (فحص الصيغة والنطاق فقط).
+    """
+    # فحص سريع للصيغة والنطاق
+    if not check_email_format(email):
+        return False, "❌ صيغة الإيميل غير صحيحة أو النطاق غير مدعوم"
+
+    # إذا نجح الفحص السريع، نقبل الإيميل (التحقق الحقيقي سيكون عند كلمة المرور)
+    return True, "✅ صيغة الإيميل صحيحة (سيتم التحقق من البيانات في الخطوة التالية)"
+
+
+def verify_email_credentials_sync(email: str, app_password: str) -> tuple[bool, str]:
     """Verify email credentials using SMTP."""
     domain = email.split("@", 1)[1].lower() if "@" in email else ""
     config = SMTP_CONFIGS.get(domain)
     if not config:
         return False, f"⚠️ نوع البريد غير مدعوم للتحقق التلقائي\n({domain})"
-
     host, port, secure = config
     try:
         # ============================================================
-        # ✅ التعديل المهم لحل مشكلة Network [Errno 101]
-        # سنقوم بتغيير المنفذ 587 إلى 465 (منفذ SSL الآمن)
-        # لكي يعمل الاتصال بخوادم البريد داخل بيئة Railway
+        # ✅ إصلاح المنفذ ليعمل على Railway
         # ============================================================
         if port == 587:
             port = 465
-            secure = True  # تأكيد استخدام الاتصال الآمن
+            secure = True
 
         if secure:
             server = smtplib.SMTP_SSL(
-                host, port, timeout=15, context=ssl.create_default_context()
+                host, port, timeout=10, context=ssl.create_default_context()
             )
         else:
-            server = smtplib.SMTP(host, port, timeout=15)
+            server = smtplib.SMTP(host, port, timeout=10)
             server.starttls(context=ssl.create_default_context())
-        
         with server:
-            # Just try to connect, don't login
-            # This verifies the email domain exists
-            server.helo()
-            return True, "✅ الإيميل صحيح (تم التحقق من النطاق)"
-    except smtplib.SMTPServerDisconnected:
-        return True, "✅ الإيميل صحيح (تم التحقق من النطاق)"
+            server.login(email, app_password)
+        return True, "✅ بيانات الاعتماد صحيحة"
+    except smtplib.SMTPAuthenticationError:
+        return False, "❌ إيميل أو كلمة مرور التطبيق غير صحيحة"
     except Exception as exc:
-        return False, f"❌ فشل التحقق: {exc}"
-
-
-async def verify_email_exists(email: str) -> tuple[bool, str]:
-    """
-    Verify email existence using both SMTP and Telethon.
-    Returns (is_valid, message)
-    """
-    # First, check if it's a valid email format
-    if not re.match(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", email):
-        return False, "❌ صيغة الإيميل غير صحيحة"
-
-    # Try SMTP verification first
-    smtp_result, smtp_message = verify_email_with_smtp(email)
-    if smtp_result:
-        logger.info(f"✅ SMTP verification passed for {email}")
-        return True, smtp_message
-
-    # If SMTP fails, try Telethon (if available)
-    if API_ID and API_HASH:
-        telethon_result, telethon_message = await verify_email_with_telethon(email)
-        if telethon_result:
-            logger.info(f"✅ Telethon verification passed for {email}")
-            return True, telethon_message
-        else:
-            logger.warning(f"❌ Telethon verification failed for {email}: {telethon_message}")
-
-    # If both fail, return the SMTP message
-    return False, smtp_message
+        return False, f"❌ فشل الاتصال بالخادم: {exc}"
 
 
 # ============================================================
@@ -415,7 +407,7 @@ async def start_command(
         context,
         "👋 مرحباً بك في بوت إدارة الحسابات\n\n"
         "🔒 يتم حفظ البيانات في ملف التخزين المحلي للبوت.\n"
-        "✅ يتم التحقق من الإيميلات فوراً عند الإضافة.",
+        "🚀 التحقق فوري (أقل من ثانية).",
     )
 
 
@@ -434,7 +426,7 @@ async def start_add_flow(
     await update.effective_message.reply_text(
         "📝 *إضافة حساب جديد*\n\n"
         "📧 الخطوة 1/5 — أرسل الإيميل:\n"
-        "_سيتم التحقق من صحة الإيميل فوراً_",
+        "_سيتم التحقق من الصيغة فوراً (أقل من ثانية)_",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=cancel_keyboard(),
     )
@@ -470,7 +462,7 @@ async def handle_add_step(
     pending = state.pending_account
 
     if state.step == "add_email":
-        # ✅ التحقق من الإيميل فوراً
+        # ✅ فحص فوري وسريع جداً
         is_valid, message = await verify_email_exists(text)
         if not is_valid:
             await update.effective_message.reply_text(
@@ -480,19 +472,37 @@ async def handle_add_step(
             )
             return
         
-        # الإيميل صحيح
+        # الإيميل صحيح الشكل
         pending["email"] = text
         state.step = "add_password"
         await update.effective_message.reply_text(
             f"✅ {message}\n\n"
-            "🔑 الخطوة 2/5 — أرسل كلمة المرور:",
+            "🔑 الخطوة 2/5 — أرسل كلمة مرور التطبيق (App Password) للتحقق من صحة الحساب:",
             reply_markup=cancel_keyboard(),
         )
         
     elif state.step == "add_password":
+        # ✅ هنا يتم التحقق الحقيقي من بيانات الدخول (قد يستغرق 2-3 ثوانٍ، وهذا طبيعي)
+        await update.effective_message.reply_text("🔄 جاري التحقق من كلمة المرور...")
+        
+        is_valid, message = await asyncio.to_thread(
+            verify_email_credentials_sync, pending["email"], text
+        )
+        
+        if not is_valid:
+            await update.effective_message.reply_text(
+                f"❌ {message}\n\n"
+                "يرجى المحاولة مرة أخرى أو إلغاء العملية.",
+                reply_markup=cancel_keyboard(),
+            )
+            # نعيد الخطوة لكي يحاول مجدداً
+            state.step = "add_password"
+            return
+        
         pending["password"] = text
         state.step = "add_totp"
         await update.effective_message.reply_text(
+            f"✅ {message}\n\n"
             "🔐 الخطوة 3/5 — أرسل مفتاح المصادقة الثنائية *(Secret Key)*\n\n"
             "_هو المفتاح الذي تحصل عليه عند إعداد التحقق بخطوتين، وليس الكود المؤقت_",
             parse_mode=ParseMode.MARKDOWN,
@@ -512,7 +522,7 @@ async def handle_add_step(
             f"✅ مفتاح المصادقة صالح!\n\n"
             f"🔢 *الكود الحالي:* `{generate_totp(secret)}`\n"
             f"⏱ ينتهي خلال {remaining_seconds()} ثانية\n\n"
-            "🗝 الخطوة 4/5 — أرسل كلمة مرور التطبيق *(App Password)*:",
+            "🗝 الخطوة 4/5 — أرسل كلمة مرور التطبيق *(App Password)* (إذا كنت تستخدم نفس الكلمة السابقة يمكنك تخطيها):",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=keyboard(
                 [("⏭ تخطي", "skip_app_password"), ("❌ إلغاء", "cancel")]
@@ -801,37 +811,6 @@ async def handle_delete_yes(
     else:
         await query.message.reply_text("⚠️ لم يتم العثور على الحساب.")
     await send_main_menu(update, context)
-
-
-def verify_email_credentials_sync(email: str, app_password: str) -> tuple[bool, str]:
-    """Verify email credentials using SMTP."""
-    domain = email.split("@", 1)[1].lower() if "@" in email else ""
-    config = SMTP_CONFIGS.get(domain)
-    if not config:
-        return False, f"⚠️ نوع البريد غير مدعوم للتحقق التلقائي\n({domain})"
-    host, port, secure = config
-    try:
-        # ============================================================
-        # ✅ نفس التعديل هنا أيضاً لكي يعمل التحقق من كلمة المرور
-        # ============================================================
-        if port == 587:
-            port = 465
-            secure = True
-
-        if secure:
-            server = smtplib.SMTP_SSL(
-                host, port, timeout=15, context=ssl.create_default_context()
-            )
-        else:
-            server = smtplib.SMTP(host, port, timeout=15)
-            server.starttls(context=ssl.create_default_context())
-        with server:
-            server.login(email, app_password)
-        return True, "✅ بيانات الاعتماد صحيحة"
-    except smtplib.SMTPAuthenticationError:
-        return False, "❌ إيميل أو كلمة مرور التطبيق غير صحيحة"
-    except Exception as exc:
-        return False, f"❌ فشل الاتصال: {exc}"
 
 
 async def handle_verify_list(
