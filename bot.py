@@ -43,8 +43,13 @@ except ImportError:
 # ==================== CONFIGURATION ====================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 
-# 👑 تم تثبيت معرف المالك هنا مباشرةً (لا يحتاج متغيرات)
-OWNER_ID = 5957783780
+# ✅ تم تعديل هذا الجزء ليقرأ المالك من متغيرات Railway، وليس من الكود
+OWNER_TELEGRAM_ID = os.environ.get("OWNER_TELEGRAM_ID", "").strip()
+OWNER_ID = 0
+try:
+    OWNER_ID = int(OWNER_TELEGRAM_ID) if OWNER_TELEGRAM_ID else 0
+except ValueError:
+    OWNER_ID = 0
 
 ADMIN_GROUP_ID = int(os.environ.get("ADMIN_GROUP_ID", "0"))
 PROXY_URL = os.environ.get("PROXY_URL", "").strip()
@@ -561,7 +566,10 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", main_menu))
-    app.add_handler(CommandHandler("admin", admin_command))
+    
+    # ✅ تم إضافة هذا السطر ليدعم الأمر /Admin و /admin معاً
+    app.add_handler(CommandHandler(["admin", "Admin"], admin_command))
+    
     app.add_handler(CommandHandler("add_admin", add_admin))
     app.add_handler(CommandHandler("remove_admin", remove_admin))
     app.add_handler(CommandHandler("admins_list", admins_list))
