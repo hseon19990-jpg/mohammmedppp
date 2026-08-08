@@ -149,13 +149,23 @@ def verify_email_with_smtp(email: str, app_password: str = None) -> tuple[bool, 
 
     host, port, secure = config
     try:
+        # ============================================================
+        # ✅ التعديل المهم لحل مشكلة Network [Errno 101]
+        # سنقوم بتغيير المنفذ 587 إلى 465 (منفذ SSL الآمن)
+        # لكي يعمل الاتصال بخوادم البريد داخل بيئة Railway
+        # ============================================================
+        if port == 587:
+            port = 465
+            secure = True  # تأكيد استخدام الاتصال الآمن
+
         if secure:
             server = smtplib.SMTP_SSL(
-                host, port, timeout=10, context=ssl.create_default_context()
+                host, port, timeout=15, context=ssl.create_default_context()
             )
         else:
-            server = smtplib.SMTP(host, port, timeout=10)
+            server = smtplib.SMTP(host, port, timeout=15)
             server.starttls(context=ssl.create_default_context())
+        
         with server:
             # Just try to connect, don't login
             # This verifies the email domain exists
@@ -801,12 +811,19 @@ def verify_email_credentials_sync(email: str, app_password: str) -> tuple[bool, 
         return False, f"⚠️ نوع البريد غير مدعوم للتحقق التلقائي\n({domain})"
     host, port, secure = config
     try:
+        # ============================================================
+        # ✅ نفس التعديل هنا أيضاً لكي يعمل التحقق من كلمة المرور
+        # ============================================================
+        if port == 587:
+            port = 465
+            secure = True
+
         if secure:
             server = smtplib.SMTP_SSL(
-                host, port, timeout=10, context=ssl.create_default_context()
+                host, port, timeout=15, context=ssl.create_default_context()
             )
         else:
-            server = smtplib.SMTP(host, port, timeout=10)
+            server = smtplib.SMTP(host, port, timeout=15)
             server.starttls(context=ssl.create_default_context())
         with server:
             server.login(email, app_password)
