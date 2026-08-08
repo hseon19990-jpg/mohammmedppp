@@ -2,3 +2,6 @@ node_modules/
 data/
 .env
 *.enc
+__pycache__/
+*.py[cod]
+.venv/

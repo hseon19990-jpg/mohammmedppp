@@ -1,20 +1,15 @@
-FROM node:20-alpine
+FROM python:3.12-slim
 
 WORKDIR /app
 
-# Copy only package.json — let npm resolve fresh (no lockfile conflicts)
-COPY bot/package.json ./
-
-# Install all dependencies
-RUN npm install --no-package-lock
-
-# Copy pre-compiled JS
-COPY bot/dist ./dist
+# Install Python dependencies before copying application code for better layer caching.
+COPY bot/requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Create the default data directory. On Railway, attach a Volume at /app/data
 # so accounts survive deployments and container restarts.
 RUN mkdir -p /app/data
 
-EXPOSE 3000
+COPY bot/main.py ./
 
-CMD ["node", "dist/index.js"]
+CMD ["python", "main.py"]
