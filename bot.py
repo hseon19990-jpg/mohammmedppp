@@ -202,6 +202,24 @@ def normalize_forced_channel(value: str) -> str:
     return value
 
 
+def get_configured_purchase_channels() -> tuple[str, str]:
+    """Read purchase chats at request time so owner changes apply immediately."""
+    config = load_json(DATA_DIR / "config.json")
+    channel_1 = str(config.get("purchase_channel_1") or PURCHASE_CHANNEL_1).strip()
+    channel_2 = str(config.get("purchase_channel_2") or PURCHASE_CHANNEL_2).strip()
+    return channel_1, channel_2
+
+
+def normalize_chat_id(value: str) -> str:
+    """Accept @usernames, numeric Telegram IDs, and public t.me links."""
+    value = value.strip()
+    value = re.sub(r"^https?://t\.me/", "", value, flags=re.IGNORECASE)
+    value = value.split("?", 1)[0].split("/", 1)[0].strip()
+    if value and not value.startswith("@") and not value.lstrip("-").isdigit():
+        value = f"@{value}"
+    return value
+
+
 def forced_channel_link(channel: str, configured_link: str = "") -> str:
     """Build a join link when Telegram can expose a public channel URL."""
     configured_link = configured_link.strip()
@@ -731,6 +749,7 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [("📹 قسم الفيديوهات", "videos_section")],
             [("🛒 المبيعات", "store_section")],
             [("📢 قناة إجبارية", "forced_channel")],
+            [("📨 كروبات إشعارات الشراء", "purchase_channels")],
             [("📊 جميع الحسابات المقبولة", "all_accounts_section")],
             [("🔗 نظام الإحالة", "referral_settings")],
             [("🔙 القائمة الرئيسية", "main_menu")]
@@ -1819,6 +1838,52 @@ async def forced_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     context.user_data["store_action"] = "set_channel"
 
+
+def purchase_channels_keyboard():
+    return kb([
+        [("1️⃣ ضبط الكروب الأول", "set_purchase_channel_1")],
+        [("2️⃣ ضبط الكروب الثاني", "set_purchase_channel_2")],
+        [("🔙 إعدادات المالك", "owner_panel")],
+    ])
+
+
+async def purchase_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+
+    channel_1, channel_2 = get_configured_purchase_channels()
+    await query.edit_message_text(
+        "📨 *إعدادات إشعارات الشراء*\n\n"
+        f"1️⃣ الكروب الأول: `{channel_1 or 'غير مضبوط'}`\n"
+        f"2️⃣ الكروب الثاني: `{channel_2 or 'غير مضبوط'}`\n\n"
+        "أضف البوت إلى الكروبين مع صلاحية إرسال الرسائل، ثم اضبط كل معرف هنا.\n"
+        "يمكنك استخدام @username أو رقم الكروب مثل -1001234567890.",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=purchase_channels_keyboard(),
+    )
+
+
+async def set_purchase_channel(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    channel_number: int,
+):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+
+    context.user_data["store_action"] = f"set_purchase_channel_{channel_number}"
+    await query.edit_message_text(
+        f"✏️ أرسل معرف الكروب رقم {channel_number} الآن:\n\n"
+        "مثال: `@my_group` أو `-1001234567890`",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=purchase_channels_keyboard(),
+    )
+
+
 async def remove_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
@@ -1976,11 +2041,12 @@ async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<i>اضغط على الزر أدناه لإعلام المستخدم باستلام طلبه</i>"
     )
 
+    purchase_channel_1, purchase_channel_2 = get_configured_purchase_channels()
     notification_channels = (
-        ("PURCHASE_CHANNEL_1", PURCHASE_CHANNEL_1, channel_1_text, None),
+        ("PURCHASE_CHANNEL_1", purchase_channel_1, channel_1_text, None),
         (
             "PURCHASE_CHANNEL_2",
-            PURCHASE_CHANNEL_2,
+            purchase_channel_2,
             channel_2_text,
             kb([("✅ تم الإيصال", f"deliver_order:{user_id}")]),
         ),
@@ -2413,11 +2479,32 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     elif action == "set_channel":
         config = load_json(DATA_DIR / "config.json")
-        config["forced_channel"] = text
+        config["forced_channel"] = normalize_forced_channel(text)
         save_json(DATA_DIR / "config.json", config)
-        await update.message.reply_text(f"✅ تم تعيين القناة: {text}")
+        await update.message.reply_text(f"✅ تم تعيين القناة: {config['forced_channel']}")
         context.user_data.pop("store_action", None)
         await main_menu(update, context)
+
+    elif action in {"set_purchase_channel_1", "set_purchase_channel_2"}:
+        channel_id = normalize_chat_id(text)
+        if not channel_id or not (
+            channel_id.startswith("@") or channel_id.lstrip("-").isdigit()
+        ):
+            await update.message.reply_text(
+                "⚠️ المعرف غير صحيح. أرسل @username أو رقم الكروب مثل -1001234567890."
+            )
+            return
+
+        channel_number = action.rsplit("_", 1)[1]
+        config = load_json(DATA_DIR / "config.json")
+        config[f"purchase_channel_{channel_number}"] = channel_id
+        save_json(DATA_DIR / "config.json", config)
+        context.user_data.pop("store_action", None)
+        await update.message.reply_text(
+            f"✅ تم حفظ الكروب رقم {channel_number}: {channel_id}\n\n"
+            "تأكد أن البوت موجود في الكروب ولديه صلاحية إرسال الرسائل.",
+            reply_markup=purchase_channels_keyboard(),
+        )
 
     elif action == "add_service_name":
         context.user_data["store_service_name"] = text
@@ -2576,6 +2663,9 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "forced_channel": await forced_channel(update, context)
     elif data == "check_forced_channel": await check_forced_channel_callback(update, context)
     elif data == "remove_channel": await remove_channel(update, context)
+    elif data == "purchase_channels": await purchase_channels(update, context)
+    elif data == "set_purchase_channel_1": await set_purchase_channel(update, context, 1)
+    elif data == "set_purchase_channel_2": await set_purchase_channel(update, context, 2)
     elif data == "withdraw_store": await withdraw_store(update, context)
     elif data.startswith("user_category:"): await user_category_menu(update, context)
     elif data.startswith("user_buy:"): await user_buy_service(update, context)
