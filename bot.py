@@ -17,6 +17,7 @@ Advanced Telegram Account Manager Bot - Full Version with All Features
 """
 
 import asyncio
+import html
 import json
 import logging
 import os
@@ -191,11 +192,40 @@ SESSIONS: Dict[int, Session] = {}
 PENDING_PURCHASES: Dict[int, Dict] = {}
 
 # ==================== FORCED CHANNEL CHECK ====================
+def normalize_forced_channel(value: str) -> str:
+    """Normalize the channel value accepted from the owner."""
+    value = value.strip()
+    value = re.sub(r"^https?://t\.me/", "", value, flags=re.IGNORECASE)
+    value = value.split("?", 1)[0].split("/", 1)[0].strip()
+    if value and not value.startswith("@") and not value.lstrip("-").isdigit():
+        value = f"@{value}"
+    return value
+
+
+def forced_channel_link(channel: str, configured_link: str = "") -> str:
+    """Build a join link when Telegram can expose a public channel URL."""
+    configured_link = configured_link.strip()
+    if configured_link.startswith(("http://", "https://")):
+        return configured_link
+    if channel.startswith("@"):
+        return f"https://t.me/{channel[1:]}"
+    return ""
+
+
+def forced_channel_keyboard(channel: str, configured_link: str = "") -> InlineKeyboardMarkup:
+    rows = []
+    join_link = forced_channel_link(channel, configured_link)
+    if join_link:
+        rows.append([InlineKeyboardButton("📢 الانضمام إلى القناة", url=join_link)])
+    rows.append([InlineKeyboardButton("✅ تحققت من الاشتراك", callback_data="check_forced_channel")])
+    return InlineKeyboardMarkup(rows)
+
+
 async def check_forced_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """Check if user is in forced channel. Returns True if allowed."""
     config = load_json(DATA_DIR / "config.json")
-    forced_channel = config.get("forced_channel", "")
-    
+    forced_channel = normalize_forced_channel(str(config.get("forced_channel", "")))
+
     if not forced_channel:
         return True
     
@@ -207,25 +237,47 @@ async def check_forced_channel(update: Update, context: ContextTypes.DEFAULT_TYP
     
     try:
         member = await context.bot.get_chat_member(forced_channel, user_id)
-        if member.status in ["member", "administrator", "creator"]:
+        if member.status in {"member", "administrator", "creator"}:
             return True
-    except:
-        pass
+    except Exception as exc:
+        logger.warning("Could not verify forced-channel membership for %s: %s", user_id, exc)
     
     # User is not in channel
+    text = (
+        f"📢 *يرجى الانضمام إلى القناة أولاً:*\n{forced_channel}\n\n"
+        "بعد الانضمام اضغط على زر «تحققت من الاشتراك»."
+    )
+    reply_markup = forced_channel_keyboard(
+        forced_channel,
+        str(config.get("forced_channel_link", "")),
+    )
     if update.callback_query:
-        await update.callback_query.edit_message_text(
-            f"📢 *يرجى الانضمام إلى القناة أولاً:*\n{forced_channel}\n\n"
-            f"ثم اضغط /start مرة أخرى.",
-            parse_mode=ParseMode.MARKDOWN
-        )
+        try:
+            await update.callback_query.edit_message_text(
+                text,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=reply_markup,
+            )
+        except Exception:
+            # Telegram returns "message is not modified" when the user taps
+            # re-check without joining; keep the existing buttons usable.
+            await update.callback_query.answer(
+                "لم يتم العثور على اشتراكك بعد. انضم إلى القناة ثم أعد المحاولة.",
+                show_alert=True,
+            )
     else:
         await update.message.reply_text(
-            f"📢 *يرجى الانضمام إلى القناة أولاً:*\n{forced_channel}\n\n"
-            f"ثم اضغط /start مرة أخرى.",
-            parse_mode=ParseMode.MARKDOWN
+            text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=reply_markup,
         )
     return False
+
+
+async def check_forced_channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Re-check membership after the user joins the forced channel."""
+    if await check_forced_channel(update, context):
+        await main_menu(update, context)
 
 # ==================== MAIN MENU ====================
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1897,46 +1949,56 @@ async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id_str = str(user_id)
     total_emails = user_data.get("total_approved_emails", 0)
     bot_username = (await context.bot.get_me()).username
-    
-    # Send to channel 1 (bot username)
-    if PURCHASE_CHANNEL_1:
+    order_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # Use HTML with escaped user/service values. Telegram Markdown fails on
+    # perfectly valid names containing _, *, [, or backticks and then drops
+    # the whole notification.
+    channel_1_text = (
+        "🛒 <b>طلب شراء جديد</b>\n\n"
+        f"🤖 يوزر البوت: @{html.escape(bot_username or 'غير معروف')}\n"
+        f"📦 الطلب: <code>{html.escape(str(service_name))}</code>\n"
+        f"💰 السعر: <code>${service['price']:.2f}</code>\n"
+        f"📧 عدد الإيميلات: <code>{total_emails}</code>"
+    )
+    channel_2_text = (
+        "📋 <b>تفاصيل طلب السحب</b>\n\n"
+        f"👤 <b>الاسم:</b> <code>{html.escape(user_name)}</code>\n"
+        f"🆔 <b>اليوزر:</b> @{html.escape(user_username)}\n"
+        f"🆔 <b>المعرف:</b> <code>{html.escape(user_id_str)}</code>\n"
+        f"📦 <b>الخدمة:</b> <code>{html.escape(str(service_name))}</code>\n"
+        f"💰 <b>السعر:</b> <code>${service['price']:.2f}</code>\n"
+        f"📧 <b>عدد الإيميلات المقبولة:</b> <code>{total_emails}</code>\n\n"
+        "📝 <b>رسالة المستخدم:</b>\n"
+        f"<code>{html.escape(str(service_message))}</code>\n\n"
+        f"⏰ <b>وقت الطلب:</b> {order_time}\n"
+        "───────────────────\n"
+        "<i>اضغط على الزر أدناه لإعلام المستخدم باستلام طلبه</i>"
+    )
+
+    notification_channels = (
+        ("PURCHASE_CHANNEL_1", PURCHASE_CHANNEL_1, channel_1_text, None),
+        (
+            "PURCHASE_CHANNEL_2",
+            PURCHASE_CHANNEL_2,
+            channel_2_text,
+            kb([("✅ تم الإيصال", f"deliver_order:{user_id}")]),
+        ),
+    )
+    for label, channel_id, message_text, reply_markup in notification_channels:
+        if not channel_id:
+            logger.error("%s غير مضبوط؛ لم يتم إرسال إشعار الشراء.", label)
+            continue
         try:
             await context.bot.send_message(
-                chat_id=PURCHASE_CHANNEL_1,
-                text=f"🛒 *طلب شراء جديد*\n\n"
-                     f"🤖 يوزر البوت: @{bot_username}\n"
-                     f"📦 الطلب: `{service_name}`\n"
-                     f"💰 السعر: `${service['price']:.2f}`\n"
-                     f"📧 عدد الإيميلات: `{total_emails}`",
-                parse_mode=ParseMode.MARKDOWN
+                chat_id=channel_id,
+                text=message_text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=reply_markup,
             )
-        except Exception as e:
-            logger.error(f"Error sending to channel 1: {e}")
-    
-    # Send to channel 2 (user info + delivery button)
-    if PURCHASE_CHANNEL_2:
-        try:
-            await context.bot.send_message(
-                chat_id=PURCHASE_CHANNEL_2,
-                text=f"📋 *تفاصيل طلب السحب*\n\n"
-                     f"👤 *الاسم:* `{user_name}`\n"
-                     f"🆔 *اليوزر:* @{user_username}\n"
-                     f"🆔 *المعرف:* `{user_id_str}`\n"
-                     f"📦 *الخدمة:* `{service_name}`\n"
-                     f"💰 *السعر:* `${service['price']:.2f}`\n"
-                     f"📧 *عدد الإيميلات المقبولة:* `{total_emails}`\n\n"
-                     f"📝 *رسالة المستخدم:*\n"
-                     f"`{service_message}`\n\n"
-                     f"⏰ *وقت الطلب:* {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                     f"───────────────────\n"
-                     f"_اضغط على الزر أدناه لإعلام المستخدم باستلام طلبه_",
-                parse_mode=ParseMode.MARKDOWN,
-                reply_markup=kb([
-                    [("✅ تم الإيصال", f"deliver_order:{user_id}")]
-                ])
-            )
-        except Exception as e:
-            logger.error(f"Error sending to channel 2: {e}")
+            logger.info("Purchase notification sent to %s (%s).", label, channel_id)
+        except Exception:
+            logger.exception("Could not send purchase notification to %s (%s).", label, channel_id)
     
     await query.edit_message_text(
         f"✅ *تم طلب الخدمة بنجاح!*\n\n"
@@ -2512,6 +2574,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("store_delete_service:"): await store_delete_service(update, context)
     elif data.startswith("delete_service:"): await delete_service_execute(update, context)
     elif data == "forced_channel": await forced_channel(update, context)
+    elif data == "check_forced_channel": await check_forced_channel_callback(update, context)
     elif data == "remove_channel": await remove_channel(update, context)
     elif data == "withdraw_store": await withdraw_store(update, context)
     elif data.startswith("user_category:"): await user_category_menu(update, context)
