@@ -15,7 +15,7 @@ Advanced Telegram Account Manager Bot - Full Version with All Features
 - User Accounts with Status (Approved, Rejected, Pending)
 - Purchase System with Dual Channel Notifications
 - General Bot Tutorial Video
-- Leave Video System with Auto-Transfer after 24 Hours (NEW)
+- Leave Video System with Auto-Transfer after 24 Hours
 """
 
 import asyncio
@@ -698,9 +698,12 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_leave_video_to_user(context, uid, session.email)
         
         await update.message.reply_text(
-            f"✅ تم إرسال الطلب للمالك للموافقة!\n⏳ تمت إضافة ${price:.2f} إلى الأموال قيد الانتظار.\n\n"
+            f"✅ *تم إرسال الطلب للمالك للموافقة!*\n\n"
+            f"⏳ تمت إضافة *${price:.2f}* إلى الأموال قيد الانتظار.\n\n"
             f"📹 تم إرسال فيديو المغادرة إليك.\n"
-            f"⚠️ قم بمغادرة الحساب لتجنب تأخير الدفعة.",
+            f"⚠️ قم بمغادرة الحساب لتجنب تأخير الدفعة.\n\n"
+            f"_🔄 سيتم تحويل المبلغ إلى رصيدك بعد موافقة المالك_",
+            parse_mode=ParseMode.MARKDOWN,
             reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")])
         )
 
@@ -773,9 +776,9 @@ async def send_leave_video_to_user(context: ContextTypes.DEFAULT_TYPE, user_id: 
         f"📹 *فيديو المغادرة*\n\n"
         f"📧 الإيميل: `{email}`\n\n"
         f"⚠️ *تعليمات مهمة:*\n"
-        f"• قم بمغادرة الحساب الآن\n"
-        f"• إذا لم تقم بمغادرة الحساب\n"
-        f"• سيتم تأخير دفع المبلغ المستحق لك لمدة 24 ساعة\n\n"
+        f"• قم بمغادرة الحساب الآن.\n"
+        f"• إذا لم تقم بمغادرة الحساب،\n"
+        f"• سيتم تأخير دفع المبلغ المستحق لك لمدة 24 ساعة.\n\n"
         f"📌 *ملاحظة:* بعد 24 ساعة سيتم إضافة المبلغ إلى رصيدك تلقائياً\n"
         f"بغض النظر عن مغادرة الحساب.\n\n"
         f"_شاهد الفيديو لمعرفة طريقة المغادرة الصحيحة_"
@@ -908,8 +911,8 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
             chat_id=user_id,
             text=f"✅ *تم إضافة المبلغ إلى رصيدك تلقائياً!*\n\n"
                  f"📧 الإيميل: `{email}`\n"
-                 f"💰 تم إضافة ${price:.2f} إلى رصيدك.\n\n"
-                 f"🕐 *ملاحظة:* تم التحويل تلقائياً بعد 24 ساعة من الموافقة.\n\n"
+                 f"💰 تم إضافة *${price:.2f}* إلى رصيدك.\n\n"
+                 f"🕐 *ملاحظة:* تم التحويل تلقائياً بعد 24 ساعة من موافقة المالك.\n\n"
                  f"_شكراً لاستخدامك البوت 🤖_",
             parse_mode=ParseMode.MARKDOWN
         )
@@ -1533,7 +1536,7 @@ async def approve_request_owner(update: Update, context: ContextTypes.DEFAULT_TY
             chat_id=uid,
             text=f"✅ *تم قبول طلبك فوراً!*\n\n"
                  f"📧 الإيميل: `{email}`\n"
-                 f"💰 تم إضافة ${price:.2f} إلى رصيدك.",
+                 f"💰 تم إضافة *${price:.2f}* إلى رصيدك.",
             parse_mode=ParseMode.MARKDOWN
         )
     except:
@@ -1601,8 +1604,8 @@ async def approve_with_leave(update: Update, context: ContextTypes.DEFAULT_TYPE)
             chat_id=uid,
             text=f"✅ *تم قبول طلبك مع فيديو المغادرة!*\n\n"
                  f"📧 الإيميل: `{email}`\n"
-                 f"💰 المبلغ المعلق: ${price:.2f}\n\n"
-                 f"⏰ *سيتم إضافة المبلغ إلى رصيدك تلقائياً بعد 24 ساعة*\n\n"
+                 f"💰 المبلغ المعلق: *${price:.2f}*\n\n"
+                 f"⏰ *سيتم إضافة المبلغ إلى رصيدك تلقائياً بعد 24 ساعة.*\n\n"
                  f"📹 تم إرسال فيديو المغادرة إليك.\n"
                  f"⚠️ قم بمغادرة الحساب لتجنب أي تأخير.\n\n"
                  f"_ستتلقى إشعاراً عند إضافة المبلغ إلى رصيدك_",
