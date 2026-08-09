@@ -1,11 +1,13 @@
 """
-Advanced Telegram Account Manager Bot - Full Version
+Advanced Telegram Account Manager Bot - Full Version with Referral System
 - Owner Panel (Fully Fixed)
 - Add Account Flow
 - Video System (Upload & Play)
-- Store System (Categories & Services) - UPDATED
+- Store System (Categories & Services)
 - Wallet & Balance
 - Forced Channel
+- All Accounts Management
+- Referral System
 """
 
 import asyncio
@@ -18,7 +20,8 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List, Optional
+import secrets
 
 import pyotp
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -124,13 +127,21 @@ def get_user(user_id: int) -> dict:
         "balance": 0.0,
         "pending_balance": 0.0,
         "approved_accounts": [],
-        "pending_requests": []
+        "pending_requests": [],
+        "referral_code": "",
+        "referred_by": None,
+        "referral_earnings": 0.0,
+        "total_referrals": 0
     })
 
 def save_user(user_id: int, user_data: dict):
     users = load_json(DATA_DIR / "users.json")
     users[str(user_id)] = user_data
     save_json(DATA_DIR / "users.json", users)
+
+def generate_referral_code():
+    """Generate a unique referral code"""
+    return secrets.token_hex(4).upper()
 
 def kb(*rows):
     """Build keyboards from both row arguments and a list of rows."""
@@ -172,6 +183,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [("📋 حساباتي", "my_accounts")],
         [("📺 تعليم", "tutorials")],
         [("🛒 سحب", "withdraw_store")],
+        [("🔗 الإحالة", "referral_menu")],
     ]
     if user.id == OWNER_ID:
         rows.append([("⚙️ إعدادات المالك", "owner_panel")])
@@ -213,9 +225,295 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [("📹 قسم الفيديوهات", "videos_section")],
             [("🛒 المبيعات", "store_section")],
             [("📢 قناة إجبارية", "forced_channel")],
+            [("📊 جميع الحسابات المقبولة", "all_accounts_section")],
+            [("🔗 نظام الإحالة", "referral_settings")],
             [("🔙 القائمة الرئيسية", "main_menu")]
         ])
     )
+
+# ==================== ALL ACCOUNTS SECTION ====================
+async def all_accounts_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+
+    await query.edit_message_text(
+        "📊 *جميع الحسابات المقبولة*\n\nاختر الخيار المناسب:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([
+            [("📋 جميع الحسابات", "all_accounts")],
+            [("🆕 آخر الحسابات (غير المستخرجة)", "unextracted_accounts")],
+            [("🔙 إعدادات المالك", "owner_panel")]
+        ])
+    )
+
+async def all_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Display all approved accounts across all users"""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+
+    users = load_json(USERS_DB)
+    all_accounts = []
+    
+    for uid, user_data in users.items():
+        for acc in user_data.get("approved_accounts", []):
+            acc_copy = acc.copy()
+            acc_copy["user_id"] = uid
+            all_accounts.append(acc_copy)
+    
+    if not all_accounts:
+        await query.edit_message_text(
+            "📭 لا توجد حسابات مقبولة حالياً.",
+            reply_markup=kb([("🔙 جميع الحسابات", "all_accounts_section")])
+        )
+        return
+
+    # Send accounts in batches of 5
+    total = len(all_accounts)
+    msg = f"📊 *إجمالي الحسابات: {total}*\n\n"
+    
+    for idx, acc in enumerate(all_accounts[:10], 1):  # Show first 10
+        msg += f"{idx}. 📧 `{acc.get('email', '')}`\n"
+        msg += f"   🔑 {acc.get('password', '')}\n"
+        msg += f"   🔐 {acc.get('totp', '')}\n"
+        msg += f"   🗝 {acc.get('app_pass', '')}\n"
+        msg += f"   👤 المستخدم: {acc.get('user_id', '')}\n"
+        msg += f"   💰 السعر: ${acc.get('amount', 0):.2f}\n"
+        msg += "   ─────────────\n"
+    
+    if total > 10:
+        msg += f"\n📌 *ملاحظة:* تم عرض أول 10 حسابات من أصل {total}"
+        msg += "\nلتصدير جميع الحسابات استخدم زر التصدير أدناه"
+
+    await query.edit_message_text(
+        msg,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([
+            [("📥 تصدير جميع الحسابات", "export_all_accounts")],
+            [("🆕 عرض الحسابات غير المستخرجة", "unextracted_accounts")],
+            [("🔙 جميع الحسابات", "all_accounts_section")]
+        ])
+    )
+
+async def unextracted_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Display accounts that haven't been extracted yet"""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+
+    users = load_json(USERS_DB)
+    unextracted = []
+    
+    for uid, user_data in users.items():
+        for acc in user_data.get("approved_accounts", []):
+            if not acc.get("extracted", False):
+                acc_copy = acc.copy()
+                acc_copy["user_id"] = uid
+                unextracted.append(acc_copy)
+    
+    if not unextracted:
+        await query.edit_message_text(
+            "✅ لا توجد حسابات غير مستخرجة.",
+            reply_markup=kb([("🔙 جميع الحسابات", "all_accounts_section")])
+        )
+        return
+
+    total = len(unextracted)
+    msg = f"🆕 *الحسابات غير المستخرجة: {total}*\n\n"
+    
+    for idx, acc in enumerate(unextracted[:10], 1):
+        msg += f"{idx}. 📧 `{acc.get('email', '')}`\n"
+        msg += f"   🔑 {acc.get('password', '')}\n"
+        msg += f"   🔐 {acc.get('totp', '')}\n"
+        msg += f"   🗝 {acc.get('app_pass', '')}\n"
+        msg += f"   👤 المستخدم: {acc.get('user_id', '')}\n"
+        msg += "   ─────────────\n"
+    
+    if total > 10:
+        msg += f"\n📌 *ملاحظة:* تم عرض أول 10 حسابات من أصل {total}"
+
+    await query.edit_message_text(
+        msg,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([
+            [("📥 تصدير الحسابات غير المستخرجة", "export_unextracted")],
+            [("✅ وضع علامة مستخرجة", "mark_extracted_menu")],
+            [("🔙 جميع الحسابات", "all_accounts_section")]
+        ])
+    )
+
+async def mark_extracted_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Menu to mark accounts as extracted"""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+
+    users = load_json(USERS_DB)
+    unextracted = []
+    
+    for uid, user_data in users.items():
+        for idx, acc in enumerate(user_data.get("approved_accounts", [])):
+            if not acc.get("extracted", False):
+                unextracted.append({
+                    "user_id": uid,
+                    "index": idx,
+                    "email": acc.get("email", ""),
+                    "acc": acc
+                })
+    
+    if not unextracted:
+        await query.edit_message_text(
+            "✅ لا توجد حسابات غير مستخرجة لتحديدها.",
+            reply_markup=kb([("🔙 جميع الحسابات", "all_accounts_section")])
+        )
+        return
+
+    rows = []
+    for item in unextracted[:10]:
+        rows.append([(f"✅ {item['email']}", f"mark_extracted:{item['user_id']}:{item['index']}")])
+    
+    rows.append([("🔙 جميع الحسابات", "all_accounts_section")])
+    
+    await query.edit_message_text(
+        "✅ *تحديد الحسابات المستخرجة*\nاختر الحسابات التي تم استخراجها:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb(*rows)
+    )
+
+async def mark_extracted(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Mark a specific account as extracted"""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+
+    parts = query.data.split(":")
+    uid = int(parts[1])
+    index = int(parts[2])
+    
+    user_data = get_user(uid)
+    accounts = user_data.get("approved_accounts", [])
+    
+    if index < len(accounts):
+        accounts[index]["extracted"] = True
+        user_data["approved_accounts"] = accounts
+        save_user(uid, user_data)
+        await query.edit_message_text(
+            f"✅ تم وضع علامة مستخرجة على الحساب: {accounts[index].get('email', '')}",
+            reply_markup=kb([("🔙 الحسابات غير المستخرجة", "unextracted_accounts")])
+        )
+    else:
+        await query.edit_message_text(
+            "⚠️ الحساب غير موجود.",
+            reply_markup=kb([("🔙 جميع الحسابات", "all_accounts_section")])
+        )
+
+async def export_all_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Export all approved accounts as a single message"""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+
+    users = load_json(USERS_DB)
+    all_accounts = []
+    
+    for uid, user_data in users.items():
+        for acc in user_data.get("approved_accounts", []):
+            all_accounts.append(acc)
+    
+    if not all_accounts:
+        await query.edit_message_text("📭 لا توجد حسابات للتصدير.")
+        return
+
+    # Prepare the export message
+    export_msg = "📊 *جميع الحسابات المقبولة*\n"
+    export_msg += "═" * 30 + "\n\n"
+    
+    for idx, acc in enumerate(all_accounts, 1):
+        export_msg += f"📧 {idx}. {acc.get('email', '')}\n"
+        export_msg += f"🔑 {acc.get('password', '')}\n"
+        export_msg += f"🔐 {acc.get('totp', '')}\n"
+        export_msg += f"🗝 {acc.get('app_pass', '')}\n"
+        export_msg += f"💰 ${acc.get('amount', 0):.2f}\n"
+        export_msg += "─" * 20 + "\n"
+
+    # Split into multiple messages if too long
+    max_length = 4000
+    if len(export_msg) > max_length:
+        parts = [export_msg[i:i+max_length] for i in range(0, len(export_msg), max_length)]
+        for part in parts:
+            await context.bot.send_message(
+                chat_id=OWNER_ID,
+                text=part,
+                parse_mode=ParseMode.MARKDOWN
+            )
+        await query.edit_message_text("✅ تم تصدير جميع الحسابات في رسائل متعددة.")
+    else:
+        await query.edit_message_text(
+            export_msg,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=kb([("🔙 جميع الحسابات", "all_accounts_section")])
+        )
+
+async def export_unextracted(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Export only unextracted accounts"""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+
+    users = load_json(USERS_DB)
+    unextracted = []
+    
+    for uid, user_data in users.items():
+        for acc in user_data.get("approved_accounts", []):
+            if not acc.get("extracted", False):
+                unextracted.append(acc)
+    
+    if not unextracted:
+        await query.edit_message_text("✅ لا توجد حسابات غير مستخرجة.")
+        return
+
+    export_msg = "🆕 *الحسابات غير المستخرجة*\n"
+    export_msg += "═" * 30 + "\n\n"
+    
+    for idx, acc in enumerate(unextracted, 1):
+        export_msg += f"📧 {idx}. {acc.get('email', '')}\n"
+        export_msg += f"🔑 {acc.get('password', '')}\n"
+        export_msg += f"🔐 {acc.get('totp', '')}\n"
+        export_msg += f"🗝 {acc.get('app_pass', '')}\n"
+        export_msg += "─" * 20 + "\n"
+
+    # Mark all as extracted after export
+    for uid, user_data in users.items():
+        for acc in user_data.get("approved_accounts", []):
+            if not acc.get("extracted", False):
+                acc["extracted"] = True
+        save_user(int(uid), user_data)
+
+    # Split into multiple messages if too long
+    max_length = 4000
+    if len(export_msg) > max_length:
+        parts = [export_msg[i:i+max_length] for i in range(0, len(export_msg), max_length)]
+        for part in parts:
+            await context.bot.send_message(
+                chat_id=OWNER_ID,
+                text=part,
+                parse_mode=ParseMode.MARKDOWN
+            )
+        await query.edit_message_text("✅ تم تصدير جميع الحسابات غير المستخرجة ووضع علامة مستخرجة عليها.")
+    else:
+        await query.edit_message_text(
+            export_msg,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=kb([("🔙 الحسابات غير المستخرجة", "unextracted_accounts")])
+        )
 
 # ==================== OWNER PANEL: SET PRICE ====================
 async def set_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -279,6 +577,9 @@ async def approve_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     price = float(approved_request.get("amount", default_price))
+    
+    # Add to approved accounts (not extracted yet)
+    approved_request["extracted"] = False
     user_data.setdefault("approved_accounts", []).append(approved_request)
     user_data["pending_balance"] = max(
         0.0,
@@ -289,6 +590,27 @@ async def approve_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
         req for req in user_data.get("pending_requests", []) if req["email"] != email
     ]
     save_user(uid, user_data)
+
+    # Handle referral bonus
+    referred_by = user_data.get("referred_by")
+    if referred_by:
+        referral_bonus = float(config.get("referral_bonus", 0.0))
+        if referral_bonus > 0:
+            referrer_data = get_user(referred_by)
+            referrer_data["referral_earnings"] = float(referrer_data.get("referral_earnings", 0.0)) + referral_bonus
+            referrer_data["total_referrals"] = int(referrer_data.get("total_referrals", 0)) + 1
+            save_user(referred_by, referrer_data)
+            
+            # Notify referrer
+            try:
+                await context.bot.send_message(
+                    chat_id=referred_by,
+                    text=f"🎉 *مبروك!*\nحصلت على مكافأة إحالة بقيمة ${referral_bonus:.2f}\n"
+                         f"بسبب إحالة المستخدم {uid} الذي أضاف حساباً جديداً.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except:
+                pass
 
     await query.edit_message_text(
         f"✅ تم قبول الحساب `{email}`!\n💰 تم نقل ${price:.2f} من قيد الانتظار إلى الرصيد المملوك.",
@@ -328,6 +650,143 @@ async def reject_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         f"❌ تم رفض الحساب `{email}` وإزالة المبلغ من قيد الانتظار.",
         parse_mode=ParseMode.MARKDOWN,
+    )
+
+# ==================== OWNER PANEL: REFERRAL SETTINGS ====================
+async def referral_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+
+    config = load_json(DATA_DIR / "config.json")
+    referral_bonus = config.get("referral_bonus", 0.0)
+    
+    await query.edit_message_text(
+        f"🔗 *إعدادات الإحالة*\n\n"
+        f"💰 مكافأة الإحالة الحالية: ${referral_bonus:.2f}\n\n"
+        f"📌 *ملاحظة:* يحصل صاحب الإحالة على هذه المكافأة عند قبول كل حساب جديد من قبل المستخدم المُحال.\n\n"
+        f"اختر الإجراء المناسب:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([
+            [("💲 تغيير مكافأة الإحالة", "set_referral_bonus")],
+            [("📊 إحصائيات الإحالة", "referral_stats")],
+            [("🔙 إعدادات المالك", "owner_panel")]
+        ])
+    )
+
+async def set_referral_bonus(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    await query.edit_message_text(
+        "💰 *تغيير مكافأة الإحالة*\n\n"
+        "أرسل المبلغ الجديد لمكافأة الإحالة (رقم فقط):\n"
+        "📌 مثال: 1.5",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([("🔙 إعدادات الإحالة", "referral_settings")])
+    )
+    context.user_data["mode"] = "set_referral_bonus"
+
+async def referral_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+
+    users = load_json(USERS_DB)
+    total_referrals = 0
+    total_earnings = 0.0
+    top_referrers = []
+    
+    for uid, user_data in users.items():
+        if user_data.get("total_referrals", 0) > 0:
+            total_referrals += user_data["total_referrals"]
+            total_earnings += float(user_data.get("referral_earnings", 0.0))
+            top_referrers.append({
+                "user_id": uid,
+                "count": user_data["total_referrals"],
+                "earnings": float(user_data.get("referral_earnings", 0.0))
+            })
+    
+    top_referrers.sort(key=lambda x: x["count"], reverse=True)
+    
+    msg = f"📊 *إحصائيات الإحالة*\n\n"
+    msg += f"👥 إجمالي الإحالات: {total_referrals}\n"
+    msg += f"💰 إجمالي المكافآت المدفوعة: ${total_earnings:.2f}\n\n"
+    
+    if top_referrers:
+        msg += "🏆 *أفضل المحالين:*\n"
+        for idx, ref in enumerate(top_referrers[:5], 1):
+            msg += f"{idx}. 👤 {ref['user_id']} - {ref['count']} إحالة - ${ref['earnings']:.2f}\n"
+    
+    if not top_referrers:
+        msg += "📭 لا توجد إحالات حالياً."
+    
+    await query.edit_message_text(
+        msg,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([("🔙 إعدادات الإحالة", "referral_settings")])
+    )
+
+# ==================== REFERRAL MENU ====================
+async def referral_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = update.effective_user.id
+    
+    user_data = get_user(user_id)
+    referral_code = user_data.get("referral_code", "")
+    
+    # Generate referral code if not exists
+    if not referral_code:
+        referral_code = generate_referral_code()
+        user_data["referral_code"] = referral_code
+        save_user(user_id, user_data)
+    
+    bot_username = (await context.bot.get_me()).username
+    referral_link = f"https://t.me/{bot_username}?start={referral_code}"
+    
+    msg = (
+        f"🔗 *نظام الإحالة*\n\n"
+        f"📌 *رابط الإحالة الخاص بك:*\n"
+        f"`{referral_link}`\n\n"
+        f"📊 *إحصائياتك:*\n"
+        f"💰 مكافآت الإحالة: ${float(user_data.get('referral_earnings', 0.0)):.2f}\n"
+        f"👥 عدد الإحالات: {user_data.get('total_referrals', 0)}\n\n"
+        f"📝 *كيف يعمل النظام؟*\n"
+        f"1️⃣ شارك رابط الإحالة مع أصدقائك\n"
+        f"2️⃣ عند إضافة صديقك لحساب جديد وقبوله من المالك\n"
+        f"3️⃣ ستحصل على مكافأة إحالة لكل حساب مقبول\n"
+        f"4️⃣ كلما زاد عدد الحسابات، زادت مكافآتك!"
+    )
+    
+    await query.edit_message_text(
+        msg,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([
+            [("📋 نسخ الرابط", f"copy_referral:{referral_code}")],
+            [("🔙 القائمة الرئيسية", "main_menu")]
+        ])
+    )
+
+async def copy_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle copying referral link (just show it again)"""
+    query = update.callback_query
+    code = query.data.split(":")[1]
+    bot_username = (await context.bot.get_me()).username
+    link = f"https://t.me/{bot_username}?start={code}"
+    
+    await query.edit_message_text(
+        f"📋 *رابط الإحالة الخاص بك:*\n\n"
+        f"`{link}`\n\n"
+        f"📌 يمكنك نسخ الرابط ومشاركته مع أصدقائك.",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([
+            [("🔗 عرض رابط الإحالة", "referral_menu")],
+            [("🔙 القائمة الرئيسية", "main_menu")]
+        ])
     )
 
 # ==================== OWNER PANEL: VIDEO SECTION ====================
@@ -380,14 +839,13 @@ async def handle_video_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
     else:
         await update.message.reply_text("⚠️ يرجى إرسال فيديو صحيح.")
 
-# ==================== OWNER PANEL: STORE SECTION (UPDATED) ====================
+# ==================== OWNER PANEL: STORE SECTION ====================
 async def owner_store_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
 
-    # عرض الفئات الموجودة مع خيار الإضافة
     config = load_json(DATA_DIR / "config.json")
     categories = config.get("store_categories", [])
     
@@ -617,13 +1075,23 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data = get_user(uid)
         config = load_json(DATA_DIR / "config.json")
         price = float(config.get("default_price", 5.0))
+        
+        # Check if user was referred
+        referred_by = user_data.get("referred_by")
+        if referred_by:
+            referral_bonus = float(config.get("referral_bonus", 0.0))
+            if referral_bonus > 0:
+                # Add note about referral bonus
+                pass  # Will be handled in approval
+        
         user_data["pending_requests"].append({
             "email": session.email,
             "password": session.password,
             "totp": session.totp,
             "app_pass": session.app_pass,
             "amount": price,
-            "timestamp": datetime.now(timezone.utc).isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "extracted": False
         })
         user_data["pending_balance"] = float(
             user_data.get("pending_balance", 0.0)
@@ -736,6 +1204,12 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     user_id = update.effective_user.id
 
+    # Handle referral code from /start command
+    if context.user_data.get("referral_code"):
+        ref_code = context.user_data.pop("referral_code")
+        await handle_referral(update, context, ref_code)
+        return
+
     if context.user_data.get("mode") == "set_price":
         if user_id != OWNER_ID: return
         try:
@@ -746,6 +1220,20 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"✅ تم تحديث السعر إلى ${price:.2f}")
             context.user_data.pop("mode", None)
             await main_menu(update, context)
+        except ValueError:
+            await update.message.reply_text("⚠️ أرسل رقماً صحيحاً.")
+        return
+
+    if context.user_data.get("mode") == "set_referral_bonus":
+        if user_id != OWNER_ID: return
+        try:
+            bonus = float(text)
+            config = load_json(DATA_DIR / "config.json")
+            config["referral_bonus"] = bonus
+            save_json(DATA_DIR / "config.json", config)
+            await update.message.reply_text(f"✅ تم تحديث مكافأة الإحالة إلى ${bonus:.2f}")
+            context.user_data.pop("mode", None)
+            await owner_panel(update, context)
         except ValueError:
             await update.message.reply_text("⚠️ أرسل رقماً صحيحاً.")
         return
@@ -768,7 +1256,6 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if "store_categories" not in config: 
             config["store_categories"] = []
         
-        # التحقق من عدم تكرار الاسم
         if any(cat["name"].lower() == text.lower() for cat in config["store_categories"]):
             await update.message.reply_text("⚠️ هذه الفئة موجودة مسبقاً!")
             return
@@ -856,6 +1343,74 @@ async def play_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await query.edit_message_text("⚠️ الفيديو غير موجود.", reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")]))
 
+# ==================== REFERRAL HANDLER ====================
+async def handle_referral(update: Update, context: ContextTypes.DEFAULT_TYPE, referral_code: str):
+    """Handle referral when user starts with a referral code"""
+    user_id = update.effective_user.id
+    
+    # Don't allow self-referral
+    if context.user_data.get("my_referral_code") == referral_code:
+        await update.message.reply_text("⚠️ لا يمكنك استخدام رابط الإحالة الخاص بك!")
+        return
+    
+    user_data = get_user(user_id)
+    
+    # Check if user already has a referrer
+    if user_data.get("referred_by"):
+        await update.message.reply_text("ℹ️ أنت بالفعل مشترك في نظام الإحالة.")
+        return
+    
+    # Find user with this referral code
+    users = load_json(USERS_DB)
+    referrer_id = None
+    for uid, u_data in users.items():
+        if u_data.get("referral_code") == referral_code:
+            referrer_id = int(uid)
+            break
+    
+    if not referrer_id:
+        await update.message.reply_text("❌ رابط الإحالة غير صالح.")
+        return
+    
+    # Save referral
+    user_data["referred_by"] = referrer_id
+    save_user(user_id, user_data)
+    
+    await update.message.reply_text(
+        "✅ *تم تفعيل الإحالة بنجاح!*\n\n"
+        f"👤 تمت إحالتك بواسطة: {referrer_id}\n"
+        "📌 ستتلقى أنت وصاحب الإحالة مكافآت عند قبول حساباتك.\n\n"
+        "استخدم /start للبدء.",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    # Notify referrer
+    try:
+        await context.bot.send_message(
+            chat_id=referrer_id,
+            text=f"🎉 *إحالة جديدة!*\n\n"
+                 f"👤 المستخدم {user_id} انضم باستخدام رابط إحالتك.\n"
+                 f"📌 ستحصل على مكافأة عند قبول حسابه من قبل المالك.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except:
+        pass
+
+async def start_with_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /start command with referral code"""
+    args = context.args
+    if args and args[0].startswith("ref_"):
+        referral_code = args[0].replace("ref_", "")
+        context.user_data["referral_code"] = referral_code
+        
+        # Get user's own referral code if exists
+        user_data = get_user(update.effective_user.id)
+        context.user_data["my_referral_code"] = user_data.get("referral_code", "")
+        
+        await handle_referral(update, context, referral_code)
+    else:
+        await main_menu(update, context)
+
 # ==================== ROUTER ====================
 async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -879,7 +1434,6 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("set_video:"): await set_video_callback(update, context)
     elif data == "store_section": await owner_store_section(update, context)
     elif data == "store_add_category": await store_add_category(update, context)
-    elif data == "store_list_categories": await store_list_categories(update, context)
     elif data.startswith("store_category:"): await store_category_menu(update, context)
     elif data.startswith("store_add_service:"): await store_add_service(update, context)
     elif data.startswith("store_delete_service:"): await store_delete_service(update, context)
@@ -889,6 +1443,18 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "withdraw_store": await withdraw_store(update, context)
     elif data.startswith("user_category:"): await user_category_menu(update, context)
     elif data.startswith("user_buy:"): await user_buy_service(update, context)
+    elif data == "all_accounts_section": await all_accounts_section(update, context)
+    elif data == "all_accounts": await all_accounts(update, context)
+    elif data == "unextracted_accounts": await unextracted_accounts(update, context)
+    elif data == "export_all_accounts": await export_all_accounts(update, context)
+    elif data == "export_unextracted": await export_unextracted(update, context)
+    elif data == "mark_extracted_menu": await mark_extracted_menu(update, context)
+    elif data.startswith("mark_extracted:"): await mark_extracted(update, context)
+    elif data == "referral_menu": await referral_menu(update, context)
+    elif data.startswith("copy_referral:"): await copy_referral(update, context)
+    elif data == "referral_settings": await referral_settings(update, context)
+    elif data == "set_referral_bonus": await set_referral_bonus(update, context)
+    elif data == "referral_stats": await referral_stats(update, context)
     else: await placeholder(update, context)
 
 async def placeholder(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -919,18 +1485,46 @@ async def owner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [("📹 قسم الفيديوهات", "videos_section")],
             [("🛒 المبيعات", "store_section")],
             [("📢 قناة إجبارية", "forced_channel")],
+            [("📊 جميع الحسابات المقبولة", "all_accounts_section")],
+            [("🔗 نظام الإحالة", "referral_settings")],
             [("🔙 القائمة الرئيسية", "main_menu")]
         ])
     )
 
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /start command with or without referral code"""
+    args = context.args
+    if args and args[0]:
+        # Check if it's a referral code
+        referral_code = args[0]
+        if len(referral_code) == 8 and referral_code.isalnum():  # Generated codes are 8 chars
+            context.user_data["referral_code"] = referral_code
+            user_data = get_user(update.effective_user.id)
+            context.user_data["my_referral_code"] = user_data.get("referral_code", "")
+            await handle_referral(update, context, referral_code)
+            return
+    
+    await main_menu(update, context)
+
 async def store_list_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Legacy function - kept for compatibility"""
-    await owner_store_section(update, context)
+    if update.callback_query:
+        await owner_store_section(update, context)
+    else:
+        config = load_json(DATA_DIR / "config.json")
+        categories = config.get("store_categories", [])
+        if not categories:
+            await update.message.reply_text("📭 لا توجد فئات.")
+            return
+        msg = "📂 *الفئات المتاحة:*\n"
+        for cat in categories:
+            msg += f"- {cat['name']} ({len(cat.get('services', []))} خدمات)\n"
+        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
 # ==================== MAIN ====================
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", main_menu))
+    app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("debug", debug_command))
     app.add_handler(CommandHandler("owner", owner_command))
     app.add_handler(CallbackQueryHandler(router))
