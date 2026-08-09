@@ -2150,7 +2150,7 @@ async def handle_purchase_message(update: Update, context: ContextTypes.DEFAULT_
             f"💰 <b>السعر المخصوم:</b> <code>${price:.2f}</code>\n"
             f"📧 <b>عدد الإيميلات المقبولة:</b> <code>{total_emails}</code>\n\n"
             "📝 <b>رسالة العضو القابلة للنسخ:</b>\n"
-            f"<pre>{html.escape(text)}</pre>\n"
+            f"<code>{html.escape(text)}</code>\n"
             f"⏰ <b>وقت الإرسال:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
             "───────────────────\n"
             "<i>اضغط على الزر أدناه لإعلام المستخدم باستلام طلبه</i>"
