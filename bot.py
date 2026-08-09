@@ -142,7 +142,8 @@ def get_user(user_id: int) -> dict:
         "referred_by": None,
         "referral_earnings": 0.0,
         "total_referrals": 0,
-        "total_approved_emails": 0
+        "total_approved_emails": 0,
+        "pending_purchases": []  # Store pending purchases before user sends message
     })
 
 def save_user(user_id: int, user_data: dict):
@@ -185,6 +186,9 @@ class Session:
     editing_email: str = ""
 
 SESSIONS: Dict[int, Session] = {}
+
+# Store pending purchases waiting for user message
+PENDING_PURCHASES: Dict[int, Dict] = {}
 
 # ==================== MAIN MENU ====================
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1731,9 +1735,6 @@ async def remove_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ==================== USER WITHDRAW STORE ====================
-# Store for pending user messages after purchase
-PENDING_USER_MESSAGES: Dict[int, Dict] = {}
-
 async def withdraw_store(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     config = load_json(DATA_DIR / "config.json")
@@ -1815,30 +1816,29 @@ async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user_data = get_user(user_id)
+    
+    # Check balance first
     if user_data["balance"] < service["price"]:
         await query.edit_message_text(
             f"❌ رصيدك غير كافٍ. الرصيد: ${user_data['balance']:.2f}, السعر: ${service['price']:.2f}"
         )
         return
 
-    user_data["balance"] -= service["price"]
-    save_user(user_id, user_data)
-    
-    # Store purchase info for user message
-    PENDING_USER_MESSAGES[user_id] = {
+    # Store pending purchase BEFORE charging
+    PENDING_PURCHASES[user_id] = {
+        "service_id": service_id,
         "service_name": service_name,
         "service_price": service["price"],
         "service_message": service_message,
         "purchased_at": datetime.now().isoformat()
     }
     
-    total_emails = user_data.get("total_approved_emails", 0)
-    
     # Get user info
     user = update.effective_user
     user_name = user.full_name or "غير معروف"
     user_username = user.username or "لا يوجد"
     user_id_str = str(user_id)
+    total_emails = user_data.get("total_approved_emails", 0)
     
     # Send to channel 1 (simple notification)
     if PURCHASE_CHANNEL_1:
@@ -1859,7 +1859,7 @@ async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Send to channel 2 with user message and delivery button
     if PURCHASE_CHANNEL_2:
         try:
-            # Store the user message in context for the owner to see
+            # Send the user's message as the main content
             await context.bot.send_message(
                 chat_id=PURCHASE_CHANNEL_2,
                 text=f"📋 *تفاصيل طلب السحب*\n\n"
@@ -1883,11 +1883,12 @@ async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Error sending to channel 2: {e}")
     
     await query.edit_message_text(
-        f"✅ *تم الشراء بنجاح!*\n\n"
+        f"✅ *تم طلب الخدمة بنجاح!*\n\n"
         f"🛒 *الخدمة:* {service_name}\n"
-        f"💰 *تم خصم:* ${service['price']:.2f}\n\n"
+        f"💰 *السعر:* ${service['price']:.2f}\n\n"
         f"📝 *ملاحظة:* {service_message}\n\n"
-        f"_📤 يرجى إرسال المعلومات المطلوبة في رسالة جديدة_",
+        f"_📤 يرجى إرسال المعلومات المطلوبة في رسالة جديدة_\n"
+        f"_🔒 سيتم خصم المبلغ بعد إرسال المعلومات_",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=kb([("🔙 قسم السحب", "withdraw_store")])
     )
@@ -1919,7 +1920,7 @@ async def deliver_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Could not send delivery confirmation to user {user_id}: {e}")
     
     # Clean up
-    PENDING_USER_MESSAGES.pop(user_id, None)
+    PENDING_PURCHASES.pop(user_id, None)
     
     await query.edit_message_text(
         f"✅ *تم إيصال الطلب للمستخدم!*\n\n"
@@ -1934,6 +1935,78 @@ async def deliver_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✅ تم إعلام المستخدم `{user_id}` باستلام طلبه.",
         parse_mode=ParseMode.MARKDOWN
     )
+
+# ==================== HANDLE USER MESSAGE AFTER PURCHASE ====================
+async def handle_purchase_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle user's message after purchase - charges the user and notifies owner"""
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+    
+    # Check if user has a pending purchase
+    if user_id not in PENDING_PURCHASES:
+        # If not, just pass through to normal text handler
+        await text_input(update, context)
+        return
+    
+    purchase = PENDING_PURCHASES[user_id]
+    
+    # Charge the user NOW
+    user_data = get_user(user_id)
+    price = purchase["service_price"]
+    
+    if user_data["balance"] < price:
+        # This shouldn't happen since we checked before, but just in case
+        await update.message.reply_text(
+            f"❌ رصيدك غير كافٍ. الرصيد: ${user_data['balance']:.2f}, السعر: ${price:.2f}\n"
+            f"يرجى إعادة المحاولة.",
+            reply_markup=kb([("🔙 قسم السحب", "withdraw_store")])
+        )
+        PENDING_PURCHASES.pop(user_id, None)
+        return
+    
+    # Deduct money
+    user_data["balance"] -= price
+    save_user(user_id, user_data)
+    
+    # Get user info
+    user = update.effective_user
+    user_name = user.full_name or "غير معروف"
+    user_username = user.username or "لا يوجد"
+    total_emails = user_data.get("total_approved_emails", 0)
+    
+    # Notify owner about the user's message
+    if OWNER_ID:
+        try:
+            await context.bot.send_message(
+                chat_id=OWNER_ID,
+                text=f"📩 *رسالة من مستخدم بعد الشراء*\n\n"
+                     f"👤 *الاسم:* `{user_name}`\n"
+                     f"🆔 *اليوزر:* @{user_username}\n"
+                     f"🆔 *المعرف:* `{user_id}`\n"
+                     f"📦 *الخدمة:* `{purchase['service_name']}`\n"
+                     f"💰 *السعر المخصوم:* `${price:.2f}`\n"
+                     f"📧 *عدد الإيميلات:* `{total_emails}`\n\n"
+                     f"📝 *رسالة المستخدم:*\n"
+                     f"`{text}`\n\n"
+                     f"⏰ *وقت الإرسال:* {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except Exception as e:
+            logger.error(f"Error sending user message to owner: {e}")
+    
+    # Notify user
+    await update.message.reply_text(
+        f"✅ *تم استلام رسالتك بنجاح!*\n\n"
+        f"💰 تم خصم `${price:.2f}` من رصيدك.\n"
+        f"📝 رسالتك: `{text}`\n\n"
+        f"_📌 سيتم التواصل معك قريباً من قبل المالك._\n"
+        f"_شكراً لاستخدامك البوت 🤖_",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")])
+    )
+    
+    # Clear pending purchase
+    PENDING_PURCHASES.pop(user_id, None)
 
 # ==================== MY WALLET ====================
 async def my_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2127,6 +2200,11 @@ async def referral_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     user_id = update.effective_user.id
+
+    # Check if this is a user message for a pending purchase
+    if user_id in PENDING_PURCHASES:
+        await handle_purchase_message(update, context)
+        return
 
     if context.user_data.get("step") == "reject_reason_text":
         await handle_reject_reason_text(update, context)
