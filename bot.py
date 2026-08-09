@@ -1,18 +1,19 @@
 """
-Advanced Telegram Account Manager Bot - Full Version with All Fixes
+Advanced Telegram Account Manager Bot - Full Version with All Features
 - Owner Panel (Fully Fixed)
 - Add Account Flow with Auto-Delete Sensitive Data
-- Video System (Upload, Play & Delete) - UPDATED
-- Store System (Categories & Services)
+- Video System (Upload, Play & Delete)
+- Store System (Categories & Services) with Custom Messages
 - Wallet & Balance
 - Forced Channel
 - All Accounts Management
-- Referral System
+- Referral System (Bonus on Valid Email)
 - Account Editing & Deletion
 - Duplicate Email Protection
 - Video Tutorials in Add Account Flow
 - Advanced Approval System with Reasons
 - User Accounts with Status (Approved, Rejected, Pending)
+- Purchase System with Dual Channel Notifications
 """
 
 import asyncio
@@ -46,6 +47,8 @@ load_dotenv()
 # ==================== CONFIGURATION ====================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 OWNER_ID = int(os.environ.get("OWNER_TELEGRAM_ID", "0"))
+PURCHASE_CHANNEL_1 = os.environ.get("PURCHASE_CHANNEL_1", "").strip()
+PURCHASE_CHANNEL_2 = os.environ.get("PURCHASE_CHANNEL_2", "").strip()
 
 configured_data_dir = os.environ.get("DATA_DIR", "").strip()
 railway_volume_dir = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
@@ -138,7 +141,8 @@ def get_user(user_id: int) -> dict:
         "referral_code": "",
         "referred_by": None,
         "referral_earnings": 0.0,
-        "total_referrals": 0
+        "total_referrals": 0,
+        "total_approved_emails": 0
     })
 
 def save_user(user_id: int, user_data: dict):
@@ -179,6 +183,8 @@ class Session:
     totp: str = ""
     app_pass: str = ""
     editing_email: str = ""  # For editing pending requests
+    purchase_service_id: str = ""
+    purchase_cat_id: str = ""
 
 SESSIONS: Dict[int, Session] = {}
 
@@ -218,7 +224,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(text, reply_markup=kb(*rows))
 
-# ==================== MY ACCOUNTS (UPDATED) ====================
+# ==================== MY ACCOUNTS ====================
 async def my_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show user's all accounts with status"""
     query = update.callback_query
@@ -307,7 +313,6 @@ async def edit_pending_account(update: Update, context: ContextTypes.DEFAULT_TYP
     user_data = get_user(query.from_user.id)
     pending = user_data.get("pending_requests", [])
     
-    # Find the pending request
     request = next((r for r in pending if r.get("email") == email), None)
     if not request:
         await query.edit_message_text(
@@ -363,12 +368,10 @@ async def delete_pending_account(update: Update, context: ContextTypes.DEFAULT_T
     user_data = get_user(query.from_user.id)
     pending = user_data.get("pending_requests", [])
     
-    # Find and remove the pending request
     request = next((r for r in pending if r.get("email") == email), None)
     if request:
         pending = [r for r in pending if r.get("email") != email]
         user_data["pending_requests"] = pending
-        # Remove pending balance
         user_data["pending_balance"] = max(0.0, float(user_data.get("pending_balance", 0.0)) - float(request.get("amount", 0.0)))
         save_user(query.from_user.id, user_data)
         
@@ -391,7 +394,6 @@ async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_json(DATA_DIR / "config.json")
     price = config.get("default_price", 5.0)
     
-    # Check if there are videos available
     has_email_video = config.get("video_email") and Path(config.get("video_email", "")).exists()
     
     buttons = [("❌ إلغاء", "cancel")]
@@ -413,7 +415,6 @@ async def show_video_in_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     path = config.get(f"video_{vtype}")
     if path and Path(path).exists():
         try:
-            # Send video as normal video file for native Telegram playback
             await context.bot.send_video(
                 chat_id=query.from_user.id,
                 video=open(path, "rb"),
@@ -421,7 +422,6 @@ async def show_video_in_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode=ParseMode.MARKDOWN,
                 supports_streaming=True
             )
-            # Go back to add account
             await add_account_start(update, context)
         except Exception as e:
             logger.error(f"Error sending video: {e}")
@@ -447,7 +447,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not session or not session.step:
         return
 
-    # Handle editing field
     if context.user_data.get("step") == "editing_field":
         await handle_edit_field_input(update, context)
         return
@@ -459,7 +458,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ إيميل غير صالح.")
             return
         
-        # Check if email is already approved or pending
         user_data = get_user(uid)
         
         # Check approved accounts
@@ -483,7 +481,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Check rejected emails
         rejected_emails = user_data.get("rejected_emails", [])
         if text in rejected_emails:
-            # Check if rejected more than 3 times
             rejection_count = sum(1 for email in rejected_emails if email == text)
             if rejection_count >= 3:
                 await update.message.reply_text(
@@ -492,7 +489,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
             else:
-                # Remove from rejected to allow resubmission
                 rejected_emails.remove(text)
                 user_data["rejected_emails"] = rejected_emails
                 save_user(uid, user_data)
@@ -514,7 +510,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif session.step == "password":
         session.password = text
         session.step = "totp"
-        # Delete the message with password
         try:
             await update.message.delete()
         except:
@@ -537,7 +532,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             code = pyotp.TOTP(secret).now()
             session.totp = secret
             session.step = "app_pass"
-            # Delete the message with TOTP
             try:
                 await update.message.delete()
             except:
@@ -558,7 +552,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif session.step == "app_pass":
         session.app_pass = text
-        # Delete the message with app password
         try:
             await update.message.delete()
         except:
@@ -582,6 +575,20 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_user(uid, user_data)
         SESSIONS.pop(uid, None)
         
+        # If user has a referrer, notify them
+        referred_by = user_data.get("referred_by")
+        if referred_by:
+            try:
+                await context.bot.send_message(
+                    chat_id=referred_by,
+                    text=f"📢 *إشعار إحالة*\n\n"
+                         f"المستخدم `{uid}` أضاف إيميل `{session.email}` وهو قيد الانتظار.\n"
+                         f"ستحصل على مكافأة عند قبول الإيميل.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except:
+                pass
+        
         await update.message.reply_text(
             f"✅ تم إرسال الطلب للمالك للموافقة!\n⏳ تمت إضافة ${price:.2f} إلى الأموال قيد الانتظار.",
             reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")])
@@ -601,7 +608,6 @@ async def handle_edit_field_input(update: Update, context: ContextTypes.DEFAULT_
     user_data = get_user(uid)
     pending = user_data.get("pending_requests", [])
     
-    # Find the pending request
     for req in pending:
         if req.get("email") == email:
             req[field] = text
@@ -610,7 +616,6 @@ async def handle_edit_field_input(update: Update, context: ContextTypes.DEFAULT_
     user_data["pending_requests"] = pending
     save_user(uid, user_data)
     
-    # Delete the message with sensitive data
     try:
         await update.message.delete()
     except:
@@ -648,7 +653,7 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
     )
 
-# ==================== OWNER PANEL: VIDEOS SECTION (UPDATED) ====================
+# ==================== OWNER PANEL: VIDEOS SECTION ====================
 async def videos_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
@@ -657,7 +662,6 @@ async def videos_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     config = load_json(DATA_DIR / "config.json")
     
-    # Check which videos exist
     video_types = {
         "email": "📹 فيديو إنشاء إيميل",
         "password": "📹 فيديو تغيير باسورد",
@@ -684,7 +688,6 @@ async def videos_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def video_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show actions for a specific video"""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
@@ -720,7 +723,6 @@ async def video_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def view_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """View the current video"""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
@@ -753,7 +755,6 @@ async def view_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def delete_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Delete a video"""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
@@ -785,7 +786,6 @@ async def delete_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def set_video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start video upload process"""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
@@ -823,7 +823,6 @@ async def handle_video_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 # ==================== OWNER PANEL: APPROVAL REQUESTS ====================
 async def approval_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show approval requests in categories"""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
@@ -841,7 +840,6 @@ async def approval_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def view_pending_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """View pending requests"""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
@@ -863,7 +861,6 @@ async def view_pending_requests(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return
     
-    # Show list of pending emails
     rows = []
     for req in pending:
         rows.append([(f"⏳ {req.get('email', '')}", f"pending_detail:{req['user_id']}:{req.get('email', '')}")])
@@ -876,7 +873,6 @@ async def view_pending_requests(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
 async def view_approved_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """View approved requests"""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
@@ -913,7 +909,6 @@ async def view_approved_requests(update: Update, context: ContextTypes.DEFAULT_T
     )
 
 async def view_rejected_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """View rejected requests"""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
@@ -960,7 +955,6 @@ async def view_rejected_requests(update: Update, context: ContextTypes.DEFAULT_T
     )
 
 async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show detailed view of a pending request"""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
@@ -999,7 +993,6 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def reject_request_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show rejection reasons menu"""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
@@ -1028,7 +1021,6 @@ async def reject_request_reason(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
 async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Execute rejection with reason"""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
@@ -1041,7 +1033,6 @@ async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TY
     
     user_data = get_user(uid)
     
-    # Find the pending request
     pending_requests = user_data.get("pending_requests", [])
     request = next((req for req in pending_requests if req.get("email") == email), None)
     
@@ -1052,24 +1043,19 @@ async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return
     
-    # Remove from pending
     user_data["pending_requests"] = [req for req in pending_requests if req.get("email") != email]
     
-    # Add to rejected requests with reason
     request["reject_reason"] = reason_type
     user_data.setdefault("rejected_requests", []).append(request)
     
-    # Also add to rejected emails for duplicate protection
     rejected_emails = user_data.get("rejected_emails", [])
     rejected_emails.append(email)
     user_data["rejected_emails"] = rejected_emails
     
-    # Remove pending balance
     user_data["pending_balance"] = max(0.0, float(user_data.get("pending_balance", 0.0)) - float(request.get("amount", 0.0)))
     
     save_user(uid, user_data)
     
-    # Send rejection message to user
     reason_messages = {
         "email": "❌ الإيميل الذي أرسلته غير صحيح أو غير مقبول.",
         "password": "❌ كلمة المرور التي أرسلتها غير صحيحة.",
@@ -1080,7 +1066,6 @@ async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TY
     
     reason = reason_messages.get(reason_type, "❌ تم رفض طلبك.")
     
-    # Add video suggestion based on reason
     config = load_json(DATA_DIR / "config.json")
     
     if reason_type == "email":
@@ -1136,7 +1121,6 @@ async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TY
             except:
                 pass
     else:
-        # For "other" reason, ask for custom message
         context.user_data["reject_uid"] = uid
         context.user_data["reject_email"] = email
         context.user_data["reject_reason"] = "other"
@@ -1150,7 +1134,6 @@ async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data["step"] = "reject_reason_text"
         return
     
-    # Send reason message to user
     try:
         await context.bot.send_message(
             chat_id=uid,
@@ -1169,7 +1152,6 @@ async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
 async def handle_reject_reason_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle custom rejection reason text"""
     uid = context.user_data.get("reject_uid")
     email = context.user_data.get("reject_email")
     text = update.message.text.strip()
@@ -1178,7 +1160,6 @@ async def handle_reject_reason_text(update: Update, context: ContextTypes.DEFAUL
         await update.message.reply_text("⚠️ حدث خطأ، حاول مرة أخرى.")
         return
     
-    # Send custom reason to user
     try:
         await context.bot.send_message(
             chat_id=uid,
@@ -1202,7 +1183,6 @@ async def handle_reject_reason_text(update: Update, context: ContextTypes.DEFAUL
     )
 
 async def approve_request_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Approve a request from owner panel"""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
@@ -1229,7 +1209,6 @@ async def approve_request_owner(update: Update, context: ContextTypes.DEFAULT_TY
 
     price = float(approved_request.get("amount", default_price))
     
-    # Add to approved accounts
     approved_request["extracted"] = False
     user_data.setdefault("approved_accounts", []).append(approved_request)
     user_data["pending_balance"] = max(
@@ -1240,6 +1219,10 @@ async def approve_request_owner(update: Update, context: ContextTypes.DEFAULT_TY
     user_data["pending_requests"] = [
         req for req in user_data.get("pending_requests", []) if req["email"] != email
     ]
+    
+    # Update total approved emails count
+    user_data["total_approved_emails"] = int(user_data.get("total_approved_emails", 0)) + 1
+    
     save_user(uid, user_data)
 
     # Handle referral bonus
@@ -1262,7 +1245,6 @@ async def approve_request_owner(update: Update, context: ContextTypes.DEFAULT_TY
             except:
                 pass
     
-    # Notify user
     try:
         await context.bot.send_message(
             chat_id=uid,
@@ -1298,7 +1280,6 @@ async def all_accounts_section(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
 async def all_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Display all approved accounts across all users"""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
@@ -1347,7 +1328,6 @@ async def all_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def unextracted_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Display accounts that haven't been extracted yet"""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
@@ -1395,7 +1375,6 @@ async def unextracted_accounts(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
 async def mark_extracted_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Menu to mark accounts as extracted"""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
@@ -1434,7 +1413,6 @@ async def mark_extracted_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
 async def mark_extracted(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Mark a specific account as extracted"""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
@@ -1462,7 +1440,6 @@ async def mark_extracted(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def export_all_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Export all approved accounts as a single message"""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
@@ -1507,7 +1484,6 @@ async def export_all_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
 
 async def export_unextracted(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Export only unextracted accounts"""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
@@ -1535,7 +1511,6 @@ async def export_unextracted(update: Update, context: ContextTypes.DEFAULT_TYPE)
         export_msg += f"🗝 {acc.get('app_pass', '')}\n"
         export_msg += "─" * 20 + "\n"
 
-    # Mark all as extracted after export
     for uid, user_data in users.items():
         for acc in user_data.get("approved_accounts", []):
             if not acc.get("extracted", False):
@@ -1567,7 +1542,7 @@ async def set_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text("💰 أرسل السعر الجديد للحساب الواحد (رقم فقط):")
     context.user_data["mode"] = "set_price"
 
-# ==================== OWNER PANEL: STORE SECTION ====================
+# ==================== OWNER PANEL: STORE SECTION (UPDATED) ====================
 async def owner_store_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
@@ -1650,7 +1625,42 @@ async def store_add_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["store_action"] = "add_service_name"
     
     await query.edit_message_text(
-        "✏️ *إضافة مبيعة جديدة*\n\n📌 الخطوة 1/2: أرسل اسم المبيعة:",
+        "✏️ *إضافة مبيعة جديدة*\n\n📌 الخطوة 1/3: أرسل اسم المبيعة:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([("🔙 إلغاء", f"store_category:{cat_id}")])
+    )
+
+async def store_add_service_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Get service price"""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    cat_id = query.data.split(":", 1)[1]
+    context.user_data["current_category_id"] = cat_id
+    context.user_data["store_action"] = "add_service_price"
+    
+    await query.edit_message_text(
+        "💰 *الخطوة 2/3*: أرسل سعر المبيعة (رقم فقط):",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([("🔙 إلغاء", f"store_category:{cat_id}")])
+    )
+
+async def store_add_service_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Get service message"""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    cat_id = query.data.split(":", 1)[1]
+    context.user_data["current_category_id"] = cat_id
+    context.user_data["store_action"] = "add_service_message"
+    
+    await query.edit_message_text(
+        "📝 *الخطوة 3/3*: أرسل الرسالة التي ستظهر للعميل بعد الشراء:\n\n"
+        "مثال: أرسل معرفك في ببجي ليتم إرسال الهدية.",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=kb([("🔙 إلغاء", f"store_category:{cat_id}")])
     )
@@ -1797,11 +1807,15 @@ async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     config = load_json(DATA_DIR / "config.json")
     service = None
+    service_name = ""
+    service_message = ""
     for cat in config["store_categories"]:
         if cat["id"] == cat_id:
             for s in cat["services"]:
                 if s["id"] == service_id:
                     service = s
+                    service_name = s.get("name", "")
+                    service_message = s.get("message", "شكراً لشرائك الخدمة!")
                     break
             break
     
@@ -1814,9 +1828,52 @@ async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"❌ رصيدك غير كافٍ. الرصيد: ${user_data['balance']:.2f}, السعر: ${service['price']:.2f}")
         return
 
+    # Deduct balance
     user_data["balance"] -= service["price"]
     save_user(user_id, user_data)
-    await query.edit_message_text(f"✅ تم شراء الخدمة بنجاح!\n🛒 {service['name']}\n💰 تم خصم ${service['price']:.2f}")
+    
+    # Get user info
+    bot_username = (await context.bot.get_me()).username
+    total_emails = user_data.get("total_approved_emails", 0)
+    
+    # Send to first channel (bot info)
+    if PURCHASE_CHANNEL_1:
+        try:
+            await context.bot.send_message(
+                chat_id=PURCHASE_CHANNEL_1,
+                text=f"🛒 *طلب شراء جديد*\n\n"
+                     f"🤖 يوزر البوت: @{bot_username}\n"
+                     f"📦 الطلب: {service_name}\n"
+                     f"💰 السعر: ${service['price']:.2f}"
+            )
+        except Exception as e:
+            logger.error(f"Error sending to channel 1: {e}")
+    
+    # Send to second channel (detailed info)
+    if PURCHASE_CHANNEL_2:
+        try:
+            await context.bot.send_message(
+                chat_id=PURCHASE_CHANNEL_2,
+                text=f"📋 *تفاصيل الطلب*\n\n"
+                     f"👤 اسم الطالب: {user_id}\n"
+                     f"📦 ما طلب: {service_name}\n"
+                     f"📝 الرسالة: {service_message}\n"
+                     f"⏰ وقت الطلب: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                     f"📧 عدد الإيميلات المقبولة: {total_emails}"
+            )
+        except Exception as e:
+            logger.error(f"Error sending to channel 2: {e}")
+    
+    # Send message to user with the service message
+    await query.edit_message_text(
+        f"✅ تم شراء الخدمة بنجاح!\n\n"
+        f"🛒 *{service_name}*\n"
+        f"💰 تم خصم ${service['price']:.2f}\n\n"
+        f"📝 *ملاحظة:* {service_message}\n\n"
+        f"يمكنك الرد على هذه الرسالة لتقديم المعلومات المطلوبة.",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([("🔙 قسم السحب", "withdraw_store")])
+    )
 
 # ==================== MY WALLET ====================
 async def my_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1853,7 +1910,6 @@ async def play_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if path and Path(path).exists():
         try:
-            # Send video with streaming support for native playback
             await context.bot.send_video(
                 chat_id=query.from_user.id,
                 video=open(path, "rb"),
@@ -1861,7 +1917,6 @@ async def play_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode=ParseMode.MARKDOWN,
                 supports_streaming=True
             )
-            # Keep the tutorial menu open
             await tutorials(update, context)
         except Exception as e:
             logger.error(f"Error sending video: {e}")
@@ -1897,12 +1952,12 @@ async def referral_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"`{referral_link}`\n\n"
         f"📊 *إحصائياتك:*\n"
         f"💰 مكافآت الإحالة: ${float(user_data.get('referral_earnings', 0.0)):.2f}\n"
-        f"👥 عدد الإحالات: {user_data.get('total_referrals', 0)}\n\n"
+        f"👥 عدد الإحالات الناجحة: {user_data.get('total_referrals', 0)}\n\n"
         f"📝 *كيف يعمل النظام؟*\n"
         f"1️⃣ شارك رابط الإحالة مع أصدقائك\n"
         f"2️⃣ عند إضافة صديقك لحساب جديد وقبوله من المالك\n"
         f"3️⃣ ستحصل على مكافأة إحالة لكل حساب مقبول\n"
-        f"4️⃣ كلما زاد عدد الحسابات، زادت مكافآتك!"
+        f"4️⃣ كلما زاد عدد الحسابات المقبولة، زادت مكافآتك!"
     )
     
     await query.edit_message_text(
@@ -2096,7 +2151,7 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data["store_service_name"] = text
         context.user_data["store_action"] = "add_service_price"
         await update.message.reply_text(
-            "💰 *الخطوة 2/2*: أرسل سعر المبيعة (رقم فقط):",
+            "💰 *الخطوة 2/3*: أرسل سعر المبيعة (رقم فقط):",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=kb([("🔙 إلغاء", f"store_category:{context.user_data.get('current_category_id')}")])
         )
@@ -2107,33 +2162,46 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if price <= 0:
                 await update.message.reply_text("⚠️ السعر يجب أن يكون أكبر من 0!")
                 return
-                
-            name = context.user_data["store_service_name"]
-            cat_id = context.user_data["current_category_id"]
             
-            config = load_json(DATA_DIR / "config.json")
-            for cat in config["store_categories"]:
-                if cat["id"] == cat_id:
-                    cat["services"].append({
-                        "id": str(time.time_ns()), 
-                        "name": name, 
-                        "price": price
-                    })
-                    break
-            save_json(DATA_DIR / "config.json", config)
-            
+            context.user_data["store_service_price"] = price
+            context.user_data["store_action"] = "add_service_message"
             await update.message.reply_text(
-                f"✅ تم إضافة المبيعة بنجاح!\n"
-                f"📌 الاسم: {name}\n"
-                f"💰 السعر: ${price:.2f}"
+                "📝 *الخطوة 3/3*: أرسل الرسالة التي ستظهر للعميل بعد الشراء:\n\n"
+                "مثال: أرسل معرفك في ببجي ليتم إرسال الهدية.",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=kb([("🔙 إلغاء", f"store_category:{context.user_data.get('current_category_id')}")])
             )
-            context.user_data.pop("store_action", None)
-            context.user_data.pop("store_service_name", None)
-            context.user_data.pop("current_category_id", None)
-            await main_menu(update, context)
-            
         except ValueError:
             await update.message.reply_text("⚠️ يرجى إرسال رقم صحيح (مثال: 10.50)")
+
+    elif action == "add_service_message":
+        name = context.user_data.get("store_service_name")
+        price = context.user_data.get("store_service_price")
+        cat_id = context.user_data.get("current_category_id")
+        
+        config = load_json(DATA_DIR / "config.json")
+        for cat in config["store_categories"]:
+            if cat["id"] == cat_id:
+                cat["services"].append({
+                    "id": str(time.time_ns()), 
+                    "name": name, 
+                    "price": price,
+                    "message": text
+                })
+                break
+        save_json(DATA_DIR / "config.json", config)
+        
+        await update.message.reply_text(
+            f"✅ تم إضافة المبيعة بنجاح!\n"
+            f"📌 الاسم: {name}\n"
+            f"💰 السعر: ${price:.2f}\n"
+            f"📝 الرسالة: {text}"
+        )
+        context.user_data.pop("store_action", None)
+        context.user_data.pop("store_service_name", None)
+        context.user_data.pop("store_service_price", None)
+        context.user_data.pop("current_category_id", None)
+        await main_menu(update, context)
 
 # ==================== REFERRAL HANDLER ====================
 async def handle_referral(update: Update, context: ContextTypes.DEFAULT_TYPE, referral_code: str):
@@ -2229,6 +2297,8 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "store_add_category": await store_add_category(update, context)
     elif data.startswith("store_category:"): await store_category_menu(update, context)
     elif data.startswith("store_add_service:"): await store_add_service(update, context)
+    elif data.startswith("store_add_service_price:"): await store_add_service_price(update, context)
+    elif data.startswith("store_add_service_message:"): await store_add_service_message(update, context)
     elif data.startswith("store_delete_service:"): await store_delete_service(update, context)
     elif data.startswith("delete_service:"): await delete_service_execute(update, context)
     elif data == "forced_channel": await forced_channel(update, context)
