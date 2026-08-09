@@ -14,6 +14,8 @@ Advanced Telegram Account Manager Bot - Full Version with All Features
 - Advanced Approval System with Reasons
 - User Accounts with Status (Approved, Rejected, Pending)
 - Purchase System with Dual Channel Notifications
+- General Bot Tutorial Video
+- Leave Video System with Auto-Transfer after 24 Hours (NEW)
 """
 
 import asyncio
@@ -135,6 +137,7 @@ def get_user(user_id: int) -> dict:
     return users.get(str(user_id), {
         "balance": 0.0,
         "pending_balance": 0.0,
+        "hold_balance": 0.0,
         "approved_accounts": [],
         "pending_requests": [],
         "rejected_emails": [],
@@ -144,7 +147,7 @@ def get_user(user_id: int) -> dict:
         "referral_earnings": 0.0,
         "total_referrals": 0,
         "total_approved_emails": 0,
-        "pending_purchases": []  # Store pending purchases before user sends message
+        "pending_purchases": []
     })
 
 def save_user(user_id: int, user_data: dict):
@@ -188,7 +191,6 @@ class Session:
 
 SESSIONS: Dict[int, Session] = {}
 
-# Store pending purchases waiting for user message
 PENDING_PURCHASES: Dict[int, Dict] = {}
 
 # ==================== FORCED CHANNEL CHECK ====================
@@ -249,7 +251,6 @@ async def check_forced_channel(update: Update, context: ContextTypes.DEFAULT_TYP
     
     user_id = update.effective_user.id
     
-    # Owner is exempt from forced channel
     if user_id == OWNER_ID:
         return True
     
@@ -260,7 +261,6 @@ async def check_forced_channel(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as exc:
         logger.warning("Could not verify forced-channel membership for %s: %s", user_id, exc)
     
-    # User is not in channel
     text = (
         f"📢 *يرجى الانضمام إلى القناة أولاً:*\n{forced_channel}\n\n"
         "بعد الانضمام اضغط على زر «تحققت من الاشتراك»."
@@ -277,8 +277,6 @@ async def check_forced_channel(update: Update, context: ContextTypes.DEFAULT_TYP
                 reply_markup=reply_markup,
             )
         except Exception:
-            # Telegram returns "message is not modified" when the user taps
-            # re-check without joining; keep the existing buttons usable.
             await update.callback_query.answer(
                 "لم يتم العثور على اشتراكك بعد. انضم إلى القناة ثم أعد المحاولة.",
                 show_alert=True,
@@ -299,7 +297,6 @@ async def check_forced_channel_callback(update: Update, context: ContextTypes.DE
 
 # ==================== MAIN MENU ====================
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Check forced channel first
     if not await check_forced_channel(update, context):
         return
     
@@ -346,7 +343,12 @@ async def my_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if approved:
         msg += "✅ *مقبولة:*\n"
         for idx, acc in enumerate(approved, 1):
-            msg += f"  {idx}. 📧 `{acc.get('email', '')}` ✅\n"
+            leave_status = ""
+            if acc.get("approved_with_leave", False) and not acc.get("leave_confirmed", False):
+                leave_status = " ⏳ (معلق 24 ساعة)"
+            elif acc.get("approved_with_leave", False) and acc.get("leave_confirmed", False):
+                leave_status = " ✅ (تم التحويل)"
+            msg += f"  {idx}. 📧 `{acc.get('email', '')}` ✅{leave_status}\n"
         msg += "\n"
     
     if pending:
@@ -692,8 +694,13 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 pass
         
+        # إرسال فيديو المغادرة للمستخدم
+        await send_leave_video_to_user(context, uid, session.email)
+        
         await update.message.reply_text(
-            f"✅ تم إرسال الطلب للمالك للموافقة!\n⏳ تمت إضافة ${price:.2f} إلى الأموال قيد الانتظار.",
+            f"✅ تم إرسال الطلب للمالك للموافقة!\n⏳ تمت إضافة ${price:.2f} إلى الأموال قيد الانتظار.\n\n"
+            f"📹 تم إرسال فيديو المغادرة إليك.\n"
+            f"⚠️ قم بمغادرة الحساب لتجنب تأخير الدفعة.",
             reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")])
         )
 
@@ -756,6 +763,161 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
     )
 
+# ==================== LEAVE VIDEO SYSTEM ====================
+async def send_leave_video_to_user(context: ContextTypes.DEFAULT_TYPE, user_id: int, email: str):
+    """إرسال فيديو المغادرة للمستخدم مع تعليمات"""
+    config = load_json(DATA_DIR / "config.json")
+    video_path = config.get("video_leave")
+    
+    text = (
+        f"📹 *فيديو المغادرة*\n\n"
+        f"📧 الإيميل: `{email}`\n\n"
+        f"⚠️ *تعليمات مهمة:*\n"
+        f"• قم بمغادرة الحساب الآن\n"
+        f"• إذا لم تقم بمغادرة الحساب\n"
+        f"• سيتم تأخير دفع المبلغ المستحق لك لمدة 24 ساعة\n\n"
+        f"📌 *ملاحظة:* بعد 24 ساعة سيتم إضافة المبلغ إلى رصيدك تلقائياً\n"
+        f"بغض النظر عن مغادرة الحساب.\n\n"
+        f"_شاهد الفيديو لمعرفة طريقة المغادرة الصحيحة_"
+    )
+    
+    if video_path and Path(video_path).exists():
+        try:
+            await context.bot.send_video(
+                chat_id=user_id,
+                video=open(video_path, "rb"),
+                caption=text,
+                parse_mode=ParseMode.MARKDOWN,
+                supports_streaming=True
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Error sending leave video to user {user_id}: {e}")
+            try:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=text,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except:
+                pass
+            return False
+    else:
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=text,
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except:
+            pass
+        return False
+
+async def send_leave_video_reminder(context: ContextTypes.DEFAULT_TYPE, user_id: int, email: str):
+    """إرسال تذكير للمستخدم بعد 24 ساعة"""
+    text = (
+        f"⏰ *تذكير بمغادرة الحساب*\n\n"
+        f"📧 الإيميل: `{email}`\n\n"
+        f"⚠️ *لم تقم بمغادرة الحساب بعد!*\n\n"
+        f"📌 سيتم إضافة المبلغ إلى رصيدك خلال 24 ساعة أخرى\n"
+        f"بغض النظر عن مغادرة الحساب.\n\n"
+        f"_يمكنك مشاهدة فيديو المغادرة لتتعلم الطريقة الصحيحة_"
+    )
+    
+    config = load_json(DATA_DIR / "config.json")
+    video_path = config.get("video_leave")
+    
+    if video_path and Path(video_path).exists():
+        try:
+            await context.bot.send_video(
+                chat_id=user_id,
+                video=open(video_path, "rb"),
+                caption=text,
+                parse_mode=ParseMode.MARKDOWN,
+                supports_streaming=True
+            )
+        except Exception as e:
+            logger.error(f"Error sending leave video reminder to user {user_id}: {e}")
+            try:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=text,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except:
+                pass
+    else:
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=text,
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except:
+            pass
+
+async def schedule_leave_check(context: ContextTypes.DEFAULT_TYPE, user_id: int, email: str):
+    """جدولة التحقق من المغادرة بعد 24 ساعة"""
+    job_name = f"leave_check_{user_id}_{email}"
+    
+    current_jobs = context.job_queue.get_jobs_by_name(job_name)
+    for job in current_jobs:
+        job.schedule_removal()
+    
+    context.job_queue.run_once(
+        callback=check_leave_status,
+        when=86400,
+        data={"user_id": user_id, "email": email},
+        name=job_name
+    )
+    
+    logger.info(f"Scheduled auto-transfer for user {user_id}, email {email} in 24 hours")
+
+async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
+    """التحقق من حالة المغادرة بعد 24 ساعة - تحويل المبلغ تلقائياً"""
+    job_data = context.job.data
+    user_id = job_data["user_id"]
+    email = job_data["email"]
+    
+    user_data = get_user(user_id)
+    
+    accounts = user_data.get("approved_accounts", [])
+    account = next((acc for acc in accounts if acc.get("email") == email), None)
+    
+    if not account:
+        logger.info(f"Account {email} not found for user {user_id}")
+        return
+    
+    if account.get("leave_confirmed", False):
+        logger.info(f"Leave already confirmed for {email}")
+        return
+    
+    price = float(account.get("amount", 0.0))
+    
+    user_data["hold_balance"] = max(0.0, float(user_data.get("hold_balance", 0.0)) - price)
+    user_data["balance"] = float(user_data.get("balance", 0.0)) + price
+    
+    account["leave_confirmed"] = True
+    account["auto_confirmed"] = True
+    account["confirmed_at"] = datetime.now(timezone.utc).isoformat()
+    
+    save_user(user_id, user_data)
+    
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"✅ *تم إضافة المبلغ إلى رصيدك تلقائياً!*\n\n"
+                 f"📧 الإيميل: `{email}`\n"
+                 f"💰 تم إضافة ${price:.2f} إلى رصيدك.\n\n"
+                 f"🕐 *ملاحظة:* تم التحويل تلقائياً بعد 24 ساعة من الموافقة.\n\n"
+                 f"_شكراً لاستخدامك البوت 🤖_",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except Exception as e:
+        logger.error(f"Could not send auto-confirmation to user {user_id}: {e}")
+    
+    logger.info(f"Auto-confirmed leave for {email}, user {user_id}, amount ${price:.2f}")
+
 # ==================== OWNER PANEL: VIDEOS SECTION ====================
 async def videos_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -766,10 +928,12 @@ async def videos_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_json(DATA_DIR / "config.json")
     
     video_types = {
+        "general": "📖 شرح عام للبوت",
         "email": "📹 فيديو إنشاء إيميل",
         "password": "📹 فيديو تغيير باسورد",
         "totp": "📹 فيديو إضافة 2FA",
-        "app_pass": "📹 فيديو كلمة مرور التطبيق"
+        "app_pass": "📹 فيديو كلمة مرور التطبيق",
+        "leave": "📹 فيديو المغادرة"
     }
     
     rows = []
@@ -802,10 +966,12 @@ async def video_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     exists = video_path and Path(video_path).exists()
     
     video_names = {
+        "general": "شرح عام للبوت",
         "email": "إنشاء إيميل",
         "password": "تغيير باسورد",
         "totp": "إضافة 2FA",
-        "app_pass": "كلمة مرور التطبيق"
+        "app_pass": "كلمة مرور التطبيق",
+        "leave": "المغادرة"
     }
     
     rows = []
@@ -999,7 +1165,12 @@ async def view_approved_requests(update: Update, context: ContextTypes.DEFAULT_T
     
     msg = "✅ *الطلبات المقبولة*\n\n"
     for idx, acc in enumerate(approved, 1):
-        msg += f"{idx}. 📧 `{acc.get('email', '')}`\n"
+        leave_status = ""
+        if acc.get("approved_with_leave", False) and not acc.get("leave_confirmed", False):
+            leave_status = " ⏳ (معلق 24 ساعة)"
+        elif acc.get("approved_with_leave", False) and acc.get("leave_confirmed", False):
+            leave_status = " ✅ (تم التحويل)"
+        msg += f"{idx}. 📧 `{acc.get('email', '')}`{leave_status}\n"
         msg += f"   👤 المستخدم: {acc.get('user_id', '')}\n\n"
     
     if len(msg) > 4000:
@@ -1085,14 +1256,23 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg += f"👤 *المستخدم:* `{uid}`\n"
     msg += f"💰 *السعر:* ${request.get('amount', 0):.2f}\n"
     
+    config = load_json(DATA_DIR / "config.json")
+    has_leave_video = config.get("video_leave") and Path(config.get("video_leave", "")).exists()
+    
+    buttons = [
+        [("✅ قبول فوري", f"approve_request:{uid}:{email}")],
+    ]
+    
+    if has_leave_video:
+        buttons.append([("📹 قبول مع فيديو المغادرة", f"approve_with_leave:{uid}:{email}")])
+    
+    buttons.append([("❌ رفض", f"reject_request:{uid}:{email}")])
+    buttons.append([("🔙 الطلبات المنتظرة", "view_pending")])
+    
     await query.edit_message_text(
         msg,
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([
-            [("✅ قبول", f"approve_request:{uid}:{email}")],
-            [("❌ رفض", f"reject_request:{uid}:{email}")],
-            [("🔙 الطلبات المنتظرة", "view_pending")]
-        ])
+        reply_markup=kb(*buttons)
     )
 
 async def reject_request_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1313,6 +1493,8 @@ async def approve_request_owner(update: Update, context: ContextTypes.DEFAULT_TY
     price = float(approved_request.get("amount", default_price))
     
     approved_request["extracted"] = False
+    approved_request["approved_with_leave"] = False
+    approved_request["leave_confirmed"] = True
     user_data.setdefault("approved_accounts", []).append(approved_request)
     user_data["pending_balance"] = max(
         0.0,
@@ -1349,7 +1531,7 @@ async def approve_request_owner(update: Update, context: ContextTypes.DEFAULT_TY
     try:
         await context.bot.send_message(
             chat_id=uid,
-            text=f"✅ *تم قبول طلبك!*\n\n"
+            text=f"✅ *تم قبول طلبك فوراً!*\n\n"
                  f"📧 الإيميل: `{email}`\n"
                  f"💰 تم إضافة ${price:.2f} إلى رصيدك.",
             parse_mode=ParseMode.MARKDOWN
@@ -1358,7 +1540,83 @@ async def approve_request_owner(update: Update, context: ContextTypes.DEFAULT_TY
         pass
 
     await query.edit_message_text(
-        f"✅ تم قبول الحساب `{email}`!\n💰 تم نقل ${price:.2f} من قيد الانتظار إلى الرصيد المملوك.",
+        f"✅ تم قبول الحساب `{email}` فوراً!\n💰 تم نقل ${price:.2f} من قيد الانتظار إلى الرصيد المملوك.",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([("🔙 الطلبات المنتظرة", "view_pending")])
+    )
+
+async def approve_with_leave(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """قبول الطلب مع إرسال فيديو المغادرة وتأخير الدفع 24 ساعة (تحويل تلقائي)"""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+
+    parts = query.data.split(":")
+    uid = int(parts[1])
+    email = parts[2]
+
+    user_data = get_user(uid)
+    config = load_json(DATA_DIR / "config.json")
+    default_price = float(config.get("default_price", 5.0))
+
+    approved_request = next(
+        (req for req in user_data.get("pending_requests", []) if req["email"] == email),
+        None,
+    )
+    if not approved_request:
+        await query.edit_message_text(
+            "⚠️ هذا الطلب غير موجود أو تمت معالجته مسبقاً.",
+            reply_markup=kb([("🔙 الطلبات المنتظرة", "view_pending")]),
+        )
+        return
+
+    price = float(approved_request.get("amount", default_price))
+    
+    approved_request["extracted"] = False
+    approved_request["leave_confirmed"] = False
+    approved_request["leave_sent"] = True
+    approved_request["approved_with_leave"] = True
+    approved_request["approval_time"] = datetime.now(timezone.utc).isoformat()
+    
+    user_data.setdefault("approved_accounts", []).append(approved_request)
+    
+    user_data["pending_balance"] = max(
+        0.0,
+        float(user_data.get("pending_balance", 0.0)) - price,
+    )
+    
+    user_data["hold_balance"] = float(user_data.get("hold_balance", 0.0)) + price
+    
+    user_data["pending_requests"] = [
+        req for req in user_data.get("pending_requests", []) if req["email"] != email
+    ]
+    
+    save_user(uid, user_data)
+
+    await send_leave_video_to_user(context, uid, email)
+    
+    try:
+        await context.bot.send_message(
+            chat_id=uid,
+            text=f"✅ *تم قبول طلبك مع فيديو المغادرة!*\n\n"
+                 f"📧 الإيميل: `{email}`\n"
+                 f"💰 المبلغ المعلق: ${price:.2f}\n\n"
+                 f"⏰ *سيتم إضافة المبلغ إلى رصيدك تلقائياً بعد 24 ساعة*\n\n"
+                 f"📹 تم إرسال فيديو المغادرة إليك.\n"
+                 f"⚠️ قم بمغادرة الحساب لتجنب أي تأخير.\n\n"
+                 f"_ستتلقى إشعاراً عند إضافة المبلغ إلى رصيدك_",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except:
+        pass
+    
+    await schedule_leave_check(context, uid, email)
+
+    await query.edit_message_text(
+        f"✅ تم قبول الحساب `{email}` مع فيديو المغادرة!\n"
+        f"💰 المبلغ ${price:.2f} معلق لمدة 24 ساعة.\n"
+        f"⏰ سيتم تحويله تلقائياً بعد 24 ساعة.",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=kb([("🔙 الطلبات المنتظرة", "view_pending")])
     )
@@ -1376,8 +1634,65 @@ async def all_accounts_section(update: Update, context: ContextTypes.DEFAULT_TYP
         reply_markup=kb([
             [("📋 جميع الحسابات", "all_accounts")],
             [("🆕 آخر الحسابات (غير المستخرجة)", "unextracted_accounts")],
+            [("⏳ الحسابات المعلقة (24 ساعة)", "hold_accounts")],
             [("🔙 إعدادات المالك", "owner_panel")]
         ])
+    )
+
+async def hold_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """عرض الحسابات المعلقة (في انتظار التحويل التلقائي بعد 24 ساعة)"""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+
+    users = load_json(USERS_DB)
+    hold_accounts_list = []
+    
+    for uid, user_data in users.items():
+        for acc in user_data.get("approved_accounts", []):
+            if acc.get("approved_with_leave", False) and not acc.get("leave_confirmed", False):
+                acc_copy = acc.copy()
+                acc_copy["user_id"] = uid
+                hold_accounts_list.append(acc_copy)
+    
+    if not hold_accounts_list:
+        await query.edit_message_text(
+            "✅ لا توجد حسابات معلقة حالياً.",
+            reply_markup=kb([("🔙 جميع الحسابات", "all_accounts_section")])
+        )
+        return
+
+    total = len(hold_accounts_list)
+    msg = f"⏳ *الحسابات المعلقة (في انتظار التحويل): {total}*\n\n"
+    
+    for idx, acc in enumerate(hold_accounts_list[:10], 1):
+        approval_time = acc.get("approval_time", "غير معروف")
+        try:
+            dt = datetime.fromisoformat(approval_time)
+            time_left = 86400 - (datetime.now(timezone.utc) - dt).total_seconds()
+            if time_left > 0:
+                hours_left = int(time_left // 3600)
+                minutes_left = int((time_left % 3600) // 60)
+                time_display = f"{hours_left} ساعة {minutes_left} دقيقة"
+            else:
+                time_display = "سيتم التحويل قريباً"
+        except:
+            time_display = "غير معروف"
+        
+        msg += f"{idx}. 📧 `{acc.get('email', '')}`\n"
+        msg += f"   👤 المستخدم: {acc.get('user_id', '')}\n"
+        msg += f"   💰 المبلغ: ${acc.get('amount', 0):.2f}\n"
+        msg += f"   ⏳ الوقت المتبقي: {time_display}\n"
+        msg += "   ─────────────\n"
+    
+    if total > 10:
+        msg += f"\n📌 *ملاحظة:* تم عرض أول 10 حسابات من أصل {total}"
+
+    await query.edit_message_text(
+        msg,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([("🔙 جميع الحسابات", "all_accounts_section")])
     )
 
 async def all_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1406,7 +1721,10 @@ async def all_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = f"📊 *إجمالي الحسابات: {total}*\n\n"
     
     for idx, acc in enumerate(all_accounts[:10], 1):
-        msg += f"{idx}. 📧 `{acc.get('email', '')}`\n"
+        leave_status = ""
+        if acc.get("approved_with_leave", False) and not acc.get("leave_confirmed", False):
+            leave_status = " ⏳ (معلق)"
+        msg += f"{idx}. 📧 `{acc.get('email', '')}`{leave_status}\n"
         msg += f"   🔑 {acc.get('password', '')}\n"
         msg += f"   🔐 {acc.get('totp', '')}\n"
         msg += f"   🗝 {acc.get('app_pass', '')}\n"
@@ -1424,6 +1742,7 @@ async def all_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=kb([
             [("📥 تصدير جميع الحسابات", "export_all_accounts")],
             [("🆕 عرض الحسابات غير المستخرجة", "unextracted_accounts")],
+            [("⏳ الحسابات المعلقة", "hold_accounts")],
             [("🔙 جميع الحسابات", "all_accounts_section")]
         ])
     )
@@ -1561,7 +1880,10 @@ async def export_all_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE
     export_msg += "═" * 30 + "\n\n"
     
     for idx, acc in enumerate(all_accounts, 1):
-        export_msg += f"📧 {idx}. {acc.get('email', '')}\n"
+        leave_status = ""
+        if acc.get("approved_with_leave", False) and not acc.get("leave_confirmed", False):
+            leave_status = " (معلق)"
+        export_msg += f"📧 {idx}. {acc.get('email', '')}{leave_status}\n"
         export_msg += f"🔑 {acc.get('password', '')}\n"
         export_msg += f"🔐 {acc.get('totp', '')}\n"
         export_msg += f"🗝 {acc.get('app_pass', '')}\n"
@@ -1991,14 +2313,12 @@ async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_data = get_user(user_id)
     
-    # Check balance first
     if user_data["balance"] < service["price"]:
         await query.edit_message_text(
             f"❌ رصيدك غير كافٍ. الرصيد: ${user_data['balance']:.2f}, السعر: ${service['price']:.2f}"
         )
         return
 
-    # Store pending purchase BEFORE charging
     PENDING_PURCHASES[user_id] = {
         "service_id": service_id,
         "service_name": service_name,
@@ -2007,7 +2327,6 @@ async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "purchased_at": datetime.now().isoformat()
     }
     
-    # Get user info
     user = update.effective_user
     user_name = user.full_name or "غير معروف"
     user_username = user.username or "لا يوجد"
@@ -2016,9 +2335,6 @@ async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_username = (await context.bot.get_me()).username
     order_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Use HTML with escaped user/service values. Telegram Markdown fails on
-    # perfectly valid names containing _, *, [, or backticks and then drops
-    # the whole notification.
     channel_1_text = (
         "🛒 <b>طلب شراء جديد</b>\n\n"
         f"🤖 يوزر البوت: @{html.escape(bot_username or 'غير معروف')}\n"
@@ -2057,7 +2373,6 @@ async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def deliver_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the delivery button click from channel 2"""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 هذا الزر للمالك فقط.", show_alert=True)
@@ -2065,11 +2380,9 @@ async def deliver_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user_id = int(query.data.split(":")[1])
     
-    # Get user info for logging
     user_data = get_user(user_id)
     total_emails = user_data.get("total_approved_emails", 0)
     
-    # Send confirmation to user
     try:
         await context.bot.send_message(
             chat_id=user_id,
@@ -2082,7 +2395,6 @@ async def deliver_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Could not send delivery confirmation to user {user_id}: {e}")
     
-    # Clean up
     PENDING_PURCHASES.pop(user_id, None)
     
     await query.edit_message_text(
@@ -2093,7 +2405,6 @@ async def deliver_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN
     )
     
-    # Also send a confirmation message in the channel
     await query.message.reply_text(
         f"✅ تم إعلام المستخدم `{user_id}` باستلام طلبه.",
         parse_mode=ParseMode.MARKDOWN
@@ -2101,24 +2412,19 @@ async def deliver_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== HANDLE USER MESSAGE AFTER PURCHASE ====================
 async def handle_purchase_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle user's message after purchase - charges the user and notifies owner"""
     user_id = update.effective_user.id
     text = update.message.text.strip()
     
-    # Check if user has a pending purchase
     if user_id not in PENDING_PURCHASES:
-        # If not, just pass through to normal text handler
         await text_input(update, context)
         return
     
     purchase = PENDING_PURCHASES[user_id]
     
-    # Charge the user NOW
     user_data = get_user(user_id)
     price = purchase["service_price"]
     
     if user_data["balance"] < price:
-        # This shouldn't happen since we checked before, but just in case
         await update.message.reply_text(
             f"❌ رصيدك غير كافٍ. الرصيد: ${user_data['balance']:.2f}, السعر: ${price:.2f}\n"
             f"يرجى إعادة المحاولة.",
@@ -2127,19 +2433,15 @@ async def handle_purchase_message(update: Update, context: ContextTypes.DEFAULT_
         PENDING_PURCHASES.pop(user_id, None)
         return
     
-    # Deduct money
     user_data["balance"] -= price
     save_user(user_id, user_data)
     
-    # Get user info
     user = update.effective_user
     user_name = user.full_name or "غير معروف"
     user_username = user.username or "لا يوجد"
     total_emails = user_data.get("total_approved_emails", 0)
     _, purchase_channel_2 = get_configured_purchase_channels()
 
-    # The second group must receive the member's actual message, not the
-    # instruction text configured by the owner for the service.
     if purchase_channel_2:
         channel_2_text = (
             "📋 <b>طلب شراء مكتمل</b>\n\n"
@@ -2171,7 +2473,6 @@ async def handle_purchase_message(update: Update, context: ContextTypes.DEFAULT_
     else:
         logger.error("PURCHASE_CHANNEL_2 غير مضبوط؛ لم يتم إرسال رسالة العضو.")
     
-    # Notify owner about the user's message
     if OWNER_ID:
         try:
             await context.bot.send_message(
@@ -2191,7 +2492,6 @@ async def handle_purchase_message(update: Update, context: ContextTypes.DEFAULT_
         except Exception as e:
             logger.error(f"Error sending user message to owner: {e}")
     
-    # Notify user
     await update.message.reply_text(
         f"✅ *تم استلام رسالتك بنجاح!*\n\n"
         f"💰 تم خصم `${price:.2f}` من رصيدك.\n"
@@ -2202,7 +2502,6 @@ async def handle_purchase_message(update: Update, context: ContextTypes.DEFAULT_
         reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")])
     )
     
-    # Clear pending purchase
     PENDING_PURCHASES.pop(user_id, None)
 
 # ==================== MY WALLET ====================
@@ -2213,7 +2512,10 @@ async def my_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = get_user(query.from_user.id)
     await query.edit_message_text(
-        f"💰 *أموالي*\n\n⏳ قيد الانتظار: ${float(user.get('pending_balance', 0.0)):.2f}\n✅ الرصيد المملوك: ${float(user.get('balance', 0.0)):.2f}",
+        f"💰 *أموالي*\n\n"
+        f"⏳ قيد الانتظار: ${float(user.get('pending_balance', 0.0)):.2f}\n"
+        f"⏳ معلق (24 ساعة): ${float(user.get('hold_balance', 0.0)):.2f}\n"
+        f"✅ الرصيد المملوك: ${float(user.get('balance', 0.0)):.2f}",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")])
     )
@@ -2226,6 +2528,10 @@ async def tutorials(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     config = load_json(DATA_DIR / "config.json")
     rows = []
+    
+    if config.get("video_general") and Path(config.get("video_general", "")).exists():
+        rows.append([("📖 شرح عام للبوت", "play_video:general")])
+    
     if config.get("video_email") and Path(config.get("video_email", "")).exists():
         rows.append([("📹 إنشاء إيميل", "play_video:email")])
     if config.get("video_password") and Path(config.get("video_password", "")).exists():
@@ -2234,6 +2540,8 @@ async def tutorials(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rows.append([("📹 إضافة 2FA", "play_video:totp")])
     if config.get("video_app_pass") and Path(config.get("video_app_pass", "")).exists():
         rows.append([("📹 كلمة مرور التطبيق", "play_video:app_pass")])
+    if config.get("video_leave") and Path(config.get("video_leave", "")).exists():
+        rows.append([("📹 فيديو المغادرة", "play_video:leave")])
     rows.append([("🔙 القائمة الرئيسية", "main_menu")])
     await query.edit_message_text("📺 *اختر الدرس:*", parse_mode=ParseMode.MARKDOWN, reply_markup=kb(*rows))
 
@@ -2246,12 +2554,21 @@ async def play_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_json(DATA_DIR / "config.json")
     path = config.get(f"video_{vtype}")
     
+    video_names = {
+        "general": "شرح عام للبوت",
+        "email": "إنشاء إيميل",
+        "password": "تغيير باسورد",
+        "totp": "إضافة 2FA",
+        "app_pass": "كلمة مرور التطبيق",
+        "leave": "فيديو المغادرة"
+    }
+    
     if path and Path(path).exists():
         try:
             await context.bot.send_video(
                 chat_id=query.from_user.id,
                 video=open(path, "rb"),
-                caption=f"📹 *فيديو تعليمي: {vtype}*",
+                caption=f"📹 *فيديو تعليمي: {video_names.get(vtype, vtype)}*",
                 parse_mode=ParseMode.MARKDOWN,
                 supports_streaming=True
             )
@@ -2413,12 +2730,10 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     user_id = update.effective_user.id
 
-    # Check if this is a user message for a pending purchase
     if user_id in PENDING_PURCHASES:
         await handle_purchase_message(update, context)
         return
 
-    # Check forced channel for text messages
     if not await check_forced_channel(update, context):
         return
 
@@ -2658,6 +2973,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "view_rejected": await view_rejected_requests(update, context)
     elif data.startswith("pending_detail:"): await pending_detail(update, context)
     elif data.startswith("approve_request:"): await approve_request_owner(update, context)
+    elif data.startswith("approve_with_leave:"): await approve_with_leave(update, context)
     elif data.startswith("reject_request:"): await reject_request_reason(update, context)
     elif data.startswith("reject_reason:"): await execute_reject_reason(update, context)
     elif data == "videos_section": await videos_section(update, context)
@@ -2685,6 +3001,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("deliver_order:"): await deliver_order(update, context)
     elif data == "all_accounts_section": await all_accounts_section(update, context)
     elif data == "all_accounts": await all_accounts(update, context)
+    elif data == "hold_accounts": await hold_accounts(update, context)
     elif data == "unextracted_accounts": await unextracted_accounts(update, context)
     elif data == "export_all_accounts": await export_all_accounts(update, context)
     elif data == "export_unextracted": await export_unextracted(update, context)
