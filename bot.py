@@ -2,7 +2,7 @@
 Advanced Telegram Account Manager Bot - Full Version with All Fixes
 - Owner Panel (Fully Fixed)
 - Add Account Flow with Auto-Delete Sensitive Data
-- Video System (Upload & Play) - FIXED for Telegram native playback
+- Video System (Upload, Play & Delete) - UPDATED
 - Store System (Categories & Services)
 - Wallet & Balance
 - Forced Channel
@@ -12,6 +12,7 @@ Advanced Telegram Account Manager Bot - Full Version with All Fixes
 - Duplicate Email Protection
 - Video Tutorials in Add Account Flow
 - Advanced Approval System with Reasons
+- User Accounts with Status (Approved, Rejected, Pending)
 """
 
 import asyncio
@@ -133,6 +134,7 @@ def get_user(user_id: int) -> dict:
         "approved_accounts": [],
         "pending_requests": [],
         "rejected_emails": [],
+        "rejected_requests": [],
         "referral_code": "",
         "referred_by": None,
         "referral_earnings": 0.0,
@@ -216,24 +218,54 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(text, reply_markup=kb(*rows))
 
-# ==================== MY ACCOUNTS ====================
+# ==================== MY ACCOUNTS (UPDATED) ====================
 async def my_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show user's approved accounts"""
+    """Show user's all accounts with status"""
     query = update.callback_query
     user_data = get_user(query.from_user.id)
-    approved = user_data.get("approved_accounts", [])
     
-    if not approved:
+    approved = user_data.get("approved_accounts", [])
+    pending = user_data.get("pending_requests", [])
+    rejected = user_data.get("rejected_requests", [])
+    
+    if not approved and not pending and not rejected:
         await query.edit_message_text(
-            "📭 لا توجد حسابات مقبولة لديك.",
+            "📭 لا توجد حسابات لديك.",
             reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")])
         )
         return
     
-    msg = "📋 *حساباتي المقبولة:*\n\n"
-    for idx, acc in enumerate(approved, 1):
-        msg += f"{idx}. 📧 `{acc.get('email', '')}`\n"
-        msg += f"   ✅ تم القبول: {acc.get('timestamp', '')[:10]}\n\n"
+    msg = "📋 *جميع حساباتي:*\n\n"
+    
+    # Approved accounts
+    if approved:
+        msg += "✅ *مقبولة:*\n"
+        for idx, acc in enumerate(approved, 1):
+            msg += f"  {idx}. 📧 `{acc.get('email', '')}` ✅\n"
+        msg += "\n"
+    
+    # Pending accounts
+    if pending:
+        msg += "⏳ *منتظرة:*\n"
+        for idx, req in enumerate(pending, 1):
+            msg += f"  {idx}. 📧 `{req.get('email', '')}` ⏳\n"
+        msg += "\n"
+    
+    # Rejected accounts
+    if rejected:
+        msg += "❌ *مرفوضة:*\n"
+        for idx, rej in enumerate(rejected, 1):
+            reason = rej.get('reject_reason', 'غير معروف')
+            reason_map = {
+                "email": "إيميل خطأ",
+                "password": "باسورد خطأ",
+                "totp": "رمز مصادقة خطأ",
+                "app_pass": "كلمة مرور تطبيق خطأ",
+                "custom": "سبب مخصص"
+            }
+            reason_text = reason_map.get(reason, reason)
+            msg += f"  {idx}. 📧 `{rej.get('email', '')}` ❌ - {reason_text}\n"
+        msg += "\n"
     
     await query.edit_message_text(
         msg,
@@ -616,6 +648,179 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
     )
 
+# ==================== OWNER PANEL: VIDEOS SECTION (UPDATED) ====================
+async def videos_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+
+    config = load_json(DATA_DIR / "config.json")
+    
+    # Check which videos exist
+    video_types = {
+        "email": "📹 فيديو إنشاء إيميل",
+        "password": "📹 فيديو تغيير باسورد",
+        "totp": "📹 فيديو إضافة 2FA",
+        "app_pass": "📹 فيديو كلمة مرور التطبيق"
+    }
+    
+    rows = []
+    for key, name in video_types.items():
+        video_path = config.get(f"video_{key}")
+        exists = video_path and Path(video_path).exists()
+        status = "✅" if exists else "❌"
+        rows.append([(f"{status} {name}", f"video_action:{key}")])
+    
+    rows.append([("🔙 إعدادات المالك", "owner_panel")])
+    
+    await query.edit_message_text(
+        "📹 *قسم الفيديوهات*\n\n"
+        "✅ = فيديو موجود\n"
+        "❌ = فيديو غير موجود\n\n"
+        "اختر الفيديو لإدارته:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb(*rows)
+    )
+
+async def video_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show actions for a specific video"""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    video_type = query.data.split(":", 1)[1]
+    config = load_json(DATA_DIR / "config.json")
+    video_path = config.get(f"video_{video_type}")
+    exists = video_path and Path(video_path).exists()
+    
+    video_names = {
+        "email": "إنشاء إيميل",
+        "password": "تغيير باسورد",
+        "totp": "إضافة 2FA",
+        "app_pass": "كلمة مرور التطبيق"
+    }
+    
+    rows = []
+    if exists:
+        rows.append([("📹 عرض الفيديو", f"view_video:{video_type}")])
+        rows.append([("🗑️ حذف الفيديو", f"delete_video:{video_type}")])
+    rows.append([("📤 رفع فيديو جديد", f"set_video:{video_type}")])
+    rows.append([("🔙 قسم الفيديوهات", "videos_section")])
+    
+    status = "✅ موجود" if exists else "❌ غير موجود"
+    
+    await query.edit_message_text(
+        f"📹 *فيديو {video_names.get(video_type, video_type)}*\n\n"
+        f"الحالة: {status}\n\n"
+        f"اختر الإجراء المناسب:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb(*rows)
+    )
+
+async def view_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """View the current video"""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    video_type = query.data.split(":", 1)[1]
+    config = load_json(DATA_DIR / "config.json")
+    video_path = config.get(f"video_{video_type}")
+    
+    if video_path and Path(video_path).exists():
+        try:
+            await context.bot.send_video(
+                chat_id=query.from_user.id,
+                video=open(video_path, "rb"),
+                caption=f"📹 *فيديو {video_type}*",
+                parse_mode=ParseMode.MARKDOWN,
+                supports_streaming=True
+            )
+            await video_action(update, context)
+        except Exception as e:
+            logger.error(f"Error sending video: {e}")
+            await query.edit_message_text(
+                "⚠️ حدث خطأ في عرض الفيديو.",
+                reply_markup=kb([("🔙 قسم الفيديوهات", "videos_section")])
+            )
+    else:
+        await query.edit_message_text(
+            "⚠️ الفيديو غير موجود.",
+            reply_markup=kb([("🔙 قسم الفيديوهات", "videos_section")])
+        )
+
+async def delete_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Delete a video"""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    video_type = query.data.split(":", 1)[1]
+    config = load_json(DATA_DIR / "config.json")
+    video_path = config.get(f"video_{video_type}")
+    
+    if video_path and Path(video_path).exists():
+        try:
+            Path(video_path).unlink()
+            config[f"video_{video_type}"] = ""
+            save_json(DATA_DIR / "config.json", config)
+            await query.edit_message_text(
+                f"✅ تم حذف فيديو {video_type} بنجاح!",
+                reply_markup=kb([("🔙 قسم الفيديوهات", "videos_section")])
+            )
+        except Exception as e:
+            logger.error(f"Error deleting video: {e}")
+            await query.edit_message_text(
+                "⚠️ حدث خطأ في حذف الفيديو.",
+                reply_markup=kb([("🔙 قسم الفيديوهات", "videos_section")])
+            )
+    else:
+        await query.edit_message_text(
+            "⚠️ الفيديو غير موجود.",
+            reply_markup=kb([("🔙 قسم الفيديوهات", "videos_section")])
+        )
+
+async def set_video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start video upload process"""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    video_type = query.data.split(":", 1)[1]
+    context.user_data["pending_video_type"] = video_type
+    await query.edit_message_text(
+        f"📤 *أرسل الفيديو الخاص بـ {video_type} الآن (كملف فيديو):*\n\n"
+        f"📌 سيتم استبدال الفيديو القديم إن وجد.",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([("🔙 إلغاء", f"video_action:{video_type}")])
+    )
+
+async def handle_video_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        return
+    video_type = context.user_data.get("pending_video_type")
+    if not video_type:
+        await update.message.reply_text("⚠️ لم يتم تحديد نوع الفيديو.")
+        return
+    if update.message.video:
+        file = await update.message.video.get_file()
+        file_path = VIDEOS_DIR / f"{video_type}.mp4"
+        await file.download_to_drive(file_path)
+        
+        config = load_json(DATA_DIR / "config.json")
+        config[f"video_{video_type}"] = str(file_path)
+        save_json(DATA_DIR / "config.json", config)
+        
+        await update.message.reply_text(f"✅ تم حفظ فيديو {video_type} بنجاح!")
+        context.user_data.pop("pending_video_type", None)
+        await main_menu(update, context)
+    else:
+        await update.message.reply_text("⚠️ يرجى إرسال فيديو صحيح.")
+
 # ==================== OWNER PANEL: APPROVAL REQUESTS ====================
 async def approval_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show approval requests in categories"""
@@ -624,40 +829,13 @@ async def approval_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
 
-    users = load_json(USERS_DB)
-    
-    # Collect all requests
-    pending_requests = []
-    approved_requests = []
-    rejected_requests = []
-    
-    for uid, u_data in users.items():
-        # Pending requests
-        for req in u_data.get("pending_requests", []):
-            req_copy = req.copy()
-            req_copy["user_id"] = uid
-            pending_requests.append(req_copy)
-        
-        # Approved accounts
-        for acc in u_data.get("approved_accounts", []):
-            acc_copy = acc.copy()
-            acc_copy["user_id"] = uid
-            approved_requests.append(acc_copy)
-        
-        # Rejected emails
-        for email in u_data.get("rejected_emails", []):
-            rejected_requests.append({
-                "email": email,
-                "user_id": uid
-            })
-    
     await query.edit_message_text(
         "📋 *الطلبات*\n\nاختر القسم:",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=kb([
-            [("⏳ منتظرة", f"view_pending")],
-            [("✅ مقبولة", f"view_approved")],
-            [("❌ مرفوضة", f"view_rejected")],
+            [("⏳ منتظرة", "view_pending")],
+            [("✅ مقبولة", "view_approved")],
+            [("❌ مرفوضة", "view_rejected")],
             [("🔙 إعدادات المالك", "owner_panel")]
         ])
     )
@@ -745,11 +923,10 @@ async def view_rejected_requests(update: Update, context: ContextTypes.DEFAULT_T
     rejected = []
     
     for uid, u_data in users.items():
-        for email in u_data.get("rejected_emails", []):
-            rejected.append({
-                "email": email,
-                "user_id": uid
-            })
+        for req in u_data.get("rejected_requests", []):
+            req_copy = req.copy()
+            req_copy["user_id"] = uid
+            rejected.append(req_copy)
     
     if not rejected:
         await query.edit_message_text(
@@ -760,8 +937,18 @@ async def view_rejected_requests(update: Update, context: ContextTypes.DEFAULT_T
     
     msg = "❌ *الطلبات المرفوضة*\n\n"
     for idx, rej in enumerate(rejected, 1):
+        reason = rej.get('reject_reason', 'غير معروف')
+        reason_map = {
+            "email": "إيميل خطأ",
+            "password": "باسورد خطأ",
+            "totp": "رمز مصادقة خطأ",
+            "app_pass": "كلمة مرور تطبيق خطأ",
+            "custom": "سبب مخصص"
+        }
+        reason_text = reason_map.get(reason, reason)
         msg += f"{idx}. 📧 `{rej.get('email', '')}`\n"
-        msg += f"   👤 المستخدم: {rej.get('user_id', '')}\n\n"
+        msg += f"   👤 المستخدم: {rej.get('user_id', '')}\n"
+        msg += f"   ❌ السبب: {reason_text}\n\n"
     
     if len(msg) > 4000:
         msg = msg[:3990] + "\n... (تم اختصار الرسالة)"
@@ -868,7 +1055,11 @@ async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TY
     # Remove from pending
     user_data["pending_requests"] = [req for req in pending_requests if req.get("email") != email]
     
-    # Add to rejected
+    # Add to rejected requests with reason
+    request["reject_reason"] = reason_type
+    user_data.setdefault("rejected_requests", []).append(request)
+    
+    # Also add to rejected emails for duplicate protection
     rejected_emails = user_data.get("rejected_emails", [])
     rejected_emails.append(email)
     user_data["rejected_emails"] = rejected_emails
@@ -890,7 +1081,6 @@ async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TY
     reason = reason_messages.get(reason_type, "❌ تم رفض طلبك.")
     
     # Add video suggestion based on reason
-    video_suggestion = ""
     config = load_json(DATA_DIR / "config.json")
     
     if reason_type == "email":
@@ -1376,56 +1566,6 @@ async def set_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await query.edit_message_text("💰 أرسل السعر الجديد للحساب الواحد (رقم فقط):")
     context.user_data["mode"] = "set_price"
-
-# ==================== OWNER PANEL: VIDEO SECTION ====================
-async def videos_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-
-    await query.edit_message_text(
-        "📹 *قسم الفيديوهات*\nاختر الفيديو الذي تريد تحديثه:",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([
-            [("📹 فيديو إنشاء إيميل", "set_video:email")],
-            [("📹 فيديو تغيير باسورد", "set_video:password")],
-            [("📹 فيديو إضافة 2FA", "set_video:totp")],
-            [("📹 فيديو كلمة مرور التطبيق", "set_video:app_pass")],
-            [("🔙 إعدادات المالك", "owner_panel")]
-        ])
-    )
-
-async def set_video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    video_type = query.data.split(":")[1]
-    context.user_data["pending_video_type"] = video_type
-    await query.edit_message_text(f"📤 *أرسل الفيديو الخاص بـ {video_type} الآن (كملف فيديو):*", parse_mode=ParseMode.MARKDOWN)
-
-async def handle_video_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        return
-    video_type = context.user_data.get("pending_video_type")
-    if not video_type:
-        await update.message.reply_text("⚠️ لم يتم تحديد نوع الفيديو.")
-        return
-    if update.message.video:
-        file = await update.message.video.get_file()
-        file_path = VIDEOS_DIR / f"{video_type}.mp4"
-        await file.download_to_drive(file_path)
-        
-        config = load_json(DATA_DIR / "config.json")
-        config[f"video_{video_type}"] = str(file_path)
-        save_json(DATA_DIR / "config.json", config)
-        
-        await update.message.reply_text(f"✅ تم حفظ فيديو {video_type} بنجاح!")
-        context.user_data.pop("pending_video_type", None)
-        await main_menu(update, context)
-    else:
-        await update.message.reply_text("⚠️ يرجى إرسال فيديو صحيح.")
 
 # ==================== OWNER PANEL: STORE SECTION ====================
 async def owner_store_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2081,6 +2221,9 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("reject_request:"): await reject_request_reason(update, context)
     elif data.startswith("reject_reason:"): await execute_reject_reason(update, context)
     elif data == "videos_section": await videos_section(update, context)
+    elif data.startswith("video_action:"): await video_action(update, context)
+    elif data.startswith("view_video:"): await view_video(update, context)
+    elif data.startswith("delete_video:"): await delete_video(update, context)
     elif data.startswith("set_video:"): await set_video_callback(update, context)
     elif data == "store_section": await owner_store_section(update, context)
     elif data == "store_add_category": await store_add_category(update, context)
