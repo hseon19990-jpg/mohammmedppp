@@ -182,9 +182,7 @@ class Session:
     password: str = ""
     totp: str = ""
     app_pass: str = ""
-    editing_email: str = ""  # For editing pending requests
-    purchase_service_id: str = ""
-    purchase_cat_id: str = ""
+    editing_email: str = ""
 
 SESSIONS: Dict[int, Session] = {}
 
@@ -203,7 +201,6 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user.id == OWNER_ID:
         rows.append([("⚙️ إعدادات المالك", "owner_panel")])
 
-    # Check forced channel
     config = load_json(DATA_DIR / "config.json")
     forced_channel = config.get("forced_channel", "")
     if forced_channel:
@@ -226,7 +223,6 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== MY ACCOUNTS ====================
 async def my_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show user's all accounts with status"""
     query = update.callback_query
     user_data = get_user(query.from_user.id)
     
@@ -243,21 +239,18 @@ async def my_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     msg = "📋 *جميع حساباتي:*\n\n"
     
-    # Approved accounts
     if approved:
         msg += "✅ *مقبولة:*\n"
         for idx, acc in enumerate(approved, 1):
             msg += f"  {idx}. 📧 `{acc.get('email', '')}` ✅\n"
         msg += "\n"
     
-    # Pending accounts
     if pending:
         msg += "⏳ *منتظرة:*\n"
         for idx, req in enumerate(pending, 1):
             msg += f"  {idx}. 📧 `{req.get('email', '')}` ⏳\n"
         msg += "\n"
     
-    # Rejected accounts
     if rejected:
         msg += "❌ *مرفوضة:*\n"
         for idx, rej in enumerate(rejected, 1):
@@ -281,7 +274,6 @@ async def my_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== EDIT MY ACCOUNTS ====================
 async def edit_my_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show pending accounts that can be edited"""
     query = update.callback_query
     user_data = get_user(query.from_user.id)
     pending = user_data.get("pending_requests", [])
@@ -306,10 +298,8 @@ async def edit_my_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def edit_pending_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show edit options for a specific pending account"""
     query = update.callback_query
     email = query.data.split(":", 1)[1]
-    
     user_data = get_user(query.from_user.id)
     pending = user_data.get("pending_requests", [])
     
@@ -336,7 +326,6 @@ async def edit_pending_account(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
 async def edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start editing a specific field"""
     query = update.callback_query
     parts = query.data.split(":")
     field = parts[1]
@@ -361,10 +350,8 @@ async def edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["step"] = "editing_field"
 
 async def delete_pending_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Delete a pending account"""
     query = update.callback_query
     email = query.data.split(":", 1)[1]
-    
     user_data = get_user(query.from_user.id)
     pending = user_data.get("pending_requests", [])
     
@@ -407,10 +394,8 @@ async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def show_video_in_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show video during account creation"""
     query = update.callback_query
     vtype = query.data.split(":")[1]
-    
     config = load_json(DATA_DIR / "config.json")
     path = config.get(f"video_{vtype}")
     if path and Path(path).exists():
@@ -460,7 +445,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         user_data = get_user(uid)
         
-        # Check approved accounts
         for acc in user_data.get("approved_accounts", []):
             if acc.get("email") == text:
                 await update.message.reply_text(
@@ -469,7 +453,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
         
-        # Check pending requests
         for req in user_data.get("pending_requests", []):
             if req.get("email") == text:
                 await update.message.reply_text(
@@ -478,7 +461,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
         
-        # Check rejected emails
         rejected_emails = user_data.get("rejected_emails", [])
         if text in rejected_emails:
             rejection_count = sum(1 for email in rejected_emails if email == text)
@@ -575,7 +557,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_user(uid, user_data)
         SESSIONS.pop(uid, None)
         
-        # If user has a referrer, notify them
         referred_by = user_data.get("referred_by")
         if referred_by:
             try:
@@ -595,7 +576,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def handle_edit_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle editing a field of a pending account"""
     uid = update.effective_user.id
     text = update.message.text.strip()
     field = context.user_data.get("editing_field")
@@ -1220,12 +1200,10 @@ async def approve_request_owner(update: Update, context: ContextTypes.DEFAULT_TY
         req for req in user_data.get("pending_requests", []) if req["email"] != email
     ]
     
-    # Update total approved emails count
     user_data["total_approved_emails"] = int(user_data.get("total_approved_emails", 0)) + 1
     
     save_user(uid, user_data)
 
-    # Handle referral bonus
     referred_by = user_data.get("referred_by")
     if referred_by:
         referral_bonus = float(config.get("referral_bonus", 0.0))
@@ -1542,7 +1520,7 @@ async def set_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text("💰 أرسل السعر الجديد للحساب الواحد (رقم فقط):")
     context.user_data["mode"] = "set_price"
 
-# ==================== OWNER PANEL: STORE SECTION (UPDATED) ====================
+# ==================== OWNER PANEL: STORE SECTION ====================
 async def owner_store_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
@@ -1631,7 +1609,6 @@ async def store_add_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def store_add_service_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Get service price"""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
@@ -1648,7 +1625,6 @@ async def store_add_service_price(update: Update, context: ContextTypes.DEFAULT_
     )
 
 async def store_add_service_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Get service message"""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
@@ -1828,15 +1804,12 @@ async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"❌ رصيدك غير كافٍ. الرصيد: ${user_data['balance']:.2f}, السعر: ${service['price']:.2f}")
         return
 
-    # Deduct balance
     user_data["balance"] -= service["price"]
     save_user(user_id, user_data)
     
-    # Get user info
     bot_username = (await context.bot.get_me()).username
     total_emails = user_data.get("total_approved_emails", 0)
     
-    # Send to first channel (bot info)
     if PURCHASE_CHANNEL_1:
         try:
             await context.bot.send_message(
@@ -1849,22 +1822,20 @@ async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Error sending to channel 1: {e}")
     
-    # Send to second channel (detailed info)
     if PURCHASE_CHANNEL_2:
         try:
             await context.bot.send_message(
                 chat_id=PURCHASE_CHANNEL_2,
                 text=f"📋 *تفاصيل الطلب*\n\n"
-                     f"👤 اسم الطالب: {user_id}\n"
+                     f"👤 يوزر الطالب: @{bot_username}\n"
                      f"📦 ما طلب: {service_name}\n"
-                     f"📝 الرسالة: {service_message}\n"
+                     f"💬 رسالة الشخص: {service_message}\n"
                      f"⏰ وقت الطلب: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
                      f"📧 عدد الإيميلات المقبولة: {total_emails}"
             )
         except Exception as e:
             logger.error(f"Error sending to channel 2: {e}")
     
-    # Send message to user with the service message
     await query.edit_message_text(
         f"✅ تم شراء الخدمة بنجاح!\n\n"
         f"🛒 *{service_name}*\n"
@@ -1902,7 +1873,6 @@ async def tutorials(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text("📺 *اختر الدرس:*", parse_mode=ParseMode.MARKDOWN, reply_markup=kb(*rows))
 
 async def play_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Play video with native Telegram support"""
     query = update.callback_query
     vtype = query.data.split(":")[1]
     config = load_json(DATA_DIR / "config.json")
@@ -2069,7 +2039,6 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     user_id = update.effective_user.id
 
-    # Handle reject reason text
     if context.user_data.get("step") == "reject_reason_text":
         await handle_reject_reason_text(update, context)
         return
@@ -2106,7 +2075,6 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_store_input(update, context)
         return
 
-    # Handle editing field
     if context.user_data.get("step") == "editing_field":
         await handle_edit_field_input(update, context)
         return
