@@ -11,6 +11,7 @@ Advanced Telegram Account Manager Bot - Full Version with All Fixes
 - Account Editing & Deletion
 - Duplicate Email Protection
 - Video Tutorials in Add Account Flow
+- Advanced Approval System with Reasons
 """
 
 import asyncio
@@ -359,10 +360,10 @@ async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     price = config.get("default_price", 5.0)
     
     # Check if there are videos available
-    has_video = config.get("video_email") and Path(config.get("video_email", "")).exists()
+    has_email_video = config.get("video_email") and Path(config.get("video_email", "")).exists()
     
     buttons = [("❌ إلغاء", "cancel")]
-    if has_video:
+    if has_email_video:
         buttons.insert(0, ("📹 طريقة إنشاء حساب", "show_video:email"))
     
     await update.callback_query.edit_message_text(
@@ -379,16 +380,15 @@ async def show_video_in_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_json(DATA_DIR / "config.json")
     path = config.get(f"video_{vtype}")
     if path and Path(path).exists():
-        # Send video as normal video file (not as document)
         try:
-            with open(path, "rb") as video_file:
-                await context.bot.send_video(
-                    chat_id=query.from_user.id,
-                    video=video_file,
-                    caption="📹 *فيديو تعليمي*\nشاهد الفيديو لمعرفة الطريقة الصحيحة.",
-                    parse_mode=ParseMode.MARKDOWN,
-                    supports_streaming=True  # This enables native Telegram playback
-                )
+            # Send video as normal video file for native Telegram playback
+            await context.bot.send_video(
+                chat_id=query.from_user.id,
+                video=open(path, "rb"),
+                caption="📹 *فيديو تعليمي*\nشاهد الفيديو لمعرفة الطريقة الصحيحة.",
+                parse_mode=ParseMode.MARKDOWN,
+                supports_streaming=True
+            )
             # Go back to add account
             await add_account_start(update, context)
         except Exception as e:
@@ -419,6 +419,8 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("step") == "editing_field":
         await handle_edit_field_input(update, context)
         return
+
+    config = load_json(DATA_DIR / "config.json")
 
     if session.step == "email":
         if not re.match(r"[^@]+@[^@]+\.[^@]+", text):
@@ -465,10 +467,16 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         session.email = text
         session.step = "password"
+        
+        has_password_video = config.get("video_password") and Path(config.get("video_password", "")).exists()
+        buttons = [("❌ إلغاء", "cancel")]
+        if has_password_video:
+            buttons.insert(0, ("📹 طريقة تغيير الباسورد", "show_video:password"))
+        
         await update.message.reply_text(
             "🔑 *الخطوة 2/4*: أرسل كلمة المرور الأساسية:",
             parse_mode=ParseMode.MARKDOWN,
-            reply_markup=kb([("❌ إلغاء", "cancel")])
+            reply_markup=kb([buttons])
         )
 
     elif session.step == "password":
@@ -479,10 +487,16 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.delete()
         except:
             pass
+        
+        has_totp_video = config.get("video_totp") and Path(config.get("video_totp", "")).exists()
+        buttons = [("❌ إلغاء", "cancel")]
+        if has_totp_video:
+            buttons.insert(0, ("📹 طريقة العثور على رمز المصادقة", "show_video:totp"))
+        
         await update.message.reply_text(
             "🔐 *الخطوة 3/4*: أرسل مفتاح المصادقة (Secret Key):",
             parse_mode=ParseMode.MARKDOWN,
-            reply_markup=kb([("❌ إلغاء", "cancel")])
+            reply_markup=kb([buttons])
         )
 
     elif session.step == "totp":
@@ -496,10 +510,16 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.delete()
             except:
                 pass
+            
+            has_app_pass_video = config.get("video_app_pass") and Path(config.get("video_app_pass", "")).exists()
+            buttons = [("❌ إلغاء", "cancel")]
+            if has_app_pass_video:
+                buttons.insert(0, ("📹 طريقة الحصول على كلمة مرور التطبيق", "show_video:app_pass"))
+            
             await update.message.reply_text(
                 f"✅ مفتاح المصادقة صالح!\n\n🔢 *الكود الحالي:* `{code}`\n\n🗝 *الخطوة 4/4*: أرسل كلمة مرور التطبيق:",
                 parse_mode=ParseMode.MARKDOWN,
-                reply_markup=kb([("❌ إلغاء", "cancel")])
+                reply_markup=kb([buttons])
             )
         except:
             await update.message.reply_text("⚠️ مفتاح 2FA غير صالح.")
@@ -513,7 +533,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         
         user_data = get_user(uid)
-        config = load_json(DATA_DIR / "config.json")
         price = float(config.get("default_price", 5.0))
         
         user_data["pending_requests"].append({
@@ -599,40 +618,409 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== OWNER PANEL: APPROVAL REQUESTS ====================
 async def approval_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show approval requests in categories"""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
 
     users = load_json(USERS_DB)
-    found = False
+    
+    # Collect all requests
+    pending_requests = []
+    approved_requests = []
+    rejected_requests = []
+    
+    for uid, u_data in users.items():
+        # Pending requests
+        for req in u_data.get("pending_requests", []):
+            req_copy = req.copy()
+            req_copy["user_id"] = uid
+            pending_requests.append(req_copy)
+        
+        # Approved accounts
+        for acc in u_data.get("approved_accounts", []):
+            acc_copy = acc.copy()
+            acc_copy["user_id"] = uid
+            approved_requests.append(acc_copy)
+        
+        # Rejected emails
+        for email in u_data.get("rejected_emails", []):
+            rejected_requests.append({
+                "email": email,
+                "user_id": uid
+            })
+    
+    await query.edit_message_text(
+        "📋 *الطلبات*\n\nاختر القسم:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([
+            [("⏳ منتظرة", f"view_pending")],
+            [("✅ مقبولة", f"view_approved")],
+            [("❌ مرفوضة", f"view_rejected")],
+            [("🔙 إعدادات المالك", "owner_panel")]
+        ])
+    )
+
+async def view_pending_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """View pending requests"""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    users = load_json(USERS_DB)
+    pending = []
+    
     for uid, u_data in users.items():
         for req in u_data.get("pending_requests", []):
-            found = True
-            await context.bot.send_message(
-                chat_id=OWNER_ID,
-                text=f"📋 *طلب موافقة*\n👤 المستخدم: {uid}\n📧 {req['email']}\n🔑 {req['password']}\n🔐 {req['totp']}\n🗝 {req['app_pass']}",
-                parse_mode=ParseMode.MARKDOWN,
-                reply_markup=kb([
-                    [("✅ قبول", f"approve:{uid}:{req['email']}")],
-                    [("❌ رفض", f"reject:{uid}:{req['email']}")]
-                ])
-            )
+            req_copy = req.copy()
+            req_copy["user_id"] = uid
+            pending.append(req_copy)
     
-    if not found:
-        await query.edit_message_text("📭 لا توجد طلبات حالياً.", reply_markup=kb([("🔙 إعدادات المالك", "owner_panel")]))
-    else:
-        await query.edit_message_text("📋 *تم إرسال الطلبات إليك.*", reply_markup=kb([("🔙 إعدادات المالك", "owner_panel")]))
+    if not pending:
+        await query.edit_message_text(
+            "📭 لا توجد طلبات منتظرة.",
+            reply_markup=kb([("🔙 الطلبات", "approval_requests")])
+        )
+        return
+    
+    # Show list of pending emails
+    rows = []
+    for req in pending:
+        rows.append([(f"⏳ {req.get('email', '')}", f"pending_detail:{req['user_id']}:{req.get('email', '')}")])
+    rows.append([("🔙 الطلبات", "approval_requests")])
+    
+    await query.edit_message_text(
+        "⏳ *الطلبات المنتظرة*\nاختر الإيميل لعرض التفاصيل:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb(*rows)
+    )
 
-async def approve_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def view_approved_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """View approved requests"""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    users = load_json(USERS_DB)
+    approved = []
+    
+    for uid, u_data in users.items():
+        for acc in u_data.get("approved_accounts", []):
+            acc_copy = acc.copy()
+            acc_copy["user_id"] = uid
+            approved.append(acc_copy)
+    
+    if not approved:
+        await query.edit_message_text(
+            "📭 لا توجد طلبات مقبولة.",
+            reply_markup=kb([("🔙 الطلبات", "approval_requests")])
+        )
+        return
+    
+    msg = "✅ *الطلبات المقبولة*\n\n"
+    for idx, acc in enumerate(approved, 1):
+        msg += f"{idx}. 📧 `{acc.get('email', '')}`\n"
+        msg += f"   👤 المستخدم: {acc.get('user_id', '')}\n\n"
+    
+    if len(msg) > 4000:
+        msg = msg[:3990] + "\n... (تم اختصار الرسالة)"
+    
+    await query.edit_message_text(
+        msg,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([("🔙 الطلبات", "approval_requests")])
+    )
+
+async def view_rejected_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """View rejected requests"""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    users = load_json(USERS_DB)
+    rejected = []
+    
+    for uid, u_data in users.items():
+        for email in u_data.get("rejected_emails", []):
+            rejected.append({
+                "email": email,
+                "user_id": uid
+            })
+    
+    if not rejected:
+        await query.edit_message_text(
+            "📭 لا توجد طلبات مرفوضة.",
+            reply_markup=kb([("🔙 الطلبات", "approval_requests")])
+        )
+        return
+    
+    msg = "❌ *الطلبات المرفوضة*\n\n"
+    for idx, rej in enumerate(rejected, 1):
+        msg += f"{idx}. 📧 `{rej.get('email', '')}`\n"
+        msg += f"   👤 المستخدم: {rej.get('user_id', '')}\n\n"
+    
+    if len(msg) > 4000:
+        msg = msg[:3990] + "\n... (تم اختصار الرسالة)"
+    
+    await query.edit_message_text(
+        msg,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([("🔙 الطلبات", "approval_requests")])
+    )
+
+async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show detailed view of a pending request"""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    parts = query.data.split(":")
+    uid = int(parts[1])
+    email = parts[2]
+    
+    user_data = get_user(uid)
+    request = next((req for req in user_data.get("pending_requests", []) if req.get("email") == email), None)
+    
+    if not request:
+        await query.edit_message_text(
+            "⚠️ هذا الطلب غير موجود.",
+            reply_markup=kb([("🔙 الطلبات المنتظرة", "view_pending")])
+        )
+        return
+    
+    msg = f"📋 *تفاصيل الطلب*\n\n"
+    msg += f"📧 *الإيميل:* `{request.get('email', '')}`\n"
+    msg += f"🔑 *الباسورد:* `{request.get('password', '')}`\n"
+    msg += f"🔐 *رمز المصادقة:* `{request.get('totp', '')}`\n"
+    msg += f"🗝 *كلمة مرور التطبيق:* `{request.get('app_pass', '')}`\n"
+    msg += f"👤 *المستخدم:* `{uid}`\n"
+    msg += f"💰 *السعر:* ${request.get('amount', 0):.2f}\n"
+    
+    await query.edit_message_text(
+        msg,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([
+            [("✅ قبول", f"approve_request:{uid}:{email}")],
+            [("❌ رفض", f"reject_request:{uid}:{email}")],
+            [("🔙 الطلبات المنتظرة", "view_pending")]
+        ])
+    )
+
+async def reject_request_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show rejection reasons menu"""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    parts = query.data.split(":")
+    uid = int(parts[1])
+    email = parts[2]
+    
+    context.user_data["reject_uid"] = uid
+    context.user_data["reject_email"] = email
+    
+    await query.edit_message_text(
+        f"❌ *رفض الطلب*\n\n"
+        f"📧 الإيميل: `{email}`\n\n"
+        f"اختر سبب الرفض:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([
+            [("📧 إيميل خطأ", f"reject_reason:email:{uid}:{email}")],
+            [("🔑 باسورد خطأ", f"reject_reason:password:{uid}:{email}")],
+            [("🔐 رمز مصادقة خطأ", f"reject_reason:totp:{uid}:{email}")],
+            [("🗝 كلمة مرور تطبيق خطأ", f"reject_reason:app_pass:{uid}:{email}")],
+            [("📝 خطأ آخر (اكتب السبب)", f"reject_reason:other:{uid}:{email}")],
+            [("🔙 التفاصيل", f"pending_detail:{uid}:{email}")]
+        ])
+    )
+
+async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Execute rejection with reason"""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    parts = query.data.split(":")
+    reason_type = parts[1]
+    uid = int(parts[2])
+    email = parts[3]
+    
+    user_data = get_user(uid)
+    
+    # Find the pending request
+    pending_requests = user_data.get("pending_requests", [])
+    request = next((req for req in pending_requests if req.get("email") == email), None)
+    
+    if not request:
+        await query.edit_message_text(
+            "⚠️ هذا الطلب غير موجود.",
+            reply_markup=kb([("🔙 الطلبات المنتظرة", "view_pending")])
+        )
+        return
+    
+    # Remove from pending
+    user_data["pending_requests"] = [req for req in pending_requests if req.get("email") != email]
+    
+    # Add to rejected
+    rejected_emails = user_data.get("rejected_emails", [])
+    rejected_emails.append(email)
+    user_data["rejected_emails"] = rejected_emails
+    
+    # Remove pending balance
+    user_data["pending_balance"] = max(0.0, float(user_data.get("pending_balance", 0.0)) - float(request.get("amount", 0.0)))
+    
+    save_user(uid, user_data)
+    
+    # Send rejection message to user
+    reason_messages = {
+        "email": "❌ الإيميل الذي أرسلته غير صحيح أو غير مقبول.",
+        "password": "❌ كلمة المرور التي أرسلتها غير صحيحة.",
+        "totp": "❌ رمز المصادقة الثنائية الذي أرسلته غير صحيح.",
+        "app_pass": "❌ كلمة مرور التطبيق التي أرسلتها غير صحيحة.",
+        "other": "❌ تم رفض طلبك لسبب آخر."
+    }
+    
+    reason = reason_messages.get(reason_type, "❌ تم رفض طلبك.")
+    
+    # Add video suggestion based on reason
+    video_suggestion = ""
+    config = load_json(DATA_DIR / "config.json")
+    
+    if reason_type == "email":
+        video_path = config.get("video_email")
+        if video_path and Path(video_path).exists():
+            try:
+                await context.bot.send_video(
+                    chat_id=uid,
+                    video=open(video_path, "rb"),
+                    caption=f"{reason}\n\n📹 *شاهد الفيديو لمعرفة الطريقة الصحيحة لإنشاء الإيميل:*",
+                    parse_mode=ParseMode.MARKDOWN,
+                    supports_streaming=True
+                )
+            except:
+                pass
+    elif reason_type == "password":
+        video_path = config.get("video_password")
+        if video_path and Path(video_path).exists():
+            try:
+                await context.bot.send_video(
+                    chat_id=uid,
+                    video=open(video_path, "rb"),
+                    caption=f"{reason}\n\n📹 *شاهد الفيديو لمعرفة الطريقة الصحيحة لتغيير الباسورد:*",
+                    parse_mode=ParseMode.MARKDOWN,
+                    supports_streaming=True
+                )
+            except:
+                pass
+    elif reason_type == "totp":
+        video_path = config.get("video_totp")
+        if video_path and Path(video_path).exists():
+            try:
+                await context.bot.send_video(
+                    chat_id=uid,
+                    video=open(video_path, "rb"),
+                    caption=f"{reason}\n\n📹 *شاهد الفيديو لمعرفة الطريقة الصحيحة للعثور على رمز المصادقة:*",
+                    parse_mode=ParseMode.MARKDOWN,
+                    supports_streaming=True
+                )
+            except:
+                pass
+    elif reason_type == "app_pass":
+        video_path = config.get("video_app_pass")
+        if video_path and Path(video_path).exists():
+            try:
+                await context.bot.send_video(
+                    chat_id=uid,
+                    video=open(video_path, "rb"),
+                    caption=f"{reason}\n\n📹 *شاهد الفيديو لمعرفة الطريقة الصحيحة للحصول على كلمة مرور التطبيق:*",
+                    parse_mode=ParseMode.MARKDOWN,
+                    supports_streaming=True
+                )
+            except:
+                pass
+    else:
+        # For "other" reason, ask for custom message
+        context.user_data["reject_uid"] = uid
+        context.user_data["reject_email"] = email
+        context.user_data["reject_reason"] = "other"
+        
+        await query.edit_message_text(
+            f"📝 *اكتب سبب الرفض*\n\n"
+            f"أرسل رسالة توضح سبب رفض طلب `{email}`:",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=kb([("🔙 إلغاء", f"pending_detail:{uid}:{email}")])
+        )
+        context.user_data["step"] = "reject_reason_text"
+        return
+    
+    # Send reason message to user
+    try:
+        await context.bot.send_message(
+            chat_id=uid,
+            text=f"{reason}\n\n"
+                 f"📧 الإيميل: `{email}`\n"
+                 f"يمكنك إعادة المحاولة بإرسال إيميل جديد.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except:
+        pass
+    
+    await query.edit_message_text(
+        f"✅ تم رفض الطلب `{email}` وإرسال السبب للمستخدم.",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([("🔙 الطلبات المنتظرة", "view_pending")])
+    )
+
+async def handle_reject_reason_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle custom rejection reason text"""
+    uid = context.user_data.get("reject_uid")
+    email = context.user_data.get("reject_email")
+    text = update.message.text.strip()
+    
+    if not uid or not email:
+        await update.message.reply_text("⚠️ حدث خطأ، حاول مرة أخرى.")
+        return
+    
+    # Send custom reason to user
+    try:
+        await context.bot.send_message(
+            chat_id=uid,
+            text=f"❌ *تم رفض طلبك*\n\n"
+                 f"📧 الإيميل: `{email}`\n"
+                 f"📝 السبب: {text}\n\n"
+                 f"يمكنك إعادة المحاولة بإرسال إيميل جديد.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except:
+        pass
+    
+    context.user_data.pop("reject_uid", None)
+    context.user_data.pop("reject_email", None)
+    context.user_data.pop("reject_reason", None)
+    context.user_data.pop("step", None)
+    
+    await update.message.reply_text(
+        f"✅ تم رفض الطلب `{email}` وإرسال السبب للمستخدم.",
+        reply_markup=kb([("🔙 الطلبات المنتظرة", "view_pending")])
+    )
+
+async def approve_request_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Approve a request from owner panel"""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
 
-    data = query.data.split(":")
-    uid = int(data[1])
-    email = data[2]
+    parts = query.data.split(":")
+    uid = int(parts[1])
+    email = parts[2]
 
     user_data = get_user(uid)
     config = load_json(DATA_DIR / "config.json")
@@ -645,13 +1033,13 @@ async def approve_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not approved_request:
         await query.edit_message_text(
             "⚠️ هذا الطلب غير موجود أو تمت معالجته مسبقاً.",
-            reply_markup=kb([("🔙 إعدادات المالك", "owner_panel")]),
+            reply_markup=kb([("🔙 الطلبات المنتظرة", "view_pending")]),
         )
         return
 
     price = float(approved_request.get("amount", default_price))
     
-    # Add to approved accounts (not extracted yet)
+    # Add to approved accounts
     approved_request["extracted"] = False
     user_data.setdefault("approved_accounts", []).append(approved_request)
     user_data["pending_balance"] = max(
@@ -674,7 +1062,6 @@ async def approve_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
             referrer_data["total_referrals"] = int(referrer_data.get("total_referrals", 0)) + 1
             save_user(referred_by, referrer_data)
             
-            # Notify referrer
             try:
                 await context.bot.send_message(
                     chat_id=referred_by,
@@ -684,51 +1071,23 @@ async def approve_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             except:
                 pass
+    
+    # Notify user
+    try:
+        await context.bot.send_message(
+            chat_id=uid,
+            text=f"✅ *تم قبول طلبك!*\n\n"
+                 f"📧 الإيميل: `{email}`\n"
+                 f"💰 تم إضافة ${price:.2f} إلى رصيدك.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except:
+        pass
 
     await query.edit_message_text(
         f"✅ تم قبول الحساب `{email}`!\n💰 تم نقل ${price:.2f} من قيد الانتظار إلى الرصيد المملوك.",
         parse_mode=ParseMode.MARKDOWN,
-    )
-
-async def reject_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-
-    data = query.data.split(":")
-    uid = int(data[1])
-    email = data[2]
-
-    user_data = get_user(uid)
-    pending_requests = user_data.get("pending_requests", [])
-    rejected_requests = [req for req in pending_requests if req["email"] == email]
-    if not rejected_requests:
-        await query.edit_message_text(
-            "⚠️ هذا الطلب غير موجود أو تمت معالجته مسبقاً.",
-            reply_markup=kb([("🔙 إعدادات المالك", "owner_panel")]),
-        )
-        return
-
-    rejected_total = sum(float(req.get("amount", 0.0)) for req in rejected_requests)
-    user_data["pending_balance"] = max(
-        0.0,
-        float(user_data.get("pending_balance", 0.0)) - rejected_total,
-    )
-    user_data["pending_requests"] = [
-        req for req in pending_requests if req["email"] != email
-    ]
-    
-    # Add to rejected emails
-    rejected_emails = user_data.get("rejected_emails", [])
-    rejected_emails.append(email)
-    user_data["rejected_emails"] = rejected_emails
-    
-    save_user(uid, user_data)
-
-    await query.edit_message_text(
-        f"❌ تم رفض الحساب `{email}` وإزالة المبلغ من قيد الانتظار.",
-        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([("🔙 الطلبات المنتظرة", "view_pending")])
     )
 
 # ==================== ALL ACCOUNTS SECTION ====================
@@ -1355,14 +1714,13 @@ async def play_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if path and Path(path).exists():
         try:
             # Send video with streaming support for native playback
-            with open(path, "rb") as video_file:
-                await context.bot.send_video(
-                    chat_id=query.from_user.id,
-                    video=video_file,
-                    caption=f"📹 *فيديو تعليمي: {vtype}*",
-                    parse_mode=ParseMode.MARKDOWN,
-                    supports_streaming=True  # This enables native Telegram playback
-                )
+            await context.bot.send_video(
+                chat_id=query.from_user.id,
+                video=open(path, "rb"),
+                caption=f"📹 *فيديو تعليمي: {vtype}*",
+                parse_mode=ParseMode.MARKDOWN,
+                supports_streaming=True
+            )
             # Keep the tutorial menu open
             await tutorials(update, context)
         except Exception as e:
@@ -1515,6 +1873,11 @@ async def referral_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     user_id = update.effective_user.id
+
+    # Handle reject reason text
+    if context.user_data.get("step") == "reject_reason_text":
+        await handle_reject_reason_text(update, context)
+        return
 
     if context.user_data.get("mode") == "set_price":
         if user_id != OWNER_ID: return
@@ -1710,8 +2073,13 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "owner_panel": await owner_panel(update, context)
     elif data == "set_price": await set_price(update, context)
     elif data == "approval_requests": await approval_requests(update, context)
-    elif data.startswith("approve:"): await approve_request(update, context)
-    elif data.startswith("reject:"): await reject_request(update, context)
+    elif data == "view_pending": await view_pending_requests(update, context)
+    elif data == "view_approved": await view_approved_requests(update, context)
+    elif data == "view_rejected": await view_rejected_requests(update, context)
+    elif data.startswith("pending_detail:"): await pending_detail(update, context)
+    elif data.startswith("approve_request:"): await approve_request_owner(update, context)
+    elif data.startswith("reject_request:"): await reject_request_reason(update, context)
+    elif data.startswith("reject_reason:"): await execute_reject_reason(update, context)
     elif data == "videos_section": await videos_section(update, context)
     elif data.startswith("set_video:"): await set_video_callback(update, context)
     elif data == "store_section": await owner_store_section(update, context)
