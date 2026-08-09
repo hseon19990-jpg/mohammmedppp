@@ -190,8 +190,49 @@ SESSIONS: Dict[int, Session] = {}
 # Store pending purchases waiting for user message
 PENDING_PURCHASES: Dict[int, Dict] = {}
 
+# ==================== FORCED CHANNEL CHECK ====================
+async def check_forced_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Check if user is in forced channel. Returns True if allowed."""
+    config = load_json(DATA_DIR / "config.json")
+    forced_channel = config.get("forced_channel", "")
+    
+    if not forced_channel:
+        return True
+    
+    user_id = update.effective_user.id
+    
+    # Owner is exempt from forced channel
+    if user_id == OWNER_ID:
+        return True
+    
+    try:
+        member = await context.bot.get_chat_member(forced_channel, user_id)
+        if member.status in ["member", "administrator", "creator"]:
+            return True
+    except:
+        pass
+    
+    # User is not in channel
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            f"📢 *يرجى الانضمام إلى القناة أولاً:*\n{forced_channel}\n\n"
+            f"ثم اضغط /start مرة أخرى.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    else:
+        await update.message.reply_text(
+            f"📢 *يرجى الانضمام إلى القناة أولاً:*\n{forced_channel}\n\n"
+            f"ثم اضغط /start مرة أخرى.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    return False
+
 # ==================== MAIN MENU ====================
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Check forced channel first
+    if not await check_forced_channel(update, context):
+        return
+    
     user = update.effective_user
     rows = [
         [("➕ إضافة حساب", "add_account")],
@@ -205,20 +246,6 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user.id == OWNER_ID:
         rows.append([("⚙️ إعدادات المالك", "owner_panel")])
 
-    config = load_json(DATA_DIR / "config.json")
-    forced_channel = config.get("forced_channel", "")
-    if forced_channel:
-        try:
-            member = await context.bot.get_chat_member(forced_channel, user.id)
-            if member.status not in ["member", "administrator", "creator"]:
-                await update.message.reply_text(
-                    f"📢 *يرجى الانضمام إلى القناة أولاً:*\n{forced_channel}\n\nثم اضغط /start مرة أخرى.",
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return
-        except:
-            pass
-
     text = "👋 مرحباً بك!\nاختر من القائمة أدناه:"
     if update.callback_query:
         await update.callback_query.edit_message_text(text, reply_markup=kb(*rows))
@@ -227,6 +254,9 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== MY ACCOUNTS ====================
 async def my_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_forced_channel(update, context):
+        return
+    
     query = update.callback_query
     user_data = get_user(query.from_user.id)
     
@@ -278,6 +308,9 @@ async def my_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== EDIT MY ACCOUNTS ====================
 async def edit_my_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_forced_channel(update, context):
+        return
+    
     query = update.callback_query
     user_data = get_user(query.from_user.id)
     pending = user_data.get("pending_requests", [])
@@ -302,6 +335,9 @@ async def edit_my_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def edit_pending_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_forced_channel(update, context):
+        return
+    
     query = update.callback_query
     email = query.data.split(":", 1)[1]
     user_data = get_user(query.from_user.id)
@@ -330,6 +366,9 @@ async def edit_pending_account(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
 async def edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_forced_channel(update, context):
+        return
+    
     query = update.callback_query
     parts = query.data.split(":")
     field = parts[1]
@@ -354,6 +393,9 @@ async def edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["step"] = "editing_field"
 
 async def delete_pending_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_forced_channel(update, context):
+        return
+    
     query = update.callback_query
     email = query.data.split(":", 1)[1]
     user_data = get_user(query.from_user.id)
@@ -379,6 +421,9 @@ async def delete_pending_account(update: Update, context: ContextTypes.DEFAULT_T
 
 # ==================== ADD ACCOUNT FLOW ====================
 async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_forced_channel(update, context):
+        return
+    
     uid = update.effective_user.id
     SESSIONS[uid] = Session(step="email")
     
@@ -398,6 +443,9 @@ async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def show_video_in_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_forced_channel(update, context):
+        return
+    
     query = update.callback_query
     vtype = query.data.split(":")[1]
     config = load_json(DATA_DIR / "config.json")
@@ -1736,6 +1784,9 @@ async def remove_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== USER WITHDRAW STORE ====================
 async def withdraw_store(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_forced_channel(update, context):
+        return
+    
     query = update.callback_query
     config = load_json(DATA_DIR / "config.json")
     categories = config.get("store_categories", [])
@@ -1758,6 +1809,9 @@ async def withdraw_store(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def user_category_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_forced_channel(update, context):
+        return
+    
     query = update.callback_query
     cat_id = query.data.split(":", 1)[1]
     config = load_json(DATA_DIR / "config.json")
@@ -1788,6 +1842,9 @@ async def user_category_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_forced_channel(update, context):
+        return
+    
     query = update.callback_query
     parts = query.data.split(":")
     service_id = parts[1]
@@ -1839,16 +1896,16 @@ async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_username = user.username or "لا يوجد"
     user_id_str = str(user_id)
     total_emails = user_data.get("total_approved_emails", 0)
+    bot_username = (await context.bot.get_me()).username
     
-    # Send to channel 1 (simple notification)
+    # Send to channel 1 (bot username)
     if PURCHASE_CHANNEL_1:
         try:
             await context.bot.send_message(
                 chat_id=PURCHASE_CHANNEL_1,
                 text=f"🛒 *طلب شراء جديد*\n\n"
-                     f"👤 الاسم: `{user_name}`\n"
-                     f"🆔 المعرف: @{user_username}\n"
-                     f"📦 الخدمة: `{service_name}`\n"
+                     f"🤖 يوزر البوت: @{bot_username}\n"
+                     f"📦 الطلب: `{service_name}`\n"
                      f"💰 السعر: `${service['price']:.2f}`\n"
                      f"📧 عدد الإيميلات: `{total_emails}`",
                 parse_mode=ParseMode.MARKDOWN
@@ -1856,10 +1913,9 @@ async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Error sending to channel 1: {e}")
     
-    # Send to channel 2 with user message and delivery button
+    # Send to channel 2 (user info + delivery button)
     if PURCHASE_CHANNEL_2:
         try:
-            # Send the user's message as the main content
             await context.bot.send_message(
                 chat_id=PURCHASE_CHANNEL_2,
                 text=f"📋 *تفاصيل طلب السحب*\n\n"
@@ -2010,6 +2066,9 @@ async def handle_purchase_message(update: Update, context: ContextTypes.DEFAULT_
 
 # ==================== MY WALLET ====================
 async def my_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_forced_channel(update, context):
+        return
+    
     query = update.callback_query
     user = get_user(query.from_user.id)
     await query.edit_message_text(
@@ -2020,6 +2079,9 @@ async def my_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== TUTORIALS ====================
 async def tutorials(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_forced_channel(update, context):
+        return
+    
     query = update.callback_query
     config = load_json(DATA_DIR / "config.json")
     rows = []
@@ -2035,6 +2097,9 @@ async def tutorials(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text("📺 *اختر الدرس:*", parse_mode=ParseMode.MARKDOWN, reply_markup=kb(*rows))
 
 async def play_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_forced_channel(update, context):
+        return
+    
     query = update.callback_query
     vtype = query.data.split(":")[1]
     config = load_json(DATA_DIR / "config.json")
@@ -2064,6 +2129,9 @@ async def play_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== REFERRAL SYSTEM ====================
 async def referral_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_forced_channel(update, context):
+        return
+    
     query = update.callback_query
     user_id = update.effective_user.id
     
@@ -2102,6 +2170,9 @@ async def referral_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def copy_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_forced_channel(update, context):
+        return
+    
     query = update.callback_query
     code = query.data.split(":")[1]
     bot_username = (await context.bot.get_me()).username
@@ -2204,6 +2275,10 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Check if this is a user message for a pending purchase
     if user_id in PENDING_PURCHASES:
         await handle_purchase_message(update, context)
+        return
+
+    # Check forced channel for text messages
+    if not await check_forced_channel(update, context):
         return
 
     if context.user_data.get("step") == "reject_reason_text":
