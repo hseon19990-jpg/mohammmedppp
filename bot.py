@@ -1,5 +1,5 @@
 """
-Advanced Telegram Account Manager Bot - Full Version with All Features
+Advanced Telegram Account Manager Bot - Full Version with Button Customization
 - Owner Panel (Fully Fixed)
 - Add Account Flow with Auto-Delete Sensitive Data
 - Video System (Upload, Play & Delete)
@@ -14,6 +14,7 @@ Advanced Telegram Account Manager Bot - Full Version with All Features
 - Advanced Approval System with Reasons
 - User Accounts with Status (Approved, Rejected, Pending)
 - Purchase System with Dual Channel Notifications
+- Button Customization (Colors, Stickers, Backgrounds)
 """
 
 import asyncio
@@ -154,6 +155,167 @@ def generate_referral_code():
     """Generate a unique referral code"""
     return secrets.token_hex(4).upper()
 
+# ==================== BUTTON CUSTOMIZATION SYSTEM ====================
+BUTTONS_CONFIG_FILE = DATA_DIR / "buttons_config.json"
+BUTTON_BACKGROUNDS_DIR = DATA_DIR / "button_backgrounds"
+BUTTON_BACKGROUNDS_DIR.mkdir(parents=True, exist_ok=True)
+
+# ==================== COLORS ====================
+COLORS = {
+    "red": {"name": "🔴 أحمر", "hex": "#FF0000", "emoji": "🔴"},
+    "green": {"name": "🟢 أخضر", "hex": "#00FF00", "emoji": "🟢"},
+    "blue": {"name": "🔵 أزرق", "hex": "#0000FF", "emoji": "🔵"},
+    "pink": {"name": "💗 وردي", "hex": "#FF69B4", "emoji": "💗"},
+    "purple": {"name": "🟣 بنفسجي", "hex": "#8B00FF", "emoji": "🟣"},
+    "brown": {"name": "🟤 جوزي", "hex": "#8B4513", "emoji": "🟤"},
+    "black": {"name": "⚫ أسود", "hex": "#000000", "emoji": "⚫"},
+    "white": {"name": "⚪ أبيض", "hex": "#FFFFFF", "emoji": "⚪"},
+    "orange": {"name": "🟠 برتقالي", "hex": "#FF8C00", "emoji": "🟠"},
+    "gold": {"name": "🟡 ذهبي", "hex": "#FFD700", "emoji": "🟡"},
+    "cyan": {"name": "🔷 فيروزي", "hex": "#00CED1", "emoji": "🔷"},
+    "indigo": {"name": "🟣 نيلي", "hex": "#4B0082", "emoji": "🟣"},
+    "deep_pink": {"name": "🌹 زهري", "hex": "#FF1493", "emoji": "🌹"},
+    "coral": {"name": "🍊 مرجاني", "hex": "#FF7F50", "emoji": "🍊"},
+    "olive": {"name": "🌿 زيتوني", "hex": "#808000", "emoji": "🌿"},
+    "teal": {"name": "🦚 تيل", "hex": "#008080", "emoji": "🦚"},
+    "lavender": {"name": "💜 لافندر", "hex": "#E6E6FA", "emoji": "💜"},
+    "maroon": {"name": "🟤 كستنائي", "hex": "#800000", "emoji": "🟤"},
+    "navy": {"name": "🔵 كحلي", "hex": "#000080", "emoji": "🔵"},
+    "salmon": {"name": "🐟 سلموني", "hex": "#FA8072", "emoji": "🐟"},
+    "violet": {"name": "💜 بنفسجي", "hex": "#8B00FF", "emoji": "💜"},
+    "turquoise": {"name": "🔷 فيروزي", "hex": "#40E0D0", "emoji": "🔷"},
+    "magenta": {"name": "💗 ماجنتا", "hex": "#FF00FF", "emoji": "💗"},
+    "lime": {"name": "🟢 ليموني", "hex": "#00FF00", "emoji": "🟢"},
+    "sky_blue": {"name": "🔵 سماوي", "hex": "#87CEEB", "emoji": "🔵"},
+}
+
+# ==================== DECORATIONS ====================
+DECORATIONS = {
+    "none": {"name": "بدون زخرفة", "symbol": ""},
+    "star": {"name": "⭐ نجمة", "symbol": "⭐"},
+    "heart": {"name": "❤️ قلب", "symbol": "❤️"},
+    "fire": {"name": "🔥 نار", "symbol": "🔥"},
+    "diamond": {"name": "💎 ألماس", "symbol": "💎"},
+    "crown": {"name": "👑 تاج", "symbol": "👑"},
+    "rocket": {"name": "🚀 صاروخ", "symbol": "🚀"},
+    "sparkle": {"name": "✨ بريق", "symbol": "✨"},
+    "lightning": {"name": "⚡ صاعقة", "symbol": "⚡"},
+    "target": {"name": "🎯 هدف", "symbol": "🎯"},
+    "trophy": {"name": "🏆 كأس", "symbol": "🏆"},
+    "medal": {"name": "🎖️ ميدالية", "symbol": "🎖️"},
+    "gem": {"name": "💠 جوهرة", "symbol": "💠"},
+    "clover": {"name": "🍀 برسيم", "symbol": "🍀"},
+    "rose": {"name": "🌹 وردة", "symbol": "🌹"},
+    "sun": {"name": "☀️ شمس", "symbol": "☀️"},
+    "moon": {"name": "🌙 قمر", "symbol": "🌙"},
+    "rainbow": {"name": "🌈 قوس قزح", "symbol": "🌈"},
+    "unicorn": {"name": "🦄 يونيكورن", "symbol": "🦄"},
+    "dragon": {"name": "🐉 تنين", "symbol": "🐉"},
+    "phoenix": {"name": "🔥 فينيكس", "symbol": "🔥"},
+    "crystal": {"name": "💎 كريستال", "symbol": "💎"},
+    "mystic": {"name": "🌀 غامض", "symbol": "🌀"},
+    "flower": {"name": "🌸 زهرة", "symbol": "🌸"},
+    "butterfly": {"name": "🦋 فراشة", "symbol": "🦋"},
+    "snowflake": {"name": "❄️ ثلج", "symbol": "❄️"},
+    "music": {"name": "🎵 موسيقى", "symbol": "🎵"},
+}
+
+# ==================== BUTTONS CONFIG ====================
+def get_default_buttons_config():
+    """إعدادات الأزرار الافتراضية"""
+    return {
+        "main_menu": [
+            {"id": "btn1", "name": "إضافة حساب", "color": "#6C5CE7", "sticker": None, "sticker_file_id": None, "background": None, "callback": "add_account"},
+            {"id": "btn2", "name": "أموالي", "color": "#00B894", "sticker": None, "sticker_file_id": None, "background": None, "callback": "my_wallet"},
+            {"id": "btn3", "name": "حساباتي", "color": "#0984E3", "sticker": None, "sticker_file_id": None, "background": None, "callback": "my_accounts"},
+            {"id": "btn4", "name": "تعليم", "color": "#FFD700", "sticker": None, "sticker_file_id": None, "background": None, "callback": "tutorials"},
+            {"id": "btn5", "name": "سحب", "color": "#FF6B6B", "sticker": None, "sticker_file_id": None, "background": None, "callback": "withdraw_store"},
+            {"id": "btn6", "name": "الإحالة", "color": "#FF8C00", "sticker": None, "sticker_file_id": None, "background": None, "callback": "referral_menu"},
+            {"id": "btn7", "name": "تعديل حساباتي", "color": "#8B00FF", "sticker": None, "sticker_file_id": None, "background": None, "callback": "edit_my_accounts"},
+        ],
+        "owner_panel": [
+            {"id": "owner1", "name": "سعر كل حساب", "color": "#FFD700", "sticker": None, "sticker_file_id": None, "background": None, "callback": "set_price"},
+            {"id": "owner2", "name": "الطلبات", "color": "#0984E3", "sticker": None, "sticker_file_id": None, "background": None, "callback": "approval_requests"},
+            {"id": "owner3", "name": "الفيديوهات", "color": "#FF6B6B", "sticker": None, "sticker_file_id": None, "background": None, "callback": "videos_section"},
+            {"id": "owner4", "name": "المبيعات", "color": "#00B894", "sticker": None, "sticker_file_id": None, "background": None, "callback": "store_section"},
+            {"id": "owner5", "name": "قناة إجبارية", "color": "#8B00FF", "sticker": None, "sticker_file_id": None, "background": None, "callback": "forced_channel"},
+            {"id": "owner6", "name": "جميع الحسابات", "color": "#4B0082", "sticker": None, "sticker_file_id": None, "background": None, "callback": "all_accounts_section"},
+            {"id": "owner7", "name": "نظام الإحالة", "color": "#FF8C00", "sticker": None, "sticker_file_id": None, "background": None, "callback": "referral_settings"},
+        ],
+        "decorations": {
+            "header": "━━━━━━━━━━━━━━━━━",
+            "star": "✦ ✧ ✦ ✧ ✦ ✧ ✦ ✧ ✦",
+            "dot": "•",
+            "line": "─────────────────",
+            "double_line": "═════════════════════"
+        }
+    }
+
+def load_buttons_config():
+    """تحميل إعدادات الأزرار"""
+    if not BUTTONS_CONFIG_FILE.exists():
+        config = get_default_buttons_config()
+        save_json(BUTTONS_CONFIG_FILE, config)
+        return config
+    return load_json(BUTTONS_CONFIG_FILE)
+
+def save_buttons_config(config):
+    """حفظ إعدادات الأزرار"""
+    save_json(BUTTONS_CONFIG_FILE, config)
+
+def get_color_emoji(color_hex):
+    """تحويل اللون إلى إيموجي"""
+    color_map = {
+        "#FF0000": "🔴", "#00FF00": "🟢", "#0000FF": "🔵",
+        "#FF69B4": "💗", "#8B00FF": "🟣", "#8B4513": "🟤",
+        "#000000": "⚫", "#FFFFFF": "⚪", "#FF8C00": "🟠",
+        "#FFD700": "🟡", "#00CED1": "🔷", "#4B0082": "🟣",
+        "#FF1493": "🌹", "#FF7F50": "🍊", "#808000": "🌿",
+        "#008080": "🦚", "#E6E6FA": "💜", "#800000": "🟤",
+        "#000080": "🔵", "#FA8072": "🐟", "#6C5CE7": "💜",
+        "#00B894": "💚", "#0984E3": "💙", "#FF6B6B": "❤️",
+        "#FFD700": "💛", "#00CEC9": "💠", "#E17055": "🧡",
+        "#A8E6CF": "💚", "#636E72": "🤍", "#40E0D0": "🔷",
+        "#FF00FF": "💗", "#87CEEB": "🔵",
+    }
+    return color_map.get(color_hex, "")
+
+def create_custom_button(btn_data):
+    """إنشاء زر مخصص مع لون وملصق وخلفية"""
+    name = btn_data.get("name", "زر")
+    color = btn_data.get("color", "#6C5CE7")
+    sticker_file_id = btn_data.get("sticker_file_id")
+    background_file_id = btn_data.get("background")
+    
+    # إضافة اللون كإيموجي
+    color_emoji = get_color_emoji(color)
+    if color_emoji:
+        name = f"{color_emoji} {name}"
+    
+    # إذا كان هناك ملصق، نضيفه كإيموجي (لكن تليجرام لا يدعم الملصقات في الأزرار)
+    # لذلك نستخدم رمز بديل
+    if sticker_file_id:
+        name = f"🖼️ {name}"
+    
+    # إذا كان هناك خلفية، نضيف رمز
+    if background_file_id:
+        name = f"{name} 🎨"
+    
+    return InlineKeyboardButton(name, callback_data=btn_data.get("callback", "null"))
+
+def build_custom_menu(buttons_data, rows_per_row=2):
+    """بناء قائمة أزرار مخصصة"""
+    keyboard = []
+    row = []
+    for btn_data in buttons_data:
+        row.append(create_custom_button(btn_data))
+        if len(row) >= rows_per_row:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    return InlineKeyboardMarkup(keyboard)
+
 def kb(*rows):
     """Build keyboards from both row arguments and a list of rows."""
     if (
@@ -189,18 +351,14 @@ SESSIONS: Dict[int, Session] = {}
 # ==================== MAIN MENU ====================
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    rows = [
-        [("➕ إضافة حساب", "add_account")],
-        [("💰 أموالي", "my_wallet")],
-        [("📋 حساباتي", "my_accounts")],
-        [("📺 تعليم", "tutorials")],
-        [("🛒 سحب", "withdraw_store")],
-        [("🔗 الإحالة", "referral_menu")],
-        [("✏️ تعديل حساباتي", "edit_my_accounts")],
-    ]
-    if user.id == OWNER_ID:
-        rows.append([("⚙️ إعدادات المالك", "owner_panel")])
-
+    user_id = user.id
+    
+    # تحميل إعدادات الأزرار
+    config_buttons = load_buttons_config()
+    main_buttons = config_buttons.get("main_menu", [])
+    decorations = config_buttons.get("decorations", {})
+    
+    # Check forced channel
     config = load_json(DATA_DIR / "config.json")
     forced_channel = config.get("forced_channel", "")
     if forced_channel:
@@ -215,401 +373,38 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
-    text = "👋 مرحباً بك!\nاختر من القائمة أدناه:"
+    user_data = get_user(user_id)
+    coin = user_data.get("balance", 0)
+    
+    text = f"""
+🌟 <b>مرحباً بك في البوت</b>
+{decorations.get('header', '━━━━━━━━━━━━━━━━━')}
+📊 <b>مستخدم:</b> <code>{user_id}</code>
+💰 <b>نقاطك:</b> <code>{coin}</code>
+{decorations.get('header', '━━━━━━━━━━━━━━━━━')}
+
+✨ <b>اختر من القائمة أدناه:</b>
+"""
+    
+    # إضافة زر المالك إذا كان المستخدم مالكاً
+    if user.id == OWNER_ID:
+        owner_btn = {"id": "owner_btn", "name": "⚙️ إعدادات المالك", "color": "#FFD700", "sticker": None, "sticker_file_id": None, "background": None, "callback": "owner_panel"}
+        main_buttons.append(owner_btn)
+    
+    reply_markup = build_custom_menu(main_buttons, rows_per_row=2)
+    
     if update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=kb(*rows))
-    else:
-        await update.message.reply_text(text, reply_markup=kb(*rows))
-
-# ==================== MY ACCOUNTS ====================
-async def my_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user_data = get_user(query.from_user.id)
-    
-    approved = user_data.get("approved_accounts", [])
-    pending = user_data.get("pending_requests", [])
-    rejected = user_data.get("rejected_requests", [])
-    
-    if not approved and not pending and not rejected:
-        await query.edit_message_text(
-            "📭 لا توجد حسابات لديك.",
-            reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")])
-        )
-        return
-    
-    msg = "📋 *جميع حساباتي:*\n\n"
-    
-    if approved:
-        msg += "✅ *مقبولة:*\n"
-        for idx, acc in enumerate(approved, 1):
-            msg += f"  {idx}. 📧 `{acc.get('email', '')}` ✅\n"
-        msg += "\n"
-    
-    if pending:
-        msg += "⏳ *منتظرة:*\n"
-        for idx, req in enumerate(pending, 1):
-            msg += f"  {idx}. 📧 `{req.get('email', '')}` ⏳\n"
-        msg += "\n"
-    
-    if rejected:
-        msg += "❌ *مرفوضة:*\n"
-        for idx, rej in enumerate(rejected, 1):
-            reason = rej.get('reject_reason', 'غير معروف')
-            reason_map = {
-                "email": "إيميل خطأ",
-                "password": "باسورد خطأ",
-                "totp": "رمز مصادقة خطأ",
-                "app_pass": "كلمة مرور تطبيق خطأ",
-                "custom": "سبب مخصص"
-            }
-            reason_text = reason_map.get(reason, reason)
-            msg += f"  {idx}. 📧 `{rej.get('email', '')}` ❌ - {reason_text}\n"
-        msg += "\n"
-    
-    await query.edit_message_text(
-        msg,
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")])
-    )
-
-# ==================== EDIT MY ACCOUNTS ====================
-async def edit_my_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user_data = get_user(query.from_user.id)
-    pending = user_data.get("pending_requests", [])
-    
-    if not pending:
-        await query.edit_message_text(
-            "📭 لا توجد حسابات جارية للتعديل.",
-            reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")])
-        )
-        return
-    
-    rows = []
-    for req in pending:
-        rows.append([(f"✏️ {req.get('email', '')}", f"edit_pending:{req.get('email', '')}")])
-    
-    rows.append([("🔙 القائمة الرئيسية", "main_menu")])
-    
-    await query.edit_message_text(
-        "✏️ *تعديل الحسابات الجارية*\nاختر الحساب لتعديله:",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb(*rows)
-    )
-
-async def edit_pending_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    email = query.data.split(":", 1)[1]
-    user_data = get_user(query.from_user.id)
-    pending = user_data.get("pending_requests", [])
-    
-    request = next((r for r in pending if r.get("email") == email), None)
-    if not request:
-        await query.edit_message_text(
-            "⚠️ هذا الحساب غير موجود أو تمت معالجته.",
-            reply_markup=kb([("🔙 تعديل حساباتي", "edit_my_accounts")])
-        )
-        return
-    
-    context.user_data["editing_email"] = email
-    
-    await query.edit_message_text(
-        f"✏️ *تعديل الحساب:* `{email}`\n\nاختر ما تريد تعديله:",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([
-            [("🔑 تغيير الباسورد", f"edit_field:password:{email}")],
-            [("🔐 تغيير رمز المصادقة", f"edit_field:totp:{email}")],
-            [("🗝️ تغيير كلمة مرور التطبيق", f"edit_field:app_pass:{email}")],
-            [("🗑️ مسح الحساب", f"delete_pending:{email}")],
-            [("🔙 تعديل حساباتي", "edit_my_accounts")]
-        ])
-    )
-
-async def edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    parts = query.data.split(":")
-    field = parts[1]
-    email = parts[2]
-    
-    context.user_data["editing_field"] = field
-    context.user_data["editing_email"] = email
-    
-    field_names = {
-        "password": "كلمة المرور",
-        "totp": "رمز المصادقة الثنائية",
-        "app_pass": "كلمة مرور التطبيق"
-    }
-    
-    await query.edit_message_text(
-        f"✏️ *تعديل {field_names.get(field, field)}*\n"
-        f"للحساب: `{email}`\n\n"
-        f"أرسل القيمة الجديدة:",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([("🔙 إلغاء", f"edit_pending:{email}")])
-    )
-    context.user_data["step"] = "editing_field"
-
-async def delete_pending_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    email = query.data.split(":", 1)[1]
-    user_data = get_user(query.from_user.id)
-    pending = user_data.get("pending_requests", [])
-    
-    request = next((r for r in pending if r.get("email") == email), None)
-    if request:
-        pending = [r for r in pending if r.get("email") != email]
-        user_data["pending_requests"] = pending
-        user_data["pending_balance"] = max(0.0, float(user_data.get("pending_balance", 0.0)) - float(request.get("amount", 0.0)))
-        save_user(query.from_user.id, user_data)
-        
-        await query.edit_message_text(
-            f"✅ تم مسح الحساب `{email}` بنجاح.",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=kb([("🔙 تعديل حساباتي", "edit_my_accounts")])
+        await update.callback_query.edit_message_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup
         )
     else:
-        await query.edit_message_text(
-            "⚠️ الحساب غير موجود.",
-            reply_markup=kb([("🔙 تعديل حساباتي", "edit_my_accounts")])
-        )
-
-# ==================== ADD ACCOUNT FLOW ====================
-async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    SESSIONS[uid] = Session(step="email")
-    
-    config = load_json(DATA_DIR / "config.json")
-    price = config.get("default_price", 5.0)
-    
-    has_email_video = config.get("video_email") and Path(config.get("video_email", "")).exists()
-    
-    buttons = [("❌ إلغاء", "cancel")]
-    if has_email_video:
-        buttons.insert(0, ("📹 طريقة إنشاء حساب", "show_video:email"))
-    
-    await update.callback_query.edit_message_text(
-        f"📝 *إضافة حساب جديد*\n💵 *سعر الحساب الواحد هو ${price}*\n\n📧 *الخطوة 1/4*: أرسل الإيميل:",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([buttons])
-    )
-
-async def show_video_in_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    vtype = query.data.split(":")[1]
-    config = load_json(DATA_DIR / "config.json")
-    path = config.get(f"video_{vtype}")
-    if path and Path(path).exists():
-        try:
-            await context.bot.send_video(
-                chat_id=query.from_user.id,
-                video=open(path, "rb"),
-                caption="📹 *فيديو تعليمي*\nشاهد الفيديو لمعرفة الطريقة الصحيحة.",
-                parse_mode=ParseMode.MARKDOWN,
-                supports_streaming=True
-            )
-            await add_account_start(update, context)
-        except Exception as e:
-            logger.error(f"Error sending video: {e}")
-            await query.edit_message_text(
-                "⚠️ حدث خطأ في تشغيل الفيديو.",
-                reply_markup=kb([("🔙 العودة", "add_account")])
-            )
-    else:
-        await query.edit_message_text(
-            "⚠️ الفيديو غير متوفر حالياً.",
-            reply_markup=kb([("🔙 العودة", "add_account")])
-        )
-
-async def add_account_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    SESSIONS.pop(uid, None)
-    await update.callback_query.edit_message_text("❌ تم الإلغاء.", reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")]))
-
-async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    text = update.message.text.strip()
-    session = SESSIONS.get(uid)
-    if not session or not session.step:
-        return
-
-    if context.user_data.get("step") == "editing_field":
-        await handle_edit_field_input(update, context)
-        return
-
-    config = load_json(DATA_DIR / "config.json")
-
-    if session.step == "email":
-        if not re.match(r"[^@]+@[^@]+\.[^@]+", text):
-            await update.message.reply_text("❌ إيميل غير صالح.")
-            return
-        
-        user_data = get_user(uid)
-        
-        for acc in user_data.get("approved_accounts", []):
-            if acc.get("email") == text:
-                await update.message.reply_text(
-                    "❌ هذا الإيميل مقبول مسبقاً! لا يمكنك إعادة إرساله.",
-                    reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")])
-                )
-                return
-        
-        for req in user_data.get("pending_requests", []):
-            if req.get("email") == text:
-                await update.message.reply_text(
-                    "⏳ هذا الإيميل قيد الانتظار بالفعل! انتظر موافقة المالك.",
-                    reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")])
-                )
-                return
-        
-        rejected_emails = user_data.get("rejected_emails", [])
-        if text in rejected_emails:
-            rejection_count = sum(1 for email in rejected_emails if email == text)
-            if rejection_count >= 3:
-                await update.message.reply_text(
-                    "🚫 تم رفض هذا الإيميل 3 مرات! لا يمكنك إعادة إرساله مرة أخرى.",
-                    reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")])
-                )
-                return
-            else:
-                rejected_emails.remove(text)
-                user_data["rejected_emails"] = rejected_emails
-                save_user(uid, user_data)
-        
-        session.email = text
-        session.step = "password"
-        
-        has_password_video = config.get("video_password") and Path(config.get("video_password", "")).exists()
-        buttons = [("❌ إلغاء", "cancel")]
-        if has_password_video:
-            buttons.insert(0, ("📹 طريقة تغيير الباسورد", "show_video:password"))
-        
         await update.message.reply_text(
-            "🔑 *الخطوة 2/4*: أرسل كلمة المرور الأساسية:",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=kb([buttons])
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup
         )
-
-    elif session.step == "password":
-        session.password = text
-        session.step = "totp"
-        try:
-            await update.message.delete()
-        except:
-            pass
-        
-        has_totp_video = config.get("video_totp") and Path(config.get("video_totp", "")).exists()
-        buttons = [("❌ إلغاء", "cancel")]
-        if has_totp_video:
-            buttons.insert(0, ("📹 طريقة العثور على رمز المصادقة", "show_video:totp"))
-        
-        await update.message.reply_text(
-            "🔐 *الخطوة 3/4*: أرسل مفتاح المصادقة (Secret Key):",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=kb([buttons])
-        )
-
-    elif session.step == "totp":
-        try:
-            secret = text.replace(" ", "").upper()
-            code = pyotp.TOTP(secret).now()
-            session.totp = secret
-            session.step = "app_pass"
-            try:
-                await update.message.delete()
-            except:
-                pass
-            
-            has_app_pass_video = config.get("video_app_pass") and Path(config.get("video_app_pass", "")).exists()
-            buttons = [("❌ إلغاء", "cancel")]
-            if has_app_pass_video:
-                buttons.insert(0, ("📹 طريقة الحصول على كلمة مرور التطبيق", "show_video:app_pass"))
-            
-            await update.message.reply_text(
-                f"✅ مفتاح المصادقة صالح!\n\n🔢 *الكود الحالي:* `{code}`\n\n🗝 *الخطوة 4/4*: أرسل كلمة مرور التطبيق:",
-                parse_mode=ParseMode.MARKDOWN,
-                reply_markup=kb([buttons])
-            )
-        except:
-            await update.message.reply_text("⚠️ مفتاح 2FA غير صالح.")
-
-    elif session.step == "app_pass":
-        session.app_pass = text
-        try:
-            await update.message.delete()
-        except:
-            pass
-        
-        user_data = get_user(uid)
-        price = float(config.get("default_price", 5.0))
-        
-        user_data["pending_requests"].append({
-            "email": session.email,
-            "password": session.password,
-            "totp": session.totp,
-            "app_pass": session.app_pass,
-            "amount": price,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "extracted": False
-        })
-        user_data["pending_balance"] = float(
-            user_data.get("pending_balance", 0.0)
-        ) + price
-        save_user(uid, user_data)
-        SESSIONS.pop(uid, None)
-        
-        referred_by = user_data.get("referred_by")
-        if referred_by:
-            try:
-                await context.bot.send_message(
-                    chat_id=referred_by,
-                    text=f"📢 *إشعار إحالة*\n\n"
-                         f"المستخدم `{uid}` أضاف إيميل `{session.email}` وهو قيد الانتظار.\n"
-                         f"ستحصل على مكافأة عند قبول الإيميل.",
-                    parse_mode=ParseMode.MARKDOWN
-                )
-            except:
-                pass
-        
-        await update.message.reply_text(
-            f"✅ تم إرسال الطلب للمالك للموافقة!\n⏳ تمت إضافة ${price:.2f} إلى الأموال قيد الانتظار.",
-            reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")])
-        )
-
-async def handle_edit_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    text = update.message.text.strip()
-    field = context.user_data.get("editing_field")
-    email = context.user_data.get("editing_email")
-    
-    if not field or not email:
-        await update.message.reply_text("⚠️ حدث خطأ، حاول مرة أخرى.")
-        return
-    
-    user_data = get_user(uid)
-    pending = user_data.get("pending_requests", [])
-    
-    for req in pending:
-        if req.get("email") == email:
-            req[field] = text
-            break
-    
-    user_data["pending_requests"] = pending
-    save_user(uid, user_data)
-    
-    try:
-        await update.message.delete()
-    except:
-        pass
-    
-    context.user_data.pop("editing_field", None)
-    context.user_data.pop("editing_email", None)
-    context.user_data.pop("step", None)
-    
-    await update.message.reply_text(
-        f"✅ تم تحديث {field} بنجاح للحساب `{email}`.",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([("🔙 تعديل حساباتي", "edit_my_accounts")])
-    )
 
 # ==================== OWNER PANEL ====================
 async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -618,1618 +413,684 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
 
+    config_buttons = load_buttons_config()
+    owner_buttons = config_buttons.get("owner_panel", [])
+    decorations = config_buttons.get("decorations", {})
+    
+    # إضافة زر تخصيص الأزرار
+    customize_btn = {"id": "customize_btn", "name": "🎨 تخصيص الأزرار", "color": "#6C5CE7", "sticker": None, "sticker_file_id": None, "background": None, "callback": "customize_buttons"}
+    owner_buttons.append(customize_btn)
+    
+    # إضافة زر العودة
+    back_btn = {"id": "back_btn", "name": "🔙 القائمة الرئيسية", "color": "#636E72", "sticker": None, "sticker_file_id": None, "background": None, "callback": "main_menu"}
+    owner_buttons.append(back_btn)
+
+    text = f"""
+⚙️ <b>لوحة تحكم المالك</b>
+{decorations.get('header', '━━━━━━━━━━━━━━━━━')}
+
+اختر الإعداد الذي تريد تعديله:
+"""
+    
+    reply_markup = build_custom_menu(owner_buttons, rows_per_row=2)
+    
     await query.edit_message_text(
-        "⚙️ *لوحة تحكم المالك*\n\nاختر الإعداد الذي تريد تعديله:",
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=reply_markup
+    )
+
+# ==================== BUTTON CUSTOMIZATION ====================
+async def customize_buttons_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """عرض لوحة تخصيص الأزرار"""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    text = """
+🎨 *لوحة تخصيص الأزرار*
+━━━━━━━━━━━━━━━━━
+
+📌 اختر القسم لتعديله:
+
+• 🔘 الأزرار الرئيسية
+• ⚙️ أزرار المالك
+• 🎨 الألوان
+• 🏷️ الملصقات (اختر أي ملصق من تليجرام)
+• 🖼️ الخلفيات (ارفع صورة لكل زر)
+"""
+    
+    buttons = [
+        [InlineKeyboardButton("🔘 الأزرار الرئيسية", callback_data="customize_main")],
+        [InlineKeyboardButton("⚙️ أزرار المالك", callback_data="customize_owner")],
+        [InlineKeyboardButton("🎨 إدارة الألوان", callback_data="customize_colors")],
+        [InlineKeyboardButton("🏷️ إدارة الملصقات", callback_data="customize_stickers")],
+        [InlineKeyboardButton("🖼️ إدارة الخلفيات", callback_data="customize_backgrounds")],
+        [InlineKeyboardButton("🔙 إعدادات المالك", callback_data="owner_panel")],
+    ]
+    
+    await query.edit_message_text(
+        text,
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([
-            [("💰 سعر كل حساب", "set_price")],
-            [("📋 الطلبات", "approval_requests")],
-            [("📹 قسم الفيديوهات", "videos_section")],
-            [("🛒 المبيعات", "store_section")],
-            [("📢 قناة إجبارية", "forced_channel")],
-            [("📊 جميع الحسابات المقبولة", "all_accounts_section")],
-            [("🔗 نظام الإحالة", "referral_settings")],
-            [("🔙 القائمة الرئيسية", "main_menu")]
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+async def customize_main_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تخصيص الأزرار الرئيسية"""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    config = load_buttons_config()
+    main_buttons = config.get("main_menu", [])
+    
+    text = "🔘 *الأزرار الرئيسية*\n\nاختر زراً لتعديله:\n"
+    
+    buttons = []
+    for btn in main_buttons:
+        if btn.get("callback") not in ["owner_panel"]:
+            name = btn.get("name", "زر")
+            color_emoji = get_color_emoji(btn.get("color", "#6C5CE7"))
+            has_sticker = "📎" if btn.get("sticker_file_id") else ""
+            has_bg = "🖼️" if btn.get("background") else ""
+            display_name = f"{has_sticker}{has_bg} {name}"
+            buttons.append([InlineKeyboardButton(
+                f"{color_emoji} {display_name[:25]}",
+                callback_data=f"edit_btn:{btn['id']}"
+            )])
+    
+    buttons.append([InlineKeyboardButton("➕ إضافة زر جديد", callback_data="add_main_btn")])
+    buttons.append([InlineKeyboardButton("🔙 تخصيص الأزرار", callback_data="customize_buttons")])
+    
+    await query.edit_message_text(
+        text,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+async def customize_owner_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تخصيص أزرار المالك"""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    config = load_buttons_config()
+    owner_buttons = config.get("owner_panel", [])
+    
+    text = "⚙️ *أزرار المالك*\n\nاختر زراً لتعديله:\n"
+    
+    buttons = []
+    for btn in owner_buttons:
+        if btn.get("callback") not in ["customize_buttons", "main_menu"]:
+            name = btn.get("name", "زر")
+            color_emoji = get_color_emoji(btn.get("color", "#6C5CE7"))
+            has_sticker = "📎" if btn.get("sticker_file_id") else ""
+            has_bg = "🖼️" if btn.get("background") else ""
+            display_name = f"{has_sticker}{has_bg} {name}"
+            buttons.append([InlineKeyboardButton(
+                f"{color_emoji} {display_name[:25]}",
+                callback_data=f"edit_btn_owner:{btn['id']}"
+            )])
+    
+    buttons.append([InlineKeyboardButton("➕ إضافة زر جديد", callback_data="add_owner_btn")])
+    buttons.append([InlineKeyboardButton("🔙 تخصيص الأزرار", callback_data="customize_buttons")])
+    
+    await query.edit_message_text(
+        text,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+async def edit_button_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تعديل تفاصيل زر معين"""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    btn_id = query.data.split(":")[1]
+    context.user_data["editing_btn_id"] = btn_id
+    
+    config = load_buttons_config()
+    btn = None
+    menu_type = "main_menu"
+    
+    for menu in ["main_menu", "owner_panel"]:
+        for b in config.get(menu, []):
+            if b["id"] == btn_id:
+                btn = b
+                menu_type = menu
+                break
+        if btn:
+            break
+    
+    if not btn:
+        await query.edit_message_text("❌ الزر غير موجود!")
+        return
+    
+    has_sticker = "✅" if btn.get("sticker_file_id") else "❌"
+    has_bg = "✅" if btn.get("background") else "❌"
+    
+    text = f"""
+✏️ *تعديل الزر*
+━━━━━━━━━━━━━━━━━
+
+📌 المعرف: `{btn_id}`
+📝 الاسم: {btn.get('name', '')}
+🎨 اللون: {get_color_emoji(btn.get('color', '#6C5CE7'))} `{btn.get('color', '#6C5CE7')}`
+🏷️ الملصق: {has_sticker}
+🖼️ الخلفية: {has_bg}
+
+اختر الخاصية لتعديلها:
+"""
+    
+    buttons = [
+        [InlineKeyboardButton("📝 تغيير الاسم", callback_data=f"edit_btn_name:{btn_id}")],
+        [InlineKeyboardButton("🎨 تغيير اللون", callback_data=f"edit_btn_color:{btn_id}")],
+        [InlineKeyboardButton("🏷️ إضافة/تغيير ملصق", callback_data=f"edit_btn_sticker:{btn_id}")],
+        [InlineKeyboardButton("🗑️ حذف الملصق", callback_data=f"remove_btn_sticker:{btn_id}")],
+        [InlineKeyboardButton("🖼️ إضافة/تغيير خلفية", callback_data=f"edit_btn_bg:{btn_id}")],
+        [InlineKeyboardButton("🗑️ حذف الخلفية", callback_data=f"remove_btn_bg:{btn_id}")],
+        [InlineKeyboardButton("❌ حذف الزر", callback_data=f"delete_btn:{btn_id}")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data=f"customize_{menu_type}")],
+    ]
+    
+    await query.edit_message_text(
+        text,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+async def edit_btn_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تغيير اسم الزر"""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    btn_id = query.data.split(":")[1]
+    context.user_data["edit_btn_id"] = btn_id
+    context.user_data["edit_mode"] = "name"
+    
+    await query.edit_message_text(
+        f"✏️ *تغيير اسم الزر*\n\n"
+        f"🆔 المعرف: `{btn_id}`\n\n"
+        f"📝 أرسل الاسم الجديد للزر:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 إلغاء", callback_data=f"edit_btn:{btn_id}")]
         ])
     )
 
-# ==================== OWNER PANEL: VIDEOS SECTION ====================
-async def videos_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def edit_btn_color(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تغيير لون الزر"""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
-
-    config = load_json(DATA_DIR / "config.json")
     
-    video_types = {
-        "email": "📹 فيديو إنشاء إيميل",
-        "password": "📹 فيديو تغيير باسورد",
-        "totp": "📹 فيديو إضافة 2FA",
-        "app_pass": "📹 فيديو كلمة مرور التطبيق"
-    }
+    btn_id = query.data.split(":")[1]
     
-    rows = []
-    for key, name in video_types.items():
-        video_path = config.get(f"video_{key}")
-        exists = video_path and Path(video_path).exists()
-        status = "✅" if exists else "❌"
-        rows.append([(f"{status} {name}", f"video_action:{key}")])
+    text = f"🎨 *اختر لون الزر*\n\n"
+    buttons = []
+    for color_id, color_data in COLORS.items():
+        buttons.append([InlineKeyboardButton(
+            f"{color_data['emoji']} {color_data['name']}",
+            callback_data=f"set_btn_color:{btn_id}:{color_data['hex']}"
+        )])
     
-    rows.append([("🔙 إعدادات المالك", "owner_panel")])
+    buttons.append([InlineKeyboardButton("🔙 إلغاء", callback_data=f"edit_btn:{btn_id}")])
     
     await query.edit_message_text(
-        "📹 *قسم الفيديوهات*\n\n"
-        "✅ = فيديو موجود\n"
-        "❌ = فيديو غير موجود\n\n"
-        "اختر الفيديو لإدارته:",
+        text,
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb(*rows)
+        reply_markup=InlineKeyboardMarkup(buttons)
     )
 
-async def video_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def edit_btn_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """إضافة أو تغيير ملصق الزر (ملصق من تليجرام)"""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
     
-    video_type = query.data.split(":", 1)[1]
-    config = load_json(DATA_DIR / "config.json")
-    video_path = config.get(f"video_{video_type}")
-    exists = video_path and Path(video_path).exists()
-    
-    video_names = {
-        "email": "إنشاء إيميل",
-        "password": "تغيير باسورد",
-        "totp": "إضافة 2FA",
-        "app_pass": "كلمة مرور التطبيق"
-    }
-    
-    rows = []
-    if exists:
-        rows.append([("📹 عرض الفيديو", f"view_video:{video_type}")])
-        rows.append([("🗑️ حذف الفيديو", f"delete_video:{video_type}")])
-    rows.append([("📤 رفع فيديو جديد", f"set_video:{video_type}")])
-    rows.append([("🔙 قسم الفيديوهات", "videos_section")])
-    
-    status = "✅ موجود" if exists else "❌ غير موجود"
+    btn_id = query.data.split(":")[1]
+    context.user_data["edit_btn_id"] = btn_id
+    context.user_data["edit_mode"] = "sticker"
     
     await query.edit_message_text(
-        f"📹 *فيديو {video_names.get(video_type, video_type)}*\n\n"
-        f"الحالة: {status}\n\n"
-        f"اختر الإجراء المناسب:",
+        f"🏷️ *إضافة ملصق للزر*\n\n"
+        f"🆔 المعرف: `{btn_id}`\n\n"
+        f"📤 أرسل الملصق (Sticker) الذي تريد وضعه كملصق للزر:\n\n"
+        f"📌 يمكنك إرسال أي ملصق من تليجرام",
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb(*rows)
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 إلغاء", callback_data=f"edit_btn:{btn_id}")]
+        ])
     )
 
-async def view_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def remove_btn_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """حذف ملصق الزر"""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
     
-    video_type = query.data.split(":", 1)[1]
-    config = load_json(DATA_DIR / "config.json")
-    video_path = config.get(f"video_{video_type}")
+    btn_id = query.data.split(":")[1]
     
-    if video_path and Path(video_path).exists():
-        try:
-            await context.bot.send_video(
-                chat_id=query.from_user.id,
-                video=open(video_path, "rb"),
-                caption=f"📹 *فيديو {video_type}*",
-                parse_mode=ParseMode.MARKDOWN,
-                supports_streaming=True
-            )
-            await video_action(update, context)
-        except Exception as e:
-            logger.error(f"Error sending video: {e}")
-            await query.edit_message_text(
-                "⚠️ حدث خطأ في عرض الفيديو.",
-                reply_markup=kb([("🔙 قسم الفيديوهات", "videos_section")])
-            )
+    config = load_buttons_config()
+    for menu in ["main_menu", "owner_panel"]:
+        for btn in config.get(menu, []):
+            if btn["id"] == btn_id:
+                btn["sticker_file_id"] = None
+                save_buttons_config(config)
+                await query.answer("✅ تم حذف الملصق!", show_alert=True)
+                await edit_button_details(update, context)
+                return
+
+async def edit_btn_background(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """إضافة أو تغيير خلفية الزر (صورة من المستخدم)"""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    btn_id = query.data.split(":")[1]
+    context.user_data["edit_btn_id"] = btn_id
+    context.user_data["edit_mode"] = "background"
+    
+    await query.edit_message_text(
+        f"🖼️ *إضافة خلفية للزر*\n\n"
+        f"🆔 المعرف: `{btn_id}`\n\n"
+        f"📤 أرسل الصورة التي تريدها كخلفية للزر:\n\n"
+        f"📌 يمكنك إرسال أي صورة (jpg, png)",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 إلغاء", callback_data=f"edit_btn:{btn_id}")]
+        ])
+    )
+
+async def remove_btn_background(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """حذف خلفية الزر"""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    btn_id = query.data.split(":")[1]
+    
+    config = load_buttons_config()
+    for menu in ["main_menu", "owner_panel"]:
+        for btn in config.get(menu, []):
+            if btn["id"] == btn_id:
+                # حذف ملف الخلفية
+                if btn.get("background"):
+                    bg_path = BUTTON_BACKGROUNDS_DIR / btn["background"]
+                    if bg_path.exists():
+                        try:
+                            bg_path.unlink()
+                        except:
+                            pass
+                btn["background"] = None
+                save_buttons_config(config)
+                await query.answer("✅ تم حذف الخلفية!", show_alert=True)
+                await edit_button_details(update, context)
+                return
+
+async def handle_button_edit_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالجة إدخال تعديل الزر (الاسم)"""
+    if update.effective_user.id != OWNER_ID:
+        return
+    
+    text = update.message.text.strip()
+    btn_id = context.user_data.get("edit_btn_id")
+    mode = context.user_data.get("edit_mode")
+    
+    if not btn_id:
+        return
+    
+    if mode == "name":
+        config = load_buttons_config()
+        for menu in ["main_menu", "owner_panel"]:
+            for btn in config.get(menu, []):
+                if btn["id"] == btn_id:
+                    btn["name"] = text
+                    save_buttons_config(config)
+                    await update.message.reply_text("✅ تم تحديث اسم الزر!")
+                    context.user_data.pop("edit_btn_id", None)
+                    context.user_data.pop("edit_mode", None)
+                    await main_menu(update, context)
+                    return
+        await update.message.reply_text("❌ الزر غير موجود!")
+
+async def handle_sticker_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالجة إدخال الملصق"""
+    if update.effective_user.id != OWNER_ID:
+        return
+    
+    btn_id = context.user_data.get("edit_btn_id")
+    if not btn_id:
+        return
+    
+    if update.message.sticker:
+        sticker_file_id = update.message.sticker.file_id
+        config = load_buttons_config()
+        
+        for menu in ["main_menu", "owner_panel"]:
+            for btn in config.get(menu, []):
+                if btn["id"] == btn_id:
+                    btn["sticker_file_id"] = sticker_file_id
+                    save_buttons_config(config)
+                    await update.message.reply_text("✅ تم إضافة الملصق للزر!")
+                    context.user_data.pop("edit_btn_id", None)
+                    context.user_data.pop("edit_mode", None)
+                    await main_menu(update, context)
+                    return
     else:
-        await query.edit_message_text(
-            "⚠️ الفيديو غير موجود.",
-            reply_markup=kb([("🔙 قسم الفيديوهات", "videos_section")])
-        )
+        await update.message.reply_text("❌ يرجى إرسال ملصق (Sticker) وليس صورة!")
 
-async def delete_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
+async def handle_background_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالجة إدخال الخلفية (صورة)"""
     if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
         return
     
-    video_type = query.data.split(":", 1)[1]
-    config = load_json(DATA_DIR / "config.json")
-    video_path = config.get(f"video_{video_type}")
+    btn_id = context.user_data.get("edit_btn_id")
+    if not btn_id:
+        return
     
-    if video_path and Path(video_path).exists():
-        try:
-            Path(video_path).unlink()
-            config[f"video_{video_type}"] = ""
-            save_json(DATA_DIR / "config.json", config)
-            await query.edit_message_text(
-                f"✅ تم حذف فيديو {video_type} بنجاح!",
-                reply_markup=kb([("🔙 قسم الفيديوهات", "videos_section")])
-            )
-        except Exception as e:
-            logger.error(f"Error deleting video: {e}")
-            await query.edit_message_text(
-                "⚠️ حدث خطأ في حذف الفيديو.",
-                reply_markup=kb([("🔙 قسم الفيديوهات", "videos_section")])
-            )
-    else:
-        await query.edit_message_text(
-            "⚠️ الفيديو غير موجود.",
-            reply_markup=kb([("🔙 قسم الفيديوهات", "videos_section")])
-        )
-
-async def set_video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    video_type = query.data.split(":", 1)[1]
-    context.user_data["pending_video_type"] = video_type
-    await query.edit_message_text(
-        f"📤 *أرسل الفيديو الخاص بـ {video_type} الآن (كملف فيديو):*\n\n"
-        f"📌 سيتم استبدال الفيديو القديم إن وجد.",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([("🔙 إلغاء", f"video_action:{video_type}")])
-    )
-
-async def handle_video_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        return
-    video_type = context.user_data.get("pending_video_type")
-    if not video_type:
-        await update.message.reply_text("⚠️ لم يتم تحديد نوع الفيديو.")
-        return
-    if update.message.video:
-        file = await update.message.video.get_file()
-        file_path = VIDEOS_DIR / f"{video_type}.mp4"
+    if update.message.photo:
+        # الحصول على الصورة بأعلى جودة
+        photo = update.message.photo[-1]
+        file = await context.bot.get_file(photo.file_id)
+        
+        # حفظ الصورة
+        file_name = f"{btn_id}_{int(time.time())}.jpg"
+        file_path = BUTTON_BACKGROUNDS_DIR / file_name
         await file.download_to_drive(file_path)
         
-        config = load_json(DATA_DIR / "config.json")
-        config[f"video_{video_type}"] = str(file_path)
-        save_json(DATA_DIR / "config.json", config)
-        
-        await update.message.reply_text(f"✅ تم حفظ فيديو {video_type} بنجاح!")
-        context.user_data.pop("pending_video_type", None)
-        await main_menu(update, context)
+        config = load_buttons_config()
+        for menu in ["main_menu", "owner_panel"]:
+            for btn in config.get(menu, []):
+                if btn["id"] == btn_id:
+                    # حذف الخلفية القديمة
+                    if btn.get("background"):
+                        old_path = BUTTON_BACKGROUNDS_DIR / btn["background"]
+                        if old_path.exists():
+                            try:
+                                old_path.unlink()
+                            except:
+                                pass
+                    btn["background"] = file_name
+                    save_buttons_config(config)
+                    await update.message.reply_text("✅ تم إضافة الخلفية للزر!")
+                    context.user_data.pop("edit_btn_id", None)
+                    context.user_data.pop("edit_mode", None)
+                    await main_menu(update, context)
+                    return
     else:
-        await update.message.reply_text("⚠️ يرجى إرسال فيديو صحيح.")
+        await update.message.reply_text("❌ يرجى إرسال صورة (Photo) وليس ملف!")
 
-# ==================== OWNER PANEL: APPROVAL REQUESTS ====================
-async def approval_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-
-    await query.edit_message_text(
-        "📋 *الطلبات*\n\nاختر القسم:",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([
-            [("⏳ منتظرة", "view_pending")],
-            [("✅ مقبولة", "view_approved")],
-            [("❌ مرفوضة", "view_rejected")],
-            [("🔙 إعدادات المالك", "owner_panel")]
-        ])
-    )
-
-async def view_pending_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    
-    users = load_json(USERS_DB)
-    pending = []
-    
-    for uid, u_data in users.items():
-        for req in u_data.get("pending_requests", []):
-            req_copy = req.copy()
-            req_copy["user_id"] = uid
-            pending.append(req_copy)
-    
-    if not pending:
-        await query.edit_message_text(
-            "📭 لا توجد طلبات منتظرة.",
-            reply_markup=kb([("🔙 الطلبات", "approval_requests")])
-        )
-        return
-    
-    rows = []
-    for req in pending:
-        rows.append([(f"⏳ {req.get('email', '')}", f"pending_detail:{req['user_id']}:{req.get('email', '')}")])
-    rows.append([("🔙 الطلبات", "approval_requests")])
-    
-    await query.edit_message_text(
-        "⏳ *الطلبات المنتظرة*\nاختر الإيميل لعرض التفاصيل:",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb(*rows)
-    )
-
-async def view_approved_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    
-    users = load_json(USERS_DB)
-    approved = []
-    
-    for uid, u_data in users.items():
-        for acc in u_data.get("approved_accounts", []):
-            acc_copy = acc.copy()
-            acc_copy["user_id"] = uid
-            approved.append(acc_copy)
-    
-    if not approved:
-        await query.edit_message_text(
-            "📭 لا توجد طلبات مقبولة.",
-            reply_markup=kb([("🔙 الطلبات", "approval_requests")])
-        )
-        return
-    
-    msg = "✅ *الطلبات المقبولة*\n\n"
-    for idx, acc in enumerate(approved, 1):
-        msg += f"{idx}. 📧 `{acc.get('email', '')}`\n"
-        msg += f"   👤 المستخدم: {acc.get('user_id', '')}\n\n"
-    
-    if len(msg) > 4000:
-        msg = msg[:3990] + "\n... (تم اختصار الرسالة)"
-    
-    await query.edit_message_text(
-        msg,
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([("🔙 الطلبات", "approval_requests")])
-    )
-
-async def view_rejected_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    
-    users = load_json(USERS_DB)
-    rejected = []
-    
-    for uid, u_data in users.items():
-        for req in u_data.get("rejected_requests", []):
-            req_copy = req.copy()
-            req_copy["user_id"] = uid
-            rejected.append(req_copy)
-    
-    if not rejected:
-        await query.edit_message_text(
-            "📭 لا توجد طلبات مرفوضة.",
-            reply_markup=kb([("🔙 الطلبات", "approval_requests")])
-        )
-        return
-    
-    msg = "❌ *الطلبات المرفوضة*\n\n"
-    for idx, rej in enumerate(rejected, 1):
-        reason = rej.get('reject_reason', 'غير معروف')
-        reason_map = {
-            "email": "إيميل خطأ",
-            "password": "باسورد خطأ",
-            "totp": "رمز مصادقة خطأ",
-            "app_pass": "كلمة مرور تطبيق خطأ",
-            "custom": "سبب مخصص"
-        }
-        reason_text = reason_map.get(reason, reason)
-        msg += f"{idx}. 📧 `{rej.get('email', '')}`\n"
-        msg += f"   👤 المستخدم: {rej.get('user_id', '')}\n"
-        msg += f"   ❌ السبب: {reason_text}\n\n"
-    
-    if len(msg) > 4000:
-        msg = msg[:3990] + "\n... (تم اختصار الرسالة)"
-    
-    await query.edit_message_text(
-        msg,
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([("🔙 الطلبات", "approval_requests")])
-    )
-
-async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def set_btn_color_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تطبيق تغيير لون الزر"""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
     
     parts = query.data.split(":")
-    uid = int(parts[1])
-    email = parts[2]
+    btn_id = parts[1]
+    color_hex = parts[2]
     
-    user_data = get_user(uid)
-    request = next((req for req in user_data.get("pending_requests", []) if req.get("email") == email), None)
-    
-    if not request:
-        await query.edit_message_text(
-            "⚠️ هذا الطلب غير موجود.",
-            reply_markup=kb([("🔙 الطلبات المنتظرة", "view_pending")])
-        )
-        return
-    
-    msg = f"📋 *تفاصيل الطلب*\n\n"
-    msg += f"📧 *الإيميل:* `{request.get('email', '')}`\n"
-    msg += f"🔑 *الباسورد:* `{request.get('password', '')}`\n"
-    msg += f"🔐 *رمز المصادقة:* `{request.get('totp', '')}`\n"
-    msg += f"🗝 *كلمة مرور التطبيق:* `{request.get('app_pass', '')}`\n"
-    msg += f"👤 *المستخدم:* `{uid}`\n"
-    msg += f"💰 *السعر:* ${request.get('amount', 0):.2f}\n"
-    
-    await query.edit_message_text(
-        msg,
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([
-            [("✅ قبول", f"approve_request:{uid}:{email}")],
-            [("❌ رفض", f"reject_request:{uid}:{email}")],
-            [("🔙 الطلبات المنتظرة", "view_pending")]
-        ])
-    )
+    config = load_buttons_config()
+    for menu in ["main_menu", "owner_panel"]:
+        for btn in config.get(menu, []):
+            if btn["id"] == btn_id:
+                btn["color"] = color_hex
+                save_buttons_config(config)
+                await query.answer("✅ تم تحديث لون الزر!", show_alert=True)
+                await edit_button_details(update, context)
+                return
 
-async def reject_request_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def delete_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """حذف زر"""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
     
-    parts = query.data.split(":")
-    uid = int(parts[1])
-    email = parts[2]
+    btn_id = query.data.split(":")[1]
+    config = load_buttons_config()
     
-    context.user_data["reject_uid"] = uid
-    context.user_data["reject_email"] = email
+    for menu in ["main_menu", "owner_panel"]:
+        for i, btn in enumerate(config.get(menu, [])):
+            if btn["id"] == btn_id:
+                # حذف الخلفية إذا وجدت
+                if btn.get("background"):
+                    bg_path = BUTTON_BACKGROUNDS_DIR / btn["background"]
+                    if bg_path.exists():
+                        try:
+                            bg_path.unlink()
+                        except:
+                            pass
+                del config[menu][i]
+                save_buttons_config(config)
+                await query.answer("✅ تم حذف الزر!", show_alert=True)
+                await customize_buttons_menu(update, context)
+                return
     
-    await query.edit_message_text(
-        f"❌ *رفض الطلب*\n\n"
-        f"📧 الإيميل: `{email}`\n\n"
-        f"اختر سبب الرفض:",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([
-            [("📧 إيميل خطأ", f"reject_reason:email:{uid}:{email}")],
-            [("🔑 باسورد خطأ", f"reject_reason:password:{uid}:{email}")],
-            [("🔐 رمز مصادقة خطأ", f"reject_reason:totp:{uid}:{email}")],
-            [("🗝 كلمة مرور تطبيق خطأ", f"reject_reason:app_pass:{uid}:{email}")],
-            [("📝 خطأ آخر (اكتب السبب)", f"reject_reason:other:{uid}:{email}")],
-            [("🔙 التفاصيل", f"pending_detail:{uid}:{email}")]
-        ])
-    )
+    await query.answer("❌ الزر غير موجود!", show_alert=True)
 
-async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def add_main_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """إضافة زر رئيسي جديد"""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
     
-    parts = query.data.split(":")
-    reason_type = parts[1]
-    uid = int(parts[2])
-    email = parts[3]
+    context.user_data["add_btn_menu"] = "main_menu"
+    context.user_data["add_btn_step"] = "name"
     
-    user_data = get_user(uid)
-    
-    pending_requests = user_data.get("pending_requests", [])
-    request = next((req for req in pending_requests if req.get("email") == email), None)
-    
-    if not request:
-        await query.edit_message_text(
-            "⚠️ هذا الطلب غير موجود.",
-            reply_markup=kb([("🔙 الطلبات المنتظرة", "view_pending")])
-        )
+    await query.edit_message_text(
+        "➕ *إضافة زر جديد*\n\n"
+        "📝 أرسل اسم الزر الجديد:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 إلغاء", callback_data="customize_main")]
+        ])
+    )
+
+async def add_owner_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """إضافة زر مالك جديد"""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
         return
     
-    user_data["pending_requests"] = [req for req in pending_requests if req.get("email") != email]
+    context.user_data["add_btn_menu"] = "owner_panel"
+    context.user_data["add_btn_step"] = "name"
     
-    request["reject_reason"] = reason_type
-    user_data.setdefault("rejected_requests", []).append(request)
+    await query.edit_message_text(
+        "➕ *إضافة زر جديد*\n\n"
+        "📝 أرسل اسم الزر الجديد:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 إلغاء", callback_data="customize_owner")]
+        ])
+    )
+
+async def handle_add_button_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالجة إدخال إضافة زر جديد"""
+    if update.effective_user.id != OWNER_ID:
+        return
     
-    rejected_emails = user_data.get("rejected_emails", [])
-    rejected_emails.append(email)
-    user_data["rejected_emails"] = rejected_emails
+    text = update.message.text.strip()
+    menu = context.user_data.get("add_btn_menu")
+    step = context.user_data.get("add_btn_step")
     
-    user_data["pending_balance"] = max(0.0, float(user_data.get("pending_balance", 0.0)) - float(request.get("amount", 0.0)))
+    if not menu or step != "name":
+        return
     
-    save_user(uid, user_data)
-    
-    reason_messages = {
-        "email": "❌ الإيميل الذي أرسلته غير صحيح أو غير مقبول.",
-        "password": "❌ كلمة المرور التي أرسلتها غير صحيحة.",
-        "totp": "❌ رمز المصادقة الثنائية الذي أرسلته غير صحيح.",
-        "app_pass": "❌ كلمة مرور التطبيق التي أرسلتها غير صحيحة.",
-        "other": "❌ تم رفض طلبك لسبب آخر."
+    btn_id = f"btn_{int(time.time())}"
+    new_btn = {
+        "id": btn_id,
+        "name": text,
+        "color": "#6C5CE7",
+        "sticker": None,
+        "sticker_file_id": None,
+        "background": None,
+        "callback": f"custom_btn_{btn_id}"
     }
     
-    reason = reason_messages.get(reason_type, "❌ تم رفض طلبك.")
+    config = load_buttons_config()
+    config[menu].append(new_btn)
+    save_buttons_config(config)
     
-    config = load_json(DATA_DIR / "config.json")
+    context.user_data.pop("add_btn_menu", None)
+    context.user_data.pop("add_btn_step", None)
     
-    if reason_type == "email":
-        video_path = config.get("video_email")
-        if video_path and Path(video_path).exists():
-            try:
-                await context.bot.send_video(
-                    chat_id=uid,
-                    video=open(video_path, "rb"),
-                    caption=f"{reason}\n\n📹 *شاهد الفيديو لمعرفة الطريقة الصحيحة لإنشاء الإيميل:*",
-                    parse_mode=ParseMode.MARKDOWN,
-                    supports_streaming=True
-                )
-            except:
-                pass
-    elif reason_type == "password":
-        video_path = config.get("video_password")
-        if video_path and Path(video_path).exists():
-            try:
-                await context.bot.send_video(
-                    chat_id=uid,
-                    video=open(video_path, "rb"),
-                    caption=f"{reason}\n\n📹 *شاهد الفيديو لمعرفة الطريقة الصحيحة لتغيير الباسورد:*",
-                    parse_mode=ParseMode.MARKDOWN,
-                    supports_streaming=True
-                )
-            except:
-                pass
-    elif reason_type == "totp":
-        video_path = config.get("video_totp")
-        if video_path and Path(video_path).exists():
-            try:
-                await context.bot.send_video(
-                    chat_id=uid,
-                    video=open(video_path, "rb"),
-                    caption=f"{reason}\n\n📹 *شاهد الفيديو لمعرفة الطريقة الصحيحة للعثور على رمز المصادقة:*",
-                    parse_mode=ParseMode.MARKDOWN,
-                    supports_streaming=True
-                )
-            except:
-                pass
-    elif reason_type == "app_pass":
-        video_path = config.get("video_app_pass")
-        if video_path and Path(video_path).exists():
-            try:
-                await context.bot.send_video(
-                    chat_id=uid,
-                    video=open(video_path, "rb"),
-                    caption=f"{reason}\n\n📹 *شاهد الفيديو لمعرفة الطريقة الصحيحة للحصول على كلمة مرور التطبيق:*",
-                    parse_mode=ParseMode.MARKDOWN,
-                    supports_streaming=True
-                )
-            except:
-                pass
+    await update.message.reply_text(f"✅ تم إضافة الزر: {text}")
+    
+    if menu == "main_menu":
+        await customize_main_buttons(update, context)
     else:
-        context.user_data["reject_uid"] = uid
-        context.user_data["reject_email"] = email
-        context.user_data["reject_reason"] = "other"
-        
-        await query.edit_message_text(
-            f"📝 *اكتب سبب الرفض*\n\n"
-            f"أرسل رسالة توضح سبب رفض طلب `{email}`:",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=kb([("🔙 إلغاء", f"pending_detail:{uid}:{email}")])
-        )
-        context.user_data["step"] = "reject_reason_text"
-        return
-    
-    try:
-        await context.bot.send_message(
-            chat_id=uid,
-            text=f"{reason}\n\n"
-                 f"📧 الإيميل: `{email}`\n"
-                 f"يمكنك إعادة المحاولة بإرسال إيميل جديد.",
-            parse_mode=ParseMode.MARKDOWN
-        )
-    except:
-        pass
-    
-    await query.edit_message_text(
-        f"✅ تم رفض الطلب `{email}` وإرسال السبب للمستخدم.",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([("🔙 الطلبات المنتظرة", "view_pending")])
-    )
+        await customize_owner_buttons(update, context)
 
-async def handle_reject_reason_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = context.user_data.get("reject_uid")
-    email = context.user_data.get("reject_email")
-    text = update.message.text.strip()
-    
-    if not uid or not email:
-        await update.message.reply_text("⚠️ حدث خطأ، حاول مرة أخرى.")
-        return
-    
-    try:
-        await context.bot.send_message(
-            chat_id=uid,
-            text=f"❌ *تم رفض طلبك*\n\n"
-                 f"📧 الإيميل: `{email}`\n"
-                 f"📝 السبب: {text}\n\n"
-                 f"يمكنك إعادة المحاولة بإرسال إيميل جديد.",
-            parse_mode=ParseMode.MARKDOWN
-        )
-    except:
-        pass
-    
-    context.user_data.pop("reject_uid", None)
-    context.user_data.pop("reject_email", None)
-    context.user_data.pop("reject_reason", None)
-    context.user_data.pop("step", None)
-    
-    await update.message.reply_text(
-        f"✅ تم رفض الطلب `{email}` وإرسال السبب للمستخدم.",
-        reply_markup=kb([("🔙 الطلبات المنتظرة", "view_pending")])
-    )
-
-async def approve_request_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def customize_colors(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """عرض قائمة الألوان"""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
-
-    parts = query.data.split(":")
-    uid = int(parts[1])
-    email = parts[2]
-
-    user_data = get_user(uid)
-    config = load_json(DATA_DIR / "config.json")
-    default_price = float(config.get("default_price", 5.0))
-
-    approved_request = next(
-        (req for req in user_data.get("pending_requests", []) if req["email"] == email),
-        None,
-    )
-    if not approved_request:
-        await query.edit_message_text(
-            "⚠️ هذا الطلب غير موجود أو تمت معالجته مسبقاً.",
-            reply_markup=kb([("🔙 الطلبات المنتظرة", "view_pending")]),
-        )
-        return
-
-    price = float(approved_request.get("amount", default_price))
     
-    approved_request["extracted"] = False
-    user_data.setdefault("approved_accounts", []).append(approved_request)
-    user_data["pending_balance"] = max(
-        0.0,
-        float(user_data.get("pending_balance", 0.0)) - price,
-    )
-    user_data["balance"] = float(user_data.get("balance", 0.0)) + price
-    user_data["pending_requests"] = [
-        req for req in user_data.get("pending_requests", []) if req["email"] != email
-    ]
+    text = "🎨 *قائمة الألوان المتاحة*\n\n"
+    for color_id, color_data in COLORS.items():
+        text += f"{color_data['emoji']} {color_data['name']} - `{color_data['hex']}`\n"
     
-    user_data["total_approved_emails"] = int(user_data.get("total_approved_emails", 0)) + 1
+    text += "\n📌 يمكنك استخدام هذه الألوان عند تخصيص الأزرار"
     
-    save_user(uid, user_data)
-
-    referred_by = user_data.get("referred_by")
-    if referred_by:
-        referral_bonus = float(config.get("referral_bonus", 0.0))
-        if referral_bonus > 0:
-            referrer_data = get_user(referred_by)
-            referrer_data["referral_earnings"] = float(referrer_data.get("referral_earnings", 0.0)) + referral_bonus
-            referrer_data["total_referrals"] = int(referrer_data.get("total_referrals", 0)) + 1
-            save_user(referred_by, referrer_data)
-            
-            try:
-                await context.bot.send_message(
-                    chat_id=referred_by,
-                    text=f"🎉 *مبروك!*\nحصلت على مكافأة إحالة بقيمة ${referral_bonus:.2f}\n"
-                         f"بسبب إحالة المستخدم {uid} الذي أضاف حساباً جديداً.",
-                    parse_mode=ParseMode.MARKDOWN
-                )
-            except:
-                pass
-    
-    try:
-        await context.bot.send_message(
-            chat_id=uid,
-            text=f"✅ *تم قبول طلبك!*\n\n"
-                 f"📧 الإيميل: `{email}`\n"
-                 f"💰 تم إضافة ${price:.2f} إلى رصيدك.",
-            parse_mode=ParseMode.MARKDOWN
-        )
-    except:
-        pass
-
     await query.edit_message_text(
-        f"✅ تم قبول الحساب `{email}`!\n💰 تم نقل ${price:.2f} من قيد الانتظار إلى الرصيد المملوك.",
+        text,
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([("🔙 الطلبات المنتظرة", "view_pending")])
-    )
-
-# ==================== ALL ACCOUNTS SECTION ====================
-async def all_accounts_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-
-    await query.edit_message_text(
-        "📊 *جميع الحسابات المقبولة*\n\nاختر الخيار المناسب:",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([
-            [("📋 جميع الحسابات", "all_accounts")],
-            [("🆕 آخر الحسابات (غير المستخرجة)", "unextracted_accounts")],
-            [("🔙 إعدادات المالك", "owner_panel")]
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 تخصيص الأزرار", callback_data="customize_buttons")]
         ])
     )
 
-async def all_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def customize_stickers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """عرض تعليمات الملصقات"""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
+    
+    text = """
+🏷️ *إدارة الملصقات*
 
-    users = load_json(USERS_DB)
-    all_accounts = []
-    
-    for uid, user_data in users.items():
-        for acc in user_data.get("approved_accounts", []):
-            acc_copy = acc.copy()
-            acc_copy["user_id"] = uid
-            all_accounts.append(acc_copy)
-    
-    if not all_accounts:
-        await query.edit_message_text(
-            "📭 لا توجد حسابات مقبولة حالياً.",
-            reply_markup=kb([("🔙 جميع الحسابات", "all_accounts_section")])
-        )
-        return
+📌 يمكنك إضافة أي ملصق من تليجرام كملصق للزر.
 
-    total = len(all_accounts)
-    msg = f"📊 *إجمالي الحسابات: {total}*\n\n"
-    
-    for idx, acc in enumerate(all_accounts[:10], 1):
-        msg += f"{idx}. 📧 `{acc.get('email', '')}`\n"
-        msg += f"   🔑 {acc.get('password', '')}\n"
-        msg += f"   🔐 {acc.get('totp', '')}\n"
-        msg += f"   🗝 {acc.get('app_pass', '')}\n"
-        msg += f"   👤 المستخدم: {acc.get('user_id', '')}\n"
-        msg += f"   💰 السعر: ${acc.get('amount', 0):.2f}\n"
-        msg += "   ─────────────\n"
-    
-    if total > 10:
-        msg += f"\n📌 *ملاحظة:* تم عرض أول 10 حسابات من أصل {total}"
-        msg += "\nلتصدير جميع الحسابات استخدم زر التصدير أدناه"
+🔹 *الطريقة:*
+1️⃣ اختر الزر الذي تريد إضافة ملصق له
+2️⃣ اختر "إضافة/تغيير ملصق"
+3️⃣ أرسل الملصق (Sticker) من تليجرام
 
+✨ *ملاحظة:* يمكنك استخدام أي ملصق من أي بوت أو مجموعة!
+"""
+    
     await query.edit_message_text(
-        msg,
+        text,
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([
-            [("📥 تصدير جميع الحسابات", "export_all_accounts")],
-            [("🆕 عرض الحسابات غير المستخرجة", "unextracted_accounts")],
-            [("🔙 جميع الحسابات", "all_accounts_section")]
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 تخصيص الأزرار", callback_data="customize_buttons")]
         ])
     )
 
-async def unextracted_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def customize_backgrounds(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """عرض تعليمات الخلفيات"""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
+    
+    text = """
+🖼️ *إدارة الخلفيات*
 
-    users = load_json(USERS_DB)
-    unextracted = []
-    
-    for uid, user_data in users.items():
-        for acc in user_data.get("approved_accounts", []):
-            if not acc.get("extracted", False):
-                acc_copy = acc.copy()
-                acc_copy["user_id"] = uid
-                unextracted.append(acc_copy)
-    
-    if not unextracted:
-        await query.edit_message_text(
-            "✅ لا توجد حسابات غير مستخرجة.",
-            reply_markup=kb([("🔙 جميع الحسابات", "all_accounts_section")])
-        )
-        return
+📌 يمكنك إضافة أي صورة كخلفية للزر.
 
-    total = len(unextracted)
-    msg = f"🆕 *الحسابات غير المستخرجة: {total}*\n\n"
-    
-    for idx, acc in enumerate(unextracted[:10], 1):
-        msg += f"{idx}. 📧 `{acc.get('email', '')}`\n"
-        msg += f"   🔑 {acc.get('password', '')}\n"
-        msg += f"   🔐 {acc.get('totp', '')}\n"
-        msg += f"   🗝 {acc.get('app_pass', '')}\n"
-        msg += f"   👤 المستخدم: {acc.get('user_id', '')}\n"
-        msg += "   ─────────────\n"
-    
-    if total > 10:
-        msg += f"\n📌 *ملاحظة:* تم عرض أول 10 حسابات من أصل {total}"
+🔹 *الطريقة:*
+1️⃣ اختر الزر الذي تريد إضافة خلفية له
+2️⃣ اختر "إضافة/تغيير خلفية"
+3️⃣ أرسل الصورة التي تريدها
 
+✨ *ملاحظة:* يمكنك استخدام أي صورة (jpg, png)
+"""
+    
     await query.edit_message_text(
-        msg,
+        text,
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([
-            [("📥 تصدير الحسابات غير المستخرجة", "export_unextracted")],
-            [("✅ وضع علامة مستخرجة", "mark_extracted_menu")],
-            [("🔙 جميع الحسابات", "all_accounts_section")]
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 تخصيص الأزرار", callback_data="customize_buttons")]
         ])
     )
 
-async def mark_extracted_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ==================== PLACEHOLDER FUNCTIONS ====================
+async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
+    await query.answer("⏳ جارٍ التطوير...", show_alert=True)
 
-    users = load_json(USERS_DB)
-    unextracted = []
-    
-    for uid, user_data in users.items():
-        for idx, acc in enumerate(user_data.get("approved_accounts", [])):
-            if not acc.get("extracted", False):
-                unextracted.append({
-                    "user_id": uid,
-                    "index": idx,
-                    "email": acc.get("email", ""),
-                    "acc": acc
-                })
-    
-    if not unextracted:
-        await query.edit_message_text(
-            "✅ لا توجد حسابات غير مستخرجة لتحديدها.",
-            reply_markup=kb([("🔙 جميع الحسابات", "all_accounts_section")])
-        )
-        return
-
-    rows = []
-    for item in unextracted[:10]:
-        rows.append([(f"✅ {item['email']}", f"mark_extracted:{item['user_id']}:{item['index']}")])
-    
-    rows.append([("🔙 جميع الحسابات", "all_accounts_section")])
-    
-    await query.edit_message_text(
-        "✅ *تحديد الحسابات المستخرجة*\nاختر الحسابات التي تم استخراجها:",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb(*rows)
-    )
-
-async def mark_extracted(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-
-    parts = query.data.split(":")
-    uid = int(parts[1])
-    index = int(parts[2])
-    
-    user_data = get_user(uid)
-    accounts = user_data.get("approved_accounts", [])
-    
-    if index < len(accounts):
-        accounts[index]["extracted"] = True
-        user_data["approved_accounts"] = accounts
-        save_user(uid, user_data)
-        await query.edit_message_text(
-            f"✅ تم وضع علامة مستخرجة على الحساب: {accounts[index].get('email', '')}",
-            reply_markup=kb([("🔙 الحسابات غير المستخرجة", "unextracted_accounts")])
-        )
-    else:
-        await query.edit_message_text(
-            "⚠️ الحساب غير موجود.",
-            reply_markup=kb([("🔙 جميع الحسابات", "all_accounts_section")])
-        )
-
-async def export_all_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-
-    users = load_json(USERS_DB)
-    all_accounts = []
-    
-    for uid, user_data in users.items():
-        for acc in user_data.get("approved_accounts", []):
-            all_accounts.append(acc)
-    
-    if not all_accounts:
-        await query.edit_message_text("📭 لا توجد حسابات للتصدير.")
-        return
-
-    export_msg = "📊 *جميع الحسابات المقبولة*\n"
-    export_msg += "═" * 30 + "\n\n"
-    
-    for idx, acc in enumerate(all_accounts, 1):
-        export_msg += f"📧 {idx}. {acc.get('email', '')}\n"
-        export_msg += f"🔑 {acc.get('password', '')}\n"
-        export_msg += f"🔐 {acc.get('totp', '')}\n"
-        export_msg += f"🗝 {acc.get('app_pass', '')}\n"
-        export_msg += f"💰 ${acc.get('amount', 0):.2f}\n"
-        export_msg += "─" * 20 + "\n"
-
-    if len(export_msg) > 4000:
-        parts = [export_msg[i:i+4000] for i in range(0, len(export_msg), 4000)]
-        for part in parts:
-            await context.bot.send_message(
-                chat_id=OWNER_ID,
-                text=part,
-                parse_mode=ParseMode.MARKDOWN
-            )
-        await query.edit_message_text("✅ تم تصدير جميع الحسابات في رسائل متعددة.")
-    else:
-        await query.edit_message_text(
-            export_msg,
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=kb([("🔙 جميع الحسابات", "all_accounts_section")])
-        )
-
-async def export_unextracted(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-
-    users = load_json(USERS_DB)
-    unextracted = []
-    
-    for uid, user_data in users.items():
-        for acc in user_data.get("approved_accounts", []):
-            if not acc.get("extracted", False):
-                unextracted.append(acc)
-    
-    if not unextracted:
-        await query.edit_message_text("✅ لا توجد حسابات غير مستخرجة.")
-        return
-
-    export_msg = "🆕 *الحسابات غير المستخرجة*\n"
-    export_msg += "═" * 30 + "\n\n"
-    
-    for idx, acc in enumerate(unextracted, 1):
-        export_msg += f"📧 {idx}. {acc.get('email', '')}\n"
-        export_msg += f"🔑 {acc.get('password', '')}\n"
-        export_msg += f"🔐 {acc.get('totp', '')}\n"
-        export_msg += f"🗝 {acc.get('app_pass', '')}\n"
-        export_msg += "─" * 20 + "\n"
-
-    for uid, user_data in users.items():
-        for acc in user_data.get("approved_accounts", []):
-            if not acc.get("extracted", False):
-                acc["extracted"] = True
-        save_user(int(uid), user_data)
-
-    if len(export_msg) > 4000:
-        parts = [export_msg[i:i+4000] for i in range(0, len(export_msg), 4000)]
-        for part in parts:
-            await context.bot.send_message(
-                chat_id=OWNER_ID,
-                text=part,
-                parse_mode=ParseMode.MARKDOWN
-            )
-        await query.edit_message_text("✅ تم تصدير جميع الحسابات غير المستخرجة ووضع علامة مستخرجة عليها.")
-    else:
-        await query.edit_message_text(
-            export_msg,
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=kb([("🔙 الحسابات غير المستخرجة", "unextracted_accounts")])
-        )
-
-# ==================== OWNER PANEL: SET PRICE ====================
-async def set_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    await query.edit_message_text("💰 أرسل السعر الجديد للحساب الواحد (رقم فقط):")
-    context.user_data["mode"] = "set_price"
-
-# ==================== OWNER PANEL: STORE SECTION ====================
-async def owner_store_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-
-    config = load_json(DATA_DIR / "config.json")
-    categories = config.get("store_categories", [])
-    
-    rows = []
-    if categories:
-        for cat in categories:
-            rows.append([(f"📂 {cat['name']}", f"store_category:{cat['id']}")])
-    
-    rows.append([("➕ إضافة فئة جديدة", "store_add_category")])
-    rows.append([("🔙 إعدادات المالك", "owner_panel")])
-    
-    await query.edit_message_text(
-        "🛒 *إدارة المبيعات*\n\nاختر فئة لعرض مبيعاتها أو أضف فئة جديدة:",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb(*rows)
-    )
-
-async def store_add_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    
-    await query.edit_message_text(
-        "✏️ *إضافة فئة جديدة*\n\nأرسل اسم الفئة (مثال: حسابات، اشتراكات، أدوات):",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([("🔙 إلغاء", "store_section")])
-    )
-    context.user_data["store_action"] = "add_category"
-
-async def store_category_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-
-    cat_id = query.data.split(":", 1)[1]
-    config = load_json(DATA_DIR / "config.json")
-    category = next((c for c in config.get("store_categories", []) if c["id"] == cat_id), None)
-    
-    if not category:
-        await query.edit_message_text("⚠️ الفئة غير موجودة.", reply_markup=kb([("🔙 المبيعات", "store_section")]))
-        return
-
-    services = category.get("services", [])
-    msg = f"📂 *{category['name']}*\n\n"
-    
-    if services:
-        for idx, s in enumerate(services, 1):
-            msg += f"{idx}. 🛒 {s['name']} - 💰 ${s['price']:.2f}\n"
-    else:
-        msg += "📭 لا توجد مبيعات في هذه الفئة.\n"
-    
-    rows = [
-        [("➕ إضافة مبيعة", f"store_add_service:{cat_id}")],
-        [("🗑️ حذف مبيعة", f"store_delete_service:{cat_id}")],
-        [("🔙 المبيعات", "store_section")]
-    ]
-    
-    await query.edit_message_text(
-        msg,
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb(*rows)
-    )
-
-async def store_add_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    
-    cat_id = query.data.split(":", 1)[1]
-    context.user_data["current_category_id"] = cat_id
-    context.user_data["store_action"] = "add_service_name"
-    
-    await query.edit_message_text(
-        "✏️ *إضافة مبيعة جديدة*\n\n📌 الخطوة 1/3: أرسل اسم المبيعة:",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([("🔙 إلغاء", f"store_category:{cat_id}")])
-    )
-
-async def store_add_service_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    
-    cat_id = query.data.split(":", 1)[1]
-    context.user_data["current_category_id"] = cat_id
-    context.user_data["store_action"] = "add_service_price"
-    
-    await query.edit_message_text(
-        "💰 *الخطوة 2/3*: أرسل سعر المبيعة (رقم فقط):",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([("🔙 إلغاء", f"store_category:{cat_id}")])
-    )
-
-async def store_add_service_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    
-    cat_id = query.data.split(":", 1)[1]
-    context.user_data["current_category_id"] = cat_id
-    context.user_data["store_action"] = "add_service_message"
-    
-    await query.edit_message_text(
-        "📝 *الخطوة 3/3*: أرسل الرسالة التي ستظهر للعميل بعد الشراء:\n\n"
-        "مثال: أرسل معرفك في ببجي ليتم إرسال الهدية.",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([("🔙 إلغاء", f"store_category:{cat_id}")])
-    )
-
-async def store_delete_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    
-    cat_id = query.data.split(":", 1)[1]
-    config = load_json(DATA_DIR / "config.json")
-    category = next((c for c in config.get("store_categories", []) if c["id"] == cat_id), None)
-    
-    if not category:
-        await query.edit_message_text("⚠️ الفئة غير موجودة.")
-        return
-    
-    services = category.get("services", [])
-    if not services:
-        await query.edit_message_text("📭 لا توجد مبيعات لحذفها.", reply_markup=kb([("🔙 الفئة", f"store_category:{cat_id}")]))
-        return
-    
-    rows = []
-    for s in services:
-        rows.append([(f"❌ {s['name']} - ${s['price']:.2f}", f"delete_service:{cat_id}:{s['id']}")])
-    rows.append([("🔙 الفئة", f"store_category:{cat_id}")])
-    
-    await query.edit_message_text(
-        "🗑️ *حذف مبيعة*\nاختر المبيعة للحذف:",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb(*rows)
-    )
-
-async def delete_service_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    
-    parts = query.data.split(":")
-    cat_id = parts[1]
-    service_id = parts[2]
-    
-    config = load_json(DATA_DIR / "config.json")
-    for cat in config.get("store_categories", []):
-        if cat["id"] == cat_id:
-            cat["services"] = [s for s in cat["services"] if s["id"] != service_id]
-            break
-    
-    save_json(DATA_DIR / "config.json", config)
-    await query.edit_message_text(
-        "✅ تم حذف المبيعة بنجاح.",
-        reply_markup=kb([("🔙 الفئة", f"store_category:{cat_id}")])
-    )
-
-# ==================== FORCED CHANNEL ====================
-async def forced_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    
-    config = load_json(DATA_DIR / "config.json")
-    current_channel = config.get("forced_channel", "")
-    
-    await query.edit_message_text(
-        "📢 *إعدادات القناة الإجبارية*\n\n"
-        f"📌 القناة الحالية: {current_channel if current_channel else 'لا توجد'}\n\n"
-        "✏️ أرسل معرف القناة الجديدة (مثال: @my_channel):",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([
-            [("🗑️ إلغاء القناة", "remove_channel")],
-            [("🔙 إعدادات المالك", "owner_panel")]
-        ])
-    )
-    context.user_data["store_action"] = "set_channel"
-
-async def remove_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    
-    config = load_json(DATA_DIR / "config.json")
-    config["forced_channel"] = ""
-    save_json(DATA_DIR / "config.json", config)
-    
-    await query.edit_message_text(
-        "✅ تم إلغاء القناة الإجبارية.",
-        reply_markup=kb([("🔙 إعدادات المالك", "owner_panel")])
-    )
-
-# ==================== USER WITHDRAW STORE ====================
-async def withdraw_store(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    config = load_json(DATA_DIR / "config.json")
-    categories = config.get("store_categories", [])
-    
-    if not categories:
-        await query.edit_message_text("🛒 *قسم السحب*\n\nلا توجد فئات حالياً.", reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")]))
-        return
-    
-    rows = []
-    for cat in categories:
-        rows.append([(f"📂 {cat['name']}", f"user_category:{cat['id']}")])
-    rows.append([("🔙 القائمة الرئيسية", "main_menu")])
-    await query.edit_message_text(
-        "🛒 *قسم السحب*\nاختر الفئة:",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb(*rows)
-    )
-
-async def user_category_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    cat_id = query.data.split(":", 1)[1]
-    config = load_json(DATA_DIR / "config.json")
-    category = next((c for c in config.get("store_categories", []) if c["id"] == cat_id), None)
-    if not category:
-        await query.edit_message_text("⚠️ الفئة غير موجودة.", reply_markup=kb([("🔙 قسم السحب", "withdraw_store")]))
-        return
-    
-    services = category.get("services", [])
-    if not services:
-        await query.edit_message_text("📭 لا توجد خدمات في هذه الفئة.", reply_markup=kb([("🔙 قسم السحب", "withdraw_store")]))
-        return
-    
-    rows = []
-    for s in services:
-        rows.append([(f"🛒 {s['name']} - ${s['price']:.2f}", f"user_buy:{s['id']}:{cat_id}")])
-    rows.append([("🔙 قسم السحب", "withdraw_store")])
-    await query.edit_message_text(
-        f"📂 *{category['name']}*\nاختر الخدمة:",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb(*rows)
-    )
-
-async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    parts = query.data.split(":")
-    service_id = parts[1]
-    cat_id = parts[2]
-    user_id = query.from_user.id
-
-    config = load_json(DATA_DIR / "config.json")
-    service = None
-    service_name = ""
-    service_message = ""
-    for cat in config["store_categories"]:
-        if cat["id"] == cat_id:
-            for s in cat["services"]:
-                if s["id"] == service_id:
-                    service = s
-                    service_name = s.get("name", "")
-                    service_message = s.get("message", "شكراً لشرائك الخدمة!")
-                    break
-            break
-    
-    if not service:
-        await query.edit_message_text("⚠️ الخدمة غير موجودة.", reply_markup=kb([("🔙 قسم السحب", "withdraw_store")]))
-        return
-
-    user_data = get_user(user_id)
-    if user_data["balance"] < service["price"]:
-        await query.edit_message_text(f"❌ رصيدك غير كافٍ. الرصيد: ${user_data['balance']:.2f}, السعر: ${service['price']:.2f}")
-        return
-
-    user_data["balance"] -= service["price"]
-    save_user(user_id, user_data)
-    
-    bot_username = (await context.bot.get_me()).username
-    total_emails = user_data.get("total_approved_emails", 0)
-    
-    if PURCHASE_CHANNEL_1:
-        try:
-            await context.bot.send_message(
-                chat_id=PURCHASE_CHANNEL_1,
-                text=f"🛒 *طلب شراء جديد*\n\n"
-                     f"🤖 يوزر البوت: @{bot_username}\n"
-                     f"📦 الطلب: {service_name}\n"
-                     f"💰 السعر: ${service['price']:.2f}"
-            )
-        except Exception as e:
-            logger.error(f"Error sending to channel 1: {e}")
-    
-    if PURCHASE_CHANNEL_2:
-        try:
-            await context.bot.send_message(
-                chat_id=PURCHASE_CHANNEL_2,
-                text=f"📋 *تفاصيل الطلب*\n\n"
-                     f"👤 يوزر الطالب: @{bot_username}\n"
-                     f"📦 ما طلب: {service_name}\n"
-                     f"💬 رسالة الشخص: {service_message}\n"
-                     f"⏰ وقت الطلب: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                     f"📧 عدد الإيميلات المقبولة: {total_emails}"
-            )
-        except Exception as e:
-            logger.error(f"Error sending to channel 2: {e}")
-    
-    await query.edit_message_text(
-        f"✅ تم شراء الخدمة بنجاح!\n\n"
-        f"🛒 *{service_name}*\n"
-        f"💰 تم خصم ${service['price']:.2f}\n\n"
-        f"📝 *ملاحظة:* {service_message}\n\n"
-        f"يمكنك الرد على هذه الرسالة لتقديم المعلومات المطلوبة.",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([("🔙 قسم السحب", "withdraw_store")])
-    )
-
-# ==================== MY WALLET ====================
 async def my_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    user = get_user(query.from_user.id)
-    await query.edit_message_text(
-        f"💰 *أموالي*\n\n⏳ قيد الانتظار: ${float(user.get('pending_balance', 0.0)):.2f}\n✅ الرصيد المملوك: ${float(user.get('balance', 0.0)):.2f}",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")])
-    )
+    await query.answer("⏳ جارٍ التطوير...", show_alert=True)
 
-# ==================== TUTORIALS ====================
+async def my_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("⏳ جارٍ التطوير...", show_alert=True)
+
 async def tutorials(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    config = load_json(DATA_DIR / "config.json")
-    rows = []
-    if config.get("video_email") and Path(config.get("video_email", "")).exists():
-        rows.append([("📹 إنشاء إيميل", "play_video:email")])
-    if config.get("video_password") and Path(config.get("video_password", "")).exists():
-        rows.append([("📹 تغيير باسورد", "play_video:password")])
-    if config.get("video_totp") and Path(config.get("video_totp", "")).exists():
-        rows.append([("📹 إضافة 2FA", "play_video:totp")])
-    if config.get("video_app_pass") and Path(config.get("video_app_pass", "")).exists():
-        rows.append([("📹 كلمة مرور التطبيق", "play_video:app_pass")])
-    rows.append([("🔙 القائمة الرئيسية", "main_menu")])
-    await query.edit_message_text("📺 *اختر الدرس:*", parse_mode=ParseMode.MARKDOWN, reply_markup=kb(*rows))
+    await query.answer("⏳ جارٍ التطوير...", show_alert=True)
 
-async def play_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def withdraw_store(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    vtype = query.data.split(":")[1]
-    config = load_json(DATA_DIR / "config.json")
-    path = config.get(f"video_{vtype}")
-    
-    if path and Path(path).exists():
-        try:
-            await context.bot.send_video(
-                chat_id=query.from_user.id,
-                video=open(path, "rb"),
-                caption=f"📹 *فيديو تعليمي: {vtype}*",
-                parse_mode=ParseMode.MARKDOWN,
-                supports_streaming=True
-            )
-            await tutorials(update, context)
-        except Exception as e:
-            logger.error(f"Error sending video: {e}")
-            await query.edit_message_text(
-                "⚠️ حدث خطأ في تشغيل الفيديو. حاول مرة أخرى.",
-                reply_markup=kb([("🔙 التعليم", "tutorials")])
-            )
-    else:
-        await query.edit_message_text(
-            "⚠️ الفيديو غير موجود حالياً.",
-            reply_markup=kb([("🔙 التعليم", "tutorials")])
-        )
+    await query.answer("⏳ جارٍ التطوير...", show_alert=True)
 
-# ==================== REFERRAL SYSTEM ====================
 async def referral_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    user_id = update.effective_user.id
-    
-    user_data = get_user(user_id)
-    referral_code = user_data.get("referral_code", "")
-    
-    if not referral_code:
-        referral_code = generate_referral_code()
-        user_data["referral_code"] = referral_code
-        save_user(user_id, user_data)
-    
-    bot_username = (await context.bot.get_me()).username
-    referral_link = f"https://t.me/{bot_username}?start={referral_code}"
-    
-    msg = (
-        f"🔗 *نظام الإحالة*\n\n"
-        f"📌 *رابط الإحالة الخاص بك:*\n"
-        f"`{referral_link}`\n\n"
-        f"📊 *إحصائياتك:*\n"
-        f"💰 مكافآت الإحالة: ${float(user_data.get('referral_earnings', 0.0)):.2f}\n"
-        f"👥 عدد الإحالات الناجحة: {user_data.get('total_referrals', 0)}\n\n"
-        f"📝 *كيف يعمل النظام؟*\n"
-        f"1️⃣ شارك رابط الإحالة مع أصدقائك\n"
-        f"2️⃣ عند إضافة صديقك لحساب جديد وقبوله من المالك\n"
-        f"3️⃣ ستحصل على مكافأة إحالة لكل حساب مقبول\n"
-        f"4️⃣ كلما زاد عدد الحسابات المقبولة، زادت مكافآتك!"
-    )
-    
-    await query.edit_message_text(
-        msg,
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([
-            [("📋 نسخ الرابط", f"copy_referral:{referral_code}")],
-            [("🔙 القائمة الرئيسية", "main_menu")]
-        ])
-    )
+    await query.answer("⏳ جارٍ التطوير...", show_alert=True)
 
-async def copy_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def edit_my_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    code = query.data.split(":")[1]
-    bot_username = (await context.bot.get_me()).username
-    link = f"https://t.me/{bot_username}?start={code}"
-    
-    await query.edit_message_text(
-        f"📋 *رابط الإحالة الخاص بك:*\n\n"
-        f"`{link}`\n\n"
-        f"📌 يمكنك نسخ الرابط ومشاركته مع أصدقائك.",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([
-            [("🔗 عرض رابط الإحالة", "referral_menu")],
-            [("🔙 القائمة الرئيسية", "main_menu")]
-        ])
-    )
+    await query.answer("⏳ جارٍ التطوير...", show_alert=True)
+
+async def set_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("⏳ جارٍ التطوير...", show_alert=True)
+
+async def approval_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("⏳ جارٍ التطوير...", show_alert=True)
+
+async def videos_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("⏳ جارٍ التطوير...", show_alert=True)
+
+async def store_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("⏳ جارٍ التطوير...", show_alert=True)
+
+async def forced_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("⏳ جارٍ التطوير...", show_alert=True)
+
+async def all_accounts_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("⏳ جارٍ التطوير...", show_alert=True)
 
 async def referral_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-
-    config = load_json(DATA_DIR / "config.json")
-    referral_bonus = config.get("referral_bonus", 0.0)
-    
-    await query.edit_message_text(
-        f"🔗 *إعدادات الإحالة*\n\n"
-        f"💰 مكافأة الإحالة الحالية: ${referral_bonus:.2f}\n\n"
-        f"📌 *ملاحظة:* يحصل صاحب الإحالة على هذه المكافأة عند قبول كل حساب جديد من قبل المستخدم المُحال.\n\n"
-        f"اختر الإجراء المناسب:",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([
-            [("💲 تغيير مكافأة الإحالة", "set_referral_bonus")],
-            [("📊 إحصائيات الإحالة", "referral_stats")],
-            [("🔙 إعدادات المالك", "owner_panel")]
-        ])
-    )
-
-async def set_referral_bonus(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    
-    await query.edit_message_text(
-        "💰 *تغيير مكافأة الإحالة*\n\n"
-        "أرسل المبلغ الجديد لمكافأة الإحالة (رقم فقط):\n"
-        "📌 مثال: 1.5",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([("🔙 إعدادات الإحالة", "referral_settings")])
-    )
-    context.user_data["mode"] = "set_referral_bonus"
-
-async def referral_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-
-    users = load_json(USERS_DB)
-    total_referrals = 0
-    total_earnings = 0.0
-    top_referrers = []
-    
-    for uid, user_data in users.items():
-        if user_data.get("total_referrals", 0) > 0:
-            total_referrals += user_data["total_referrals"]
-            total_earnings += float(user_data.get("referral_earnings", 0.0))
-            top_referrers.append({
-                "user_id": uid,
-                "count": user_data["total_referrals"],
-                "earnings": float(user_data.get("referral_earnings", 0.0))
-            })
-    
-    top_referrers.sort(key=lambda x: x["count"], reverse=True)
-    
-    msg = f"📊 *إحصائيات الإحالة*\n\n"
-    msg += f"👥 إجمالي الإحالات: {total_referrals}\n"
-    msg += f"💰 إجمالي المكافآت المدفوعة: ${total_earnings:.2f}\n\n"
-    
-    if top_referrers:
-        msg += "🏆 *أفضل المحالين:*\n"
-        for idx, ref in enumerate(top_referrers[:5], 1):
-            msg += f"{idx}. 👤 {ref['user_id']} - {ref['count']} إحالة - ${ref['earnings']:.2f}\n"
-    
-    if not top_referrers:
-        msg += "📭 لا توجد إحالات حالياً."
-    
-    await query.edit_message_text(
-        msg,
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([("🔙 إعدادات الإحالة", "referral_settings")])
-    )
-
-# ==================== TEXT INPUT ====================
-async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    user_id = update.effective_user.id
-
-    if context.user_data.get("step") == "reject_reason_text":
-        await handle_reject_reason_text(update, context)
-        return
-
-    if context.user_data.get("mode") == "set_price":
-        if user_id != OWNER_ID: return
-        try:
-            price = float(text)
-            config = load_json(DATA_DIR / "config.json")
-            config["default_price"] = price
-            save_json(DATA_DIR / "config.json", config)
-            await update.message.reply_text(f"✅ تم تحديث السعر إلى ${price:.2f}")
-            context.user_data.pop("mode", None)
-            await main_menu(update, context)
-        except ValueError:
-            await update.message.reply_text("⚠️ أرسل رقماً صحيحاً.")
-        return
-
-    if context.user_data.get("mode") == "set_referral_bonus":
-        if user_id != OWNER_ID: return
-        try:
-            bonus = float(text)
-            config = load_json(DATA_DIR / "config.json")
-            config["referral_bonus"] = bonus
-            save_json(DATA_DIR / "config.json", config)
-            await update.message.reply_text(f"✅ تم تحديث مكافأة الإحالة إلى ${bonus:.2f}")
-            context.user_data.pop("mode", None)
-            await owner_panel(update, context)
-        except ValueError:
-            await update.message.reply_text("⚠️ أرسل رقماً صحيحاً.")
-        return
-
-    if context.user_data.get("store_action"):
-        await handle_store_input(update, context)
-        return
-
-    if context.user_data.get("step") == "editing_field":
-        await handle_edit_field_input(update, context)
-        return
-
-    await add_account_step(update, context)
-
-async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        return
-
-    text = update.message.text.strip()
-    action = context.user_data.get("store_action")
-
-    if action == "add_category":
-        config = load_json(DATA_DIR / "config.json")
-        if "store_categories" not in config: 
-            config["store_categories"] = []
-        
-        if any(cat["name"].lower() == text.lower() for cat in config["store_categories"]):
-            await update.message.reply_text("⚠️ هذه الفئة موجودة مسبقاً!")
-            return
-        
-        config["store_categories"].append({
-            "id": str(time.time_ns()), 
-            "name": text, 
-            "services": []
-        })
-        save_json(DATA_DIR / "config.json", config)
-        await update.message.reply_text(f"✅ تم إضافة الفئة: {text}")
-        context.user_data.pop("store_action", None)
-        await main_menu(update, context)
-
-    elif action == "set_channel":
-        config = load_json(DATA_DIR / "config.json")
-        config["forced_channel"] = text
-        save_json(DATA_DIR / "config.json", config)
-        await update.message.reply_text(f"✅ تم تعيين القناة: {text}")
-        context.user_data.pop("store_action", None)
-        await main_menu(update, context)
-
-    elif action == "add_service_name":
-        context.user_data["store_service_name"] = text
-        context.user_data["store_action"] = "add_service_price"
-        await update.message.reply_text(
-            "💰 *الخطوة 2/3*: أرسل سعر المبيعة (رقم فقط):",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=kb([("🔙 إلغاء", f"store_category:{context.user_data.get('current_category_id')}")])
-        )
-
-    elif action == "add_service_price":
-        try:
-            price = float(text)
-            if price <= 0:
-                await update.message.reply_text("⚠️ السعر يجب أن يكون أكبر من 0!")
-                return
-            
-            context.user_data["store_service_price"] = price
-            context.user_data["store_action"] = "add_service_message"
-            await update.message.reply_text(
-                "📝 *الخطوة 3/3*: أرسل الرسالة التي ستظهر للعميل بعد الشراء:\n\n"
-                "مثال: أرسل معرفك في ببجي ليتم إرسال الهدية.",
-                parse_mode=ParseMode.MARKDOWN,
-                reply_markup=kb([("🔙 إلغاء", f"store_category:{context.user_data.get('current_category_id')}")])
-            )
-        except ValueError:
-            await update.message.reply_text("⚠️ يرجى إرسال رقم صحيح (مثال: 10.50)")
-
-    elif action == "add_service_message":
-        name = context.user_data.get("store_service_name")
-        price = context.user_data.get("store_service_price")
-        cat_id = context.user_data.get("current_category_id")
-        
-        config = load_json(DATA_DIR / "config.json")
-        for cat in config["store_categories"]:
-            if cat["id"] == cat_id:
-                cat["services"].append({
-                    "id": str(time.time_ns()), 
-                    "name": name, 
-                    "price": price,
-                    "message": text
-                })
-                break
-        save_json(DATA_DIR / "config.json", config)
-        
-        await update.message.reply_text(
-            f"✅ تم إضافة المبيعة بنجاح!\n"
-            f"📌 الاسم: {name}\n"
-            f"💰 السعر: ${price:.2f}\n"
-            f"📝 الرسالة: {text}"
-        )
-        context.user_data.pop("store_action", None)
-        context.user_data.pop("store_service_name", None)
-        context.user_data.pop("store_service_price", None)
-        context.user_data.pop("current_category_id", None)
-        await main_menu(update, context)
-
-# ==================== REFERRAL HANDLER ====================
-async def handle_referral(update: Update, context: ContextTypes.DEFAULT_TYPE, referral_code: str):
-    user_id = update.effective_user.id
-    
-    if context.user_data.get("my_referral_code") == referral_code:
-        await update.message.reply_text("⚠️ لا يمكنك استخدام رابط الإحالة الخاص بك!")
-        return
-    
-    user_data = get_user(user_id)
-    
-    if user_data.get("referred_by"):
-        await update.message.reply_text("ℹ️ أنت بالفعل مشترك في نظام الإحالة.")
-        return
-    
-    users = load_json(USERS_DB)
-    referrer_id = None
-    for uid, u_data in users.items():
-        if u_data.get("referral_code") == referral_code:
-            referrer_id = int(uid)
-            break
-    
-    if not referrer_id:
-        await update.message.reply_text("❌ رابط الإحالة غير صالح.")
-        return
-    
-    user_data["referred_by"] = referrer_id
-    save_user(user_id, user_data)
-    
-    await update.message.reply_text(
-        "✅ *تم تفعيل الإحالة بنجاح!*\n\n"
-        f"👤 تمت إحالتك بواسطة: {referrer_id}\n"
-        "📌 ستتلقى أنت وصاحب الإحالة مكافآت عند قبول حساباتك.\n\n"
-        "استخدم /start للبدء.",
-        parse_mode=ParseMode.MARKDOWN
-    )
-    
-    try:
-        await context.bot.send_message(
-            chat_id=referrer_id,
-            text=f"🎉 *إحالة جديدة!*\n\n"
-                 f"👤 المستخدم {user_id} انضم باستخدام رابط إحالتك.\n"
-                 f"📌 ستحصل على مكافأة عند قبول حسابه من قبل المالك.",
-            parse_mode=ParseMode.MARKDOWN
-        )
-    except:
-        pass
-
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if args and args[0]:
-        referral_code = args[0]
-        if len(referral_code) == 8 and referral_code.isalnum():
-            context.user_data["referral_code"] = referral_code
-            user_data = get_user(update.effective_user.id)
-            context.user_data["my_referral_code"] = user_data.get("referral_code", "")
-            await handle_referral(update, context, referral_code)
-            return
-    
-    await main_menu(update, context)
+    await query.answer("⏳ جارٍ التطوير...", show_alert=True)
 
 # ==================== ROUTER ====================
 async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2240,60 +1101,59 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "main_menu": await main_menu(update, context)
     elif data == "add_account": await add_account_start(update, context)
-    elif data == "cancel": await add_account_cancel(update, context)
     elif data == "my_wallet": await my_wallet(update, context)
     elif data == "my_accounts": await my_accounts(update, context)
     elif data == "tutorials": await tutorials(update, context)
-    elif data.startswith("play_video:"): await play_video(update, context)
-    elif data.startswith("show_video:"): await show_video_in_add(update, context)
+    elif data == "withdraw_store": await withdraw_store(update, context)
+    elif data == "referral_menu": await referral_menu(update, context)
+    elif data == "edit_my_accounts": await edit_my_accounts(update, context)
     elif data == "owner_panel": await owner_panel(update, context)
     elif data == "set_price": await set_price(update, context)
     elif data == "approval_requests": await approval_requests(update, context)
-    elif data == "view_pending": await view_pending_requests(update, context)
-    elif data == "view_approved": await view_approved_requests(update, context)
-    elif data == "view_rejected": await view_rejected_requests(update, context)
-    elif data.startswith("pending_detail:"): await pending_detail(update, context)
-    elif data.startswith("approve_request:"): await approve_request_owner(update, context)
-    elif data.startswith("reject_request:"): await reject_request_reason(update, context)
-    elif data.startswith("reject_reason:"): await execute_reject_reason(update, context)
     elif data == "videos_section": await videos_section(update, context)
-    elif data.startswith("video_action:"): await video_action(update, context)
-    elif data.startswith("view_video:"): await view_video(update, context)
-    elif data.startswith("delete_video:"): await delete_video(update, context)
-    elif data.startswith("set_video:"): await set_video_callback(update, context)
-    elif data == "store_section": await owner_store_section(update, context)
-    elif data == "store_add_category": await store_add_category(update, context)
-    elif data.startswith("store_category:"): await store_category_menu(update, context)
-    elif data.startswith("store_add_service:"): await store_add_service(update, context)
-    elif data.startswith("store_add_service_price:"): await store_add_service_price(update, context)
-    elif data.startswith("store_add_service_message:"): await store_add_service_message(update, context)
-    elif data.startswith("store_delete_service:"): await store_delete_service(update, context)
-    elif data.startswith("delete_service:"): await delete_service_execute(update, context)
+    elif data == "store_section": await store_section(update, context)
     elif data == "forced_channel": await forced_channel(update, context)
-    elif data == "remove_channel": await remove_channel(update, context)
-    elif data == "withdraw_store": await withdraw_store(update, context)
-    elif data.startswith("user_category:"): await user_category_menu(update, context)
-    elif data.startswith("user_buy:"): await user_buy_service(update, context)
     elif data == "all_accounts_section": await all_accounts_section(update, context)
-    elif data == "all_accounts": await all_accounts(update, context)
-    elif data == "unextracted_accounts": await unextracted_accounts(update, context)
-    elif data == "export_all_accounts": await export_all_accounts(update, context)
-    elif data == "export_unextracted": await export_unextracted(update, context)
-    elif data == "mark_extracted_menu": await mark_extracted_menu(update, context)
-    elif data.startswith("mark_extracted:"): await mark_extracted(update, context)
-    elif data == "referral_menu": await referral_menu(update, context)
-    elif data.startswith("copy_referral:"): await copy_referral(update, context)
     elif data == "referral_settings": await referral_settings(update, context)
-    elif data == "set_referral_bonus": await set_referral_bonus(update, context)
-    elif data == "referral_stats": await referral_stats(update, context)
-    elif data == "edit_my_accounts": await edit_my_accounts(update, context)
-    elif data.startswith("edit_pending:"): await edit_pending_account(update, context)
-    elif data.startswith("edit_field:"): await edit_field(update, context)
-    elif data.startswith("delete_pending:"): await delete_pending_account(update, context)
+    elif data == "customize_buttons": await customize_buttons_menu(update, context)
+    elif data == "customize_main": await customize_main_buttons(update, context)
+    elif data == "customize_owner": await customize_owner_buttons(update, context)
+    elif data == "customize_colors": await customize_colors(update, context)
+    elif data == "customize_stickers": await customize_stickers(update, context)
+    elif data == "customize_backgrounds": await customize_backgrounds(update, context)
+    elif data == "add_main_btn": await add_main_button(update, context)
+    elif data == "add_owner_btn": await add_owner_button(update, context)
+    elif data.startswith("edit_btn:"): await edit_button_details(update, context)
+    elif data.startswith("edit_btn_owner:"): await edit_button_details(update, context)
+    elif data.startswith("edit_btn_name:"): await edit_btn_name(update, context)
+    elif data.startswith("edit_btn_color:"): await edit_btn_color(update, context)
+    elif data.startswith("edit_btn_sticker:"): await edit_btn_sticker(update, context)
+    elif data.startswith("remove_btn_sticker:"): await remove_btn_sticker(update, context)
+    elif data.startswith("edit_btn_bg:"): await edit_btn_background(update, context)
+    elif data.startswith("remove_btn_bg:"): await remove_btn_background(update, context)
+    elif data.startswith("set_btn_color:"): await set_btn_color_callback(update, context)
+    elif data.startswith("delete_btn:"): await delete_button(update, context)
     else: await placeholder(update, context)
 
 async def placeholder(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.edit_message_text("⚠️ خيار غير معروف حالياً.", reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")]))
+
+# ==================== TEXT & MEDIA INPUT ====================
+async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle text input"""
+    if context.user_data.get("edit_mode") == "name":
+        await handle_button_edit_input(update, context)
+    elif context.user_data.get("add_btn_step") == "name":
+        await handle_add_button_input(update, context)
+    else:
+        await update.message.reply_text("⚠️ أرسل الأمر من القوائم.")
+
+async def media_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle media input (sticker, photo)"""
+    if context.user_data.get("edit_mode") == "sticker":
+        await handle_sticker_input(update, context)
+    elif context.user_data.get("edit_mode") == "background":
+        await handle_background_input(update, context)
 
 # ==================== DEBUG & OWNER COMMANDS ====================
 async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2311,35 +1171,10 @@ async def owner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
         await update.message.reply_text("🚫 هذا الأمر للمالك فقط.")
         return
-    await update.message.reply_text(
-        "⚙️ *لوحة تحكم المالك*\n\nاختر الإعداد الذي تريد تعديله:",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([
-            [("💰 سعر كل حساب", "set_price")],
-            [("📋 الطلبات", "approval_requests")],
-            [("📹 قسم الفيديوهات", "videos_section")],
-            [("🛒 المبيعات", "store_section")],
-            [("📢 قناة إجبارية", "forced_channel")],
-            [("📊 جميع الحسابات المقبولة", "all_accounts_section")],
-            [("🔗 نظام الإحالة", "referral_settings")],
-            [("🔙 القائمة الرئيسية", "main_menu")]
-        ])
-    )
+    await owner_panel(update, context)
 
-async def store_list_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Legacy function - kept for compatibility"""
-    if update.callback_query:
-        await owner_store_section(update, context)
-    else:
-        config = load_json(DATA_DIR / "config.json")
-        categories = config.get("store_categories", [])
-        if not categories:
-            await update.message.reply_text("📭 لا توجد فئات.")
-            return
-        msg = "📂 *الفئات المتاحة:*\n"
-        for cat in categories:
-            msg += f"- {cat['name']} ({len(cat.get('services', []))} خدمات)\n"
-        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await main_menu(update, context)
 
 # ==================== MAIN ====================
 def main():
@@ -2349,7 +1184,8 @@ def main():
     app.add_handler(CommandHandler("owner", owner_command))
     app.add_handler(CallbackQueryHandler(router))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_input))
-    app.add_handler(MessageHandler(filters.VIDEO, handle_video_upload))
+    app.add_handler(MessageHandler(filters.Sticker.ALL, media_input))
+    app.add_handler(MessageHandler(filters.PHOTO, media_input))
     app.run_polling()
 
 if __name__ == "__main__":
