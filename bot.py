@@ -2026,30 +2026,9 @@ async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💰 السعر: <code>${service['price']:.2f}</code>\n"
         f"📧 عدد الإيميلات: <code>{total_emails}</code>"
     )
-    channel_2_text = (
-        "📋 <b>تفاصيل طلب السحب</b>\n\n"
-        f"👤 <b>الاسم:</b> <code>{html.escape(user_name)}</code>\n"
-        f"🆔 <b>اليوزر:</b> @{html.escape(user_username)}\n"
-        f"🆔 <b>المعرف:</b> <code>{html.escape(user_id_str)}</code>\n"
-        f"📦 <b>الخدمة:</b> <code>{html.escape(str(service_name))}</code>\n"
-        f"💰 <b>السعر:</b> <code>${service['price']:.2f}</code>\n"
-        f"📧 <b>عدد الإيميلات المقبولة:</b> <code>{total_emails}</code>\n\n"
-        "📝 <b>رسالة المستخدم:</b>\n"
-        f"<code>{html.escape(str(service_message))}</code>\n\n"
-        f"⏰ <b>وقت الطلب:</b> {order_time}\n"
-        "───────────────────\n"
-        "<i>اضغط على الزر أدناه لإعلام المستخدم باستلام طلبه</i>"
-    )
-
-    purchase_channel_1, purchase_channel_2 = get_configured_purchase_channels()
+    purchase_channel_1, _ = get_configured_purchase_channels()
     notification_channels = (
         ("PURCHASE_CHANNEL_1", purchase_channel_1, channel_1_text, None),
-        (
-            "PURCHASE_CHANNEL_2",
-            purchase_channel_2,
-            channel_2_text,
-            kb([("✅ تم الإيصال", f"deliver_order:{user_id}")]),
-        ),
     )
     for label, channel_id, message_text, reply_markup in notification_channels:
         if not channel_id:
@@ -2157,6 +2136,40 @@ async def handle_purchase_message(update: Update, context: ContextTypes.DEFAULT_
     user_name = user.full_name or "غير معروف"
     user_username = user.username or "لا يوجد"
     total_emails = user_data.get("total_approved_emails", 0)
+    _, purchase_channel_2 = get_configured_purchase_channels()
+
+    # The second group must receive the member's actual message, not the
+    # instruction text configured by the owner for the service.
+    if purchase_channel_2:
+        channel_2_text = (
+            "📋 <b>طلب شراء مكتمل</b>\n\n"
+            f"👤 <b>الاسم:</b> <code>{html.escape(user_name)}</code>\n"
+            f"🆔 <b>اليوزر:</b> @{html.escape(user_username)}\n"
+            f"🆔 <b>المعرف:</b> <code>{user_id}</code>\n"
+            f"📦 <b>الخدمة:</b> <code>{html.escape(str(purchase['service_name']))}</code>\n"
+            f"💰 <b>السعر المخصوم:</b> <code>${price:.2f}</code>\n"
+            f"📧 <b>عدد الإيميلات المقبولة:</b> <code>{total_emails}</code>\n\n"
+            "📝 <b>رسالة العضو القابلة للنسخ:</b>\n"
+            f"<pre>{html.escape(text)}</pre>\n"
+            f"⏰ <b>وقت الإرسال:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            "───────────────────\n"
+            "<i>اضغط على الزر أدناه لإعلام المستخدم باستلام طلبه</i>"
+        )
+        try:
+            await context.bot.send_message(
+                chat_id=purchase_channel_2,
+                text=channel_2_text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb([("✅ تم الإيصال", f"deliver_order:{user_id}")]),
+            )
+            logger.info("Purchase member message sent to PURCHASE_CHANNEL_2 (%s).", purchase_channel_2)
+        except Exception:
+            logger.exception(
+                "Could not send member purchase message to PURCHASE_CHANNEL_2 (%s).",
+                purchase_channel_2,
+            )
+    else:
+        logger.error("PURCHASE_CHANNEL_2 غير مضبوط؛ لم يتم إرسال رسالة العضو.")
     
     # Notify owner about the user's message
     if OWNER_ID:
