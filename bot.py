@@ -1731,13 +1731,19 @@ async def remove_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ==================== USER WITHDRAW STORE ====================
+# Store for pending user messages after purchase
+PENDING_USER_MESSAGES: Dict[int, Dict] = {}
+
 async def withdraw_store(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     config = load_json(DATA_DIR / "config.json")
     categories = config.get("store_categories", [])
     
     if not categories:
-        await query.edit_message_text("🛒 *قسم السحب*\n\nلا توجد فئات حالياً.", reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")]))
+        await query.edit_message_text(
+            "🛒 *قسم السحب*\n\nلا توجد فئات حالياً.", 
+            reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")])
+        )
         return
     
     rows = []
@@ -1756,12 +1762,18 @@ async def user_category_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
     config = load_json(DATA_DIR / "config.json")
     category = next((c for c in config.get("store_categories", []) if c["id"] == cat_id), None)
     if not category:
-        await query.edit_message_text("⚠️ الفئة غير موجودة.", reply_markup=kb([("🔙 قسم السحب", "withdraw_store")]))
+        await query.edit_message_text(
+            "⚠️ الفئة غير موجودة.", 
+            reply_markup=kb([("🔙 قسم السحب", "withdraw_store")])
+        )
         return
     
     services = category.get("services", [])
     if not services:
-        await query.edit_message_text("📭 لا توجد خدمات في هذه الفئة.", reply_markup=kb([("🔙 قسم السحب", "withdraw_store")]))
+        await query.edit_message_text(
+            "📭 لا توجد خدمات في هذه الفئة.", 
+            reply_markup=kb([("🔙 قسم السحب", "withdraw_store")])
+        )
         return
     
     rows = []
@@ -1796,54 +1808,131 @@ async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
             break
     
     if not service:
-        await query.edit_message_text("⚠️ الخدمة غير موجودة.", reply_markup=kb([("🔙 قسم السحب", "withdraw_store")]))
+        await query.edit_message_text(
+            "⚠️ الخدمة غير موجودة.", 
+            reply_markup=kb([("🔙 قسم السحب", "withdraw_store")])
+        )
         return
 
     user_data = get_user(user_id)
     if user_data["balance"] < service["price"]:
-        await query.edit_message_text(f"❌ رصيدك غير كافٍ. الرصيد: ${user_data['balance']:.2f}, السعر: ${service['price']:.2f}")
+        await query.edit_message_text(
+            f"❌ رصيدك غير كافٍ. الرصيد: ${user_data['balance']:.2f}, السعر: ${service['price']:.2f}"
+        )
         return
 
     user_data["balance"] -= service["price"]
     save_user(user_id, user_data)
     
-    bot_username = (await context.bot.get_me()).username
+    # Store purchase info for user message
+    PENDING_USER_MESSAGES[user_id] = {
+        "service_name": service_name,
+        "service_price": service["price"],
+        "service_message": service_message,
+        "purchased_at": datetime.now().isoformat()
+    }
+    
     total_emails = user_data.get("total_approved_emails", 0)
     
+    # Get user info
+    user = update.effective_user
+    user_name = user.full_name or "غير معروف"
+    user_username = user.username or "لا يوجد"
+    user_id_str = str(user_id)
+    
+    # Send to channel 1 (simple notification)
     if PURCHASE_CHANNEL_1:
         try:
             await context.bot.send_message(
                 chat_id=PURCHASE_CHANNEL_1,
                 text=f"🛒 *طلب شراء جديد*\n\n"
-                     f"🤖 يوزر البوت: @{bot_username}\n"
-                     f"📦 الطلب: {service_name}\n"
-                     f"💰 السعر: ${service['price']:.2f}"
+                     f"👤 الاسم: `{user_name}`\n"
+                     f"🆔 المعرف: @{user_username}\n"
+                     f"📦 الخدمة: `{service_name}`\n"
+                     f"💰 السعر: `${service['price']:.2f}`\n"
+                     f"📧 عدد الإيميلات: `{total_emails}`",
+                parse_mode=ParseMode.MARKDOWN
             )
         except Exception as e:
             logger.error(f"Error sending to channel 1: {e}")
     
+    # Send to channel 2 with user message and delivery button
     if PURCHASE_CHANNEL_2:
         try:
+            # Store the user message in context for the owner to see
             await context.bot.send_message(
                 chat_id=PURCHASE_CHANNEL_2,
-                text=f"📋 *تفاصيل الطلب*\n\n"
-                     f"👤 يوزر الطالب: @{bot_username}\n"
-                     f"📦 ما طلب: {service_name}\n"
-                     f"💬 رسالة الشخص: {service_message}\n"
-                     f"⏰ وقت الطلب: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                     f"📧 عدد الإيميلات المقبولة: {total_emails}"
+                text=f"📋 *تفاصيل طلب السحب*\n\n"
+                     f"👤 *الاسم:* `{user_name}`\n"
+                     f"🆔 *اليوزر:* @{user_username}\n"
+                     f"🆔 *المعرف:* `{user_id_str}`\n"
+                     f"📦 *الخدمة:* `{service_name}`\n"
+                     f"💰 *السعر:* `${service['price']:.2f}`\n"
+                     f"📧 *عدد الإيميلات المقبولة:* `{total_emails}`\n\n"
+                     f"📝 *رسالة المستخدم:*\n"
+                     f"`{service_message}`\n\n"
+                     f"⏰ *وقت الطلب:* {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                     f"───────────────────\n"
+                     f"_اضغط على الزر أدناه لإعلام المستخدم باستلام طلبه_",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=kb([
+                    [("✅ تم الإيصال", f"deliver_order:{user_id}")]
+                ])
             )
         except Exception as e:
             logger.error(f"Error sending to channel 2: {e}")
     
     await query.edit_message_text(
-        f"✅ تم شراء الخدمة بنجاح!\n\n"
-        f"🛒 *{service_name}*\n"
-        f"💰 تم خصم ${service['price']:.2f}\n\n"
+        f"✅ *تم الشراء بنجاح!*\n\n"
+        f"🛒 *الخدمة:* {service_name}\n"
+        f"💰 *تم خصم:* ${service['price']:.2f}\n\n"
         f"📝 *ملاحظة:* {service_message}\n\n"
-        f"يمكنك الرد على هذه الرسالة لتقديم المعلومات المطلوبة.",
+        f"_📤 يرجى إرسال المعلومات المطلوبة في رسالة جديدة_",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=kb([("🔙 قسم السحب", "withdraw_store")])
+    )
+
+async def deliver_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the delivery button click from channel 2"""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 هذا الزر للمالك فقط.", show_alert=True)
+        return
+    
+    user_id = int(query.data.split(":")[1])
+    
+    # Get user info for logging
+    user_data = get_user(user_id)
+    total_emails = user_data.get("total_approved_emails", 0)
+    
+    # Send confirmation to user
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"📦 *تم استلام طلبك بنجاح!*\n\n"
+                 f"✅ تم استلام طلب السحب الخاص بك.\n"
+                 f"🕐 سيتم التواصل معك قريباً.\n\n"
+                 f"_شكراً لاستخدامك البوت 🤖_",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except Exception as e:
+        logger.error(f"Could not send delivery confirmation to user {user_id}: {e}")
+    
+    # Clean up
+    PENDING_USER_MESSAGES.pop(user_id, None)
+    
+    await query.edit_message_text(
+        f"✅ *تم إيصال الطلب للمستخدم!*\n\n"
+        f"👤 المستخدم: `{user_id}`\n"
+        f"📧 عدد الإيميلات: `{total_emails}`\n"
+        f"⏰ تم الإيصال: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    # Also send a confirmation message in the channel
+    await query.message.reply_text(
+        f"✅ تم إعلام المستخدم `{user_id}` باستلام طلبه.",
+        parse_mode=ParseMode.MARKDOWN
     )
 
 # ==================== MY WALLET ====================
@@ -2274,6 +2363,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "withdraw_store": await withdraw_store(update, context)
     elif data.startswith("user_category:"): await user_category_menu(update, context)
     elif data.startswith("user_buy:"): await user_buy_service(update, context)
+    elif data.startswith("deliver_order:"): await deliver_order(update, context)
     elif data == "all_accounts_section": await all_accounts_section(update, context)
     elif data == "all_accounts": await all_accounts(update, context)
     elif data == "unextracted_accounts": await unextracted_accounts(update, context)
