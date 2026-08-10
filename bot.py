@@ -16,6 +16,10 @@ Advanced Telegram Account Manager Bot - Full Version with All Features
 - Purchase System with Dual Channel Notifications
 - General Bot Tutorial Video
 - Leave Video System with Auto-Transfer after 24 Hours
+- Tiered Reward System:
+  - Email + Password: $0.10
+  - Email + Password + TOTP: $0.15
+  - Email + Password + TOTP + App Pass: $0.20
 """
 
 import asyncio
@@ -188,10 +192,35 @@ class Session:
     totp: str = ""
     app_pass: str = ""
     editing_email: str = ""
+    # Track which steps are completed for tiered pricing
+    has_password: bool = False
+    has_totp: bool = False
+    has_app_pass: bool = False
 
 SESSIONS: Dict[int, Session] = {}
 
 PENDING_PURCHASES: Dict[int, Dict] = {}
+
+# ==================== PRICING CONFIG ====================
+def get_tier_prices() -> dict:
+    """Get tiered prices from config"""
+    config = load_json(DATA_DIR / "config.json")
+    return {
+        "tier_1": float(config.get("tier_1_price", 0.10)),  # Email + Password
+        "tier_2": float(config.get("tier_2_price", 0.15)),  # Email + Password + TOTP
+        "tier_3": float(config.get("tier_3_price", 0.20)),  # Email + Password + TOTP + App Pass
+    }
+
+def calculate_account_price(totp_submitted: bool, app_pass_submitted: bool) -> float:
+    """Calculate price based on what information was submitted"""
+    prices = get_tier_prices()
+    
+    if app_pass_submitted and totp_submitted:
+        return prices["tier_3"]  # Full price
+    elif totp_submitted:
+        return prices["tier_2"]  # Email + Password + TOTP
+    else:
+        return prices["tier_1"]  # Email + Password only
 
 # ==================== FORCED CHANNEL CHECK ====================
 def normalize_forced_channel(value: str) -> str:
@@ -491,7 +520,7 @@ async def delete_pending_account(update: Update, context: ContextTypes.DEFAULT_T
             reply_markup=kb([("🔙 تعديل حساباتي", "edit_my_accounts")])
         )
 
-# ==================== ADD ACCOUNT FLOW ====================
+# ==================== ADD ACCOUNT FLOW WITH TIERED PRICING ====================
 async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
@@ -500,7 +529,7 @@ async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     SESSIONS[uid] = Session(step="email")
     
     config = load_json(DATA_DIR / "config.json")
-    price = config.get("default_price", 5.0)
+    prices = get_tier_prices()
     
     has_email_video = config.get("video_email") and Path(config.get("video_email", "")).exists()
     
@@ -509,7 +538,12 @@ async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buttons.insert(0, ("📹 طريقة إنشاء حساب", "show_video:email"))
     
     await update.callback_query.edit_message_text(
-        f"📝 *إضافة حساب جديد*\n💵 *سعر الحساب الواحد هو ${price}*\n\n📧 *الخطوة 1/4*: أرسل الإيميل:",
+        f"📝 *إضافة حساب جديد*\n\n"
+        f"💵 *نظام المكافآت المتدرج:*\n"
+        f"• إيميل + باسورد فقط → ${prices['tier_1']:.2f}\n"
+        f"• إيميل + باسورد + رمز مصادقة → ${prices['tier_2']:.2f}\n"
+        f"• إيميل + باسورد + رمز مصادقة + كلمة مرور تطبيق → ${prices['tier_3']:.2f}\n\n"
+        f"📧 *الخطوة 1/4*: أرسل الإيميل:",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=kb([buttons])
     )
@@ -561,6 +595,7 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     config = load_json(DATA_DIR / "config.json")
+    prices = get_tier_prices()
 
     if session.step == "email":
         if not re.match(r"[^@]+@[^@]+\.[^@]+", text):
@@ -608,13 +643,15 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             buttons.insert(0, ("📹 طريقة تغيير الباسورد", "show_video:password"))
         
         await update.message.reply_text(
-            "🔑 *الخطوة 2/4*: أرسل كلمة المرور الأساسية:",
+            "🔑 *الخطوة 2/4*: أرسل كلمة المرور الأساسية:\n\n"
+            f"💰 *السعر الحالي:* ${prices['tier_1']:.2f} (إيميل + باسورد)",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=kb([buttons])
         )
 
     elif session.step == "password":
         session.password = text
+        session.has_password = True
         session.step = "totp"
         try:
             await update.message.delete()
@@ -622,12 +659,18 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         
         has_totp_video = config.get("video_totp") and Path(config.get("video_totp", "")).exists()
-        buttons = [("❌ إلغاء", "cancel")]
+        buttons = [
+            ("✅ استلم $0.10 (باسورد فقط)", f"submit_tier_1:{uid}")
+        ]
         if has_totp_video:
             buttons.insert(0, ("📹 طريقة العثور على رمز المصادقة", "show_video:totp"))
+        buttons.append(("❌ إلغاء", "cancel"))
         
         await update.message.reply_text(
-            "🔐 *الخطوة 3/4*: أرسل مفتاح المصادقة (Secret Key):",
+            f"🔐 *الخطوة 3/4*: أرسل مفتاح المصادقة (Secret Key):\n\n"
+            f"💰 *السعر الحالي:* ${prices['tier_1']:.2f} (إيميل + باسورد)\n"
+            f"💰 *السعر مع رمز المصادقة:* ${prices['tier_2']:.2f}\n\n"
+            f"📌 *يمكنك استلام {prices['tier_1']:.2f}$ الآن وإكمال الباقي لاحقاً*",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=kb([buttons])
         )
@@ -637,6 +680,7 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             secret = text.replace(" ", "").upper()
             code = pyotp.TOTP(secret).now()
             session.totp = secret
+            session.has_totp = True
             session.step = "app_pass"
             try:
                 await update.message.delete()
@@ -644,12 +688,20 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
             
             has_app_pass_video = config.get("video_app_pass") and Path(config.get("video_app_pass", "")).exists()
-            buttons = [("❌ إلغاء", "cancel")]
+            buttons = [
+                ("✅ استلم $0.15 (مع رمز المصادقة)", f"submit_tier_2:{uid}")
+            ]
             if has_app_pass_video:
                 buttons.insert(0, ("📹 طريقة الحصول على كلمة مرور التطبيق", "show_video:app_pass"))
+            buttons.append(("❌ إلغاء", "cancel"))
             
             await update.message.reply_text(
-                f"✅ مفتاح المصادقة صالح!\n\n🔢 *الكود الحالي:* `{code}`\n\n🗝 *الخطوة 4/4*: أرسل كلمة مرور التطبيق:",
+                f"✅ مفتاح المصادقة صالح!\n\n"
+                f"🔢 *الكود الحالي:* `{code}`\n\n"
+                f"🗝 *الخطوة 4/4*: أرسل كلمة مرور التطبيق:\n\n"
+                f"💰 *السعر الحالي:* ${prices['tier_2']:.2f} (مع رمز المصادقة)\n"
+                f"💰 *السعر الكامل:* ${prices['tier_3']:.2f} (مع كلمة مرور التطبيق)\n\n"
+                f"📌 *يمكنك استلام {prices['tier_2']:.2f}$ الآن وإكمال الباقي لاحقاً*",
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=kb([buttons])
             )
@@ -658,26 +710,31 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif session.step == "app_pass":
         session.app_pass = text
+        session.has_app_pass = True
         try:
             await update.message.delete()
         except:
             pass
         
         user_data = get_user(uid)
-        price = float(config.get("default_price", 5.0))
+        
+        # Calculate price based on what was submitted
+        final_price = calculate_account_price(session.has_totp, session.has_app_pass)
         
         user_data["pending_requests"].append({
             "email": session.email,
             "password": session.password,
-            "totp": session.totp,
+            "totp": session.totp if session.has_totp else "",
             "app_pass": session.app_pass,
-            "amount": price,
+            "amount": final_price,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "extracted": False
+            "extracted": False,
+            "has_totp": session.has_totp,
+            "has_app_pass": session.has_app_pass,
         })
         user_data["pending_balance"] = float(
             user_data.get("pending_balance", 0.0)
-        ) + price
+        ) + final_price
         save_user(uid, user_data)
         SESSIONS.pop(uid, None)
         
@@ -694,18 +751,145 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 pass
         
-        # إرسال فيديو المغادرة للمستخدم
+        # Send leave video to user
         await send_leave_video_to_user(context, uid, session.email)
+        
+        tier_text = ""
+        if session.has_app_pass and session.has_totp:
+            tier_text = "📦 *مكتمل (كامل المعلومات)*"
+        elif session.has_totp:
+            tier_text = "📦 *ناقص كلمة مرور التطبيق*"
+        else:
+            tier_text = "📦 *ناقص رمز المصادقة وكلمة مرور التطبيق*"
         
         await update.message.reply_text(
             f"✅ *تم إرسال الطلب للمالك للموافقة!*\n\n"
-            f"⏳ تمت إضافة *${price:.2f}* إلى الأموال قيد الانتظار.\n\n"
+            f"{tier_text}\n"
+            f"💰 تمت إضافة *${final_price:.2f}* إلى الأموال قيد الانتظار.\n\n"
             f"📹 تم إرسال فيديو المغادرة إليك.\n"
             f"⚠️ قم بمغادرة الحساب لتجنب تأخير الدفعة.\n\n"
             f"_🔄 سيتم تحويل المبلغ إلى رصيدك بعد موافقة المالك_",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")])
         )
+
+async def submit_tier_1(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Submit account with only email + password (Tier 1)"""
+    query = update.callback_query
+    uid = int(query.data.split(":")[1])
+    session = SESSIONS.get(uid)
+    
+    if not session:
+        await query.answer("⚠️ الجلسة منتهية، حاول مرة أخرى.", show_alert=True)
+        return
+    
+    if not session.email or not session.password:
+        await query.answer("⚠️ يرجى إكمال الإيميل والباسورد أولاً.", show_alert=True)
+        return
+    
+    user_data = get_user(uid)
+    prices = get_tier_prices()
+    price = prices["tier_1"]
+    
+    # Check for duplicate email
+    for acc in user_data.get("approved_accounts", []):
+        if acc.get("email") == session.email:
+            await query.edit_message_text(
+                "❌ هذا الإيميل مقبول مسبقاً!",
+                reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")])
+            )
+            return
+    
+    for req in user_data.get("pending_requests", []):
+        if req.get("email") == session.email:
+            await query.edit_message_text(
+                "⏳ هذا الإيميل قيد الانتظار بالفعل!",
+                reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")])
+            )
+            return
+    
+    user_data["pending_requests"].append({
+        "email": session.email,
+        "password": session.password,
+        "totp": "",
+        "app_pass": "",
+        "amount": price,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "extracted": False,
+        "has_totp": False,
+        "has_app_pass": False,
+    })
+    user_data["pending_balance"] = float(user_data.get("pending_balance", 0.0)) + price
+    save_user(uid, user_data)
+    SESSIONS.pop(uid, None)
+    
+    await query.edit_message_text(
+        f"✅ *تم إرسال الطلب للمالك!*\n\n"
+        f"📦 *المستوى 1: إيميل + باسورد فقط*\n"
+        f"💰 تمت إضافة *${price:.2f}* إلى الأموال قيد الانتظار.\n\n"
+        f"_🔄 سيتم تحويل المبلغ إلى رصيدك بعد موافقة المالك_",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")])
+    )
+
+async def submit_tier_2(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Submit account with email + password + TOTP (Tier 2)"""
+    query = update.callback_query
+    uid = int(query.data.split(":")[1])
+    session = SESSIONS.get(uid)
+    
+    if not session:
+        await query.answer("⚠️ الجلسة منتهية، حاول مرة أخرى.", show_alert=True)
+        return
+    
+    if not session.email or not session.password or not session.totp:
+        await query.answer("⚠️ يرجى إكمال الإيميل والباسورد ورمز المصادقة أولاً.", show_alert=True)
+        return
+    
+    user_data = get_user(uid)
+    prices = get_tier_prices()
+    price = prices["tier_2"]
+    
+    # Check for duplicate email
+    for acc in user_data.get("approved_accounts", []):
+        if acc.get("email") == session.email:
+            await query.edit_message_text(
+                "❌ هذا الإيميل مقبول مسبقاً!",
+                reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")])
+            )
+            return
+    
+    for req in user_data.get("pending_requests", []):
+        if req.get("email") == session.email:
+            await query.edit_message_text(
+                "⏳ هذا الإيميل قيد الانتظار بالفعل!",
+                reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")])
+            )
+            return
+    
+    user_data["pending_requests"].append({
+        "email": session.email,
+        "password": session.password,
+        "totp": session.totp,
+        "app_pass": "",
+        "amount": price,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "extracted": False,
+        "has_totp": True,
+        "has_app_pass": False,
+    })
+    user_data["pending_balance"] = float(user_data.get("pending_balance", 0.0)) + price
+    save_user(uid, user_data)
+    SESSIONS.pop(uid, None)
+    
+    await query.edit_message_text(
+        f"✅ *تم إرسال الطلب للمالك!*\n\n"
+        f"📦 *المستوى 2: إيميل + باسورد + رمز مصادقة*\n"
+        f"💰 تمت إضافة *${price:.2f}* إلى الأموال قيد الانتظار.\n\n"
+        f"_🔄 سيتم تحويل المبلغ إلى رصيدك بعد موافقة المالك_",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")])
+    )
 
 async def handle_edit_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -743,32 +927,9 @@ async def handle_edit_field_input(update: Update, context: ContextTypes.DEFAULT_
         reply_markup=kb([("🔙 تعديل حساباتي", "edit_my_accounts")])
     )
 
-# ==================== OWNER PANEL ====================
-async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-
-    await query.edit_message_text(
-        "⚙️ *لوحة تحكم المالك*\n\nاختر الإعداد الذي تريد تعديله:",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([
-            [("💰 سعر كل حساب", "set_price")],
-            [("📋 الطلبات", "approval_requests")],
-            [("📹 قسم الفيديوهات", "videos_section")],
-            [("🛒 المبيعات", "store_section")],
-            [("📢 قناة إجبارية", "forced_channel")],
-            [("📨 كروبات إشعارات الشراء", "purchase_channels")],
-            [("📊 جميع الحسابات المقبولة", "all_accounts_section")],
-            [("🔗 نظام الإحالة", "referral_settings")],
-            [("🔙 القائمة الرئيسية", "main_menu")]
-        ])
-    )
-
 # ==================== LEAVE VIDEO SYSTEM ====================
 async def send_leave_video_to_user(context: ContextTypes.DEFAULT_TYPE, user_id: int, email: str):
-    """إرسال فيديو المغادرة للمستخدم مع تعليمات"""
+    """Send leave video to user with instructions"""
     config = load_json(DATA_DIR / "config.json")
     video_path = config.get("video_leave")
     
@@ -815,7 +976,7 @@ async def send_leave_video_to_user(context: ContextTypes.DEFAULT_TYPE, user_id: 
         return False
 
 async def send_leave_video_reminder(context: ContextTypes.DEFAULT_TYPE, user_id: int, email: str):
-    """إرسال تذكير للمستخدم بعد 24 ساعة"""
+    """Send reminder to user after 24 hours"""
     text = (
         f"⏰ *تذكير بمغادرة الحساب*\n\n"
         f"📧 الإيميل: `{email}`\n\n"
@@ -858,7 +1019,7 @@ async def send_leave_video_reminder(context: ContextTypes.DEFAULT_TYPE, user_id:
             pass
 
 async def schedule_leave_check(context: ContextTypes.DEFAULT_TYPE, user_id: int, email: str):
-    """جدولة التحقق من المغادرة بعد 24 ساعة"""
+    """Schedule leave check after 24 hours"""
     job_name = f"leave_check_{user_id}_{email}"
     
     current_jobs = context.job_queue.get_jobs_by_name(job_name)
@@ -875,7 +1036,7 @@ async def schedule_leave_check(context: ContextTypes.DEFAULT_TYPE, user_id: int,
     logger.info(f"Scheduled auto-transfer for user {user_id}, email {email} in 24 hours")
 
 async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
-    """التحقق من حالة المغادرة بعد 24 ساعة - تحويل المبلغ تلقائياً"""
+    """Check leave status after 24 hours - auto transfer amount"""
     job_data = context.job.data
     user_id = job_data["user_id"]
     email = job_data["email"]
@@ -918,6 +1079,77 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Could not send auto-confirmation to user {user_id}: {e}")
     
     logger.info(f"Auto-confirmed leave for {email}, user {user_id}, amount ${price:.2f}")
+
+# ==================== OWNER PANEL ====================
+async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+
+    await query.edit_message_text(
+        "⚙️ *لوحة تحكم المالك*\n\nاختر الإعداد الذي تريد تعديله:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([
+            [("💰 أسعار المستويات", "set_tier_prices")],
+            [("📋 الطلبات", "approval_requests")],
+            [("📹 قسم الفيديوهات", "videos_section")],
+            [("🛒 المبيعات", "store_section")],
+            [("📢 قناة إجبارية", "forced_channel")],
+            [("📨 كروبات إشعارات الشراء", "purchase_channels")],
+            [("📊 جميع الحسابات المقبولة", "all_accounts_section")],
+            [("🔗 نظام الإحالة", "referral_settings")],
+            [("🔙 القائمة الرئيسية", "main_menu")]
+        ])
+    )
+
+# ==================== OWNER PANEL: TIER PRICES ====================
+async def set_tier_prices(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+
+    prices = get_tier_prices()
+    
+    await query.edit_message_text(
+        f"💰 *إعدادات أسعار المستويات*\n\n"
+        f"📌 *المستوى 1:* إيميل + باسورد فقط → `${prices['tier_1']:.2f}`\n"
+        f"📌 *المستوى 2:* إيميل + باسورد + رمز مصادقة → `${prices['tier_2']:.2f}`\n"
+        f"📌 *المستوى 3:* إيميل + باسورد + رمز مصادقة + كلمة مرور تطبيق → `${prices['tier_3']:.2f}`\n\n"
+        f"اختر المستوى لتعديل سعره:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([
+            [("💲 المستوى 1 (باسورد فقط)", "set_tier:1")],
+            [("💲 المستوى 2 (مع رمز المصادقة)", "set_tier:2")],
+            [("💲 المستوى 3 (كامل)", "set_tier:3")],
+            [("🔙 إعدادات المالك", "owner_panel")]
+        ])
+    )
+
+async def set_tier(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+
+    tier = query.data.split(":")[1]
+    context.user_data["setting_tier"] = tier
+    
+    tier_names = {
+        "1": "المستوى 1 (إيميل + باسورد فقط)",
+        "2": "المستوى 2 (إيميل + باسورد + رمز مصادقة)",
+        "3": "المستوى 3 (إيميل + باسورد + رمز مصادقة + كلمة مرور تطبيق)"
+    }
+    
+    await query.edit_message_text(
+        f"💰 *تعديل سعر {tier_names[tier]}*\n\n"
+        f"أرسل السعر الجديد (رقم فقط):\n"
+        f"📌 مثال: 0.25",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([("🔙 إلغاء", "set_tier_prices")])
+    )
+    context.user_data["mode"] = "set_tier_price"
 
 # ==================== OWNER PANEL: VIDEOS SECTION ====================
 async def videos_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1133,11 +1365,18 @@ async def view_pending_requests(update: Update, context: ContextTypes.DEFAULT_TY
     
     rows = []
     for req in pending:
-        rows.append([(f"⏳ {req.get('email', '')}", f"pending_detail:{req['user_id']}:{req.get('email', '')}")])
+        tier_icon = "🔵"
+        if req.get("has_app_pass", False) and req.get("has_totp", False):
+            tier_icon = "🟢"
+        elif req.get("has_totp", False):
+            tier_icon = "🟡"
+        rows.append([(f"{tier_icon} {req.get('email', '')} (${req.get('amount', 0):.2f})", f"pending_detail:{req['user_id']}:{req.get('email', '')}")])
     rows.append([("🔙 الطلبات", "approval_requests")])
     
     await query.edit_message_text(
-        "⏳ *الطلبات المنتظرة*\nاختر الإيميل لعرض التفاصيل:",
+        "⏳ *الطلبات المنتظرة*\n"
+        "🟢 مكتمل | 🟡 مع رمز المصادقة | 🔵 باسورد فقط\n\n"
+        "اختر الإيميل لعرض التفاصيل:",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=kb(*rows)
     )
@@ -1171,7 +1410,8 @@ async def view_approved_requests(update: Update, context: ContextTypes.DEFAULT_T
             leave_status = " ⏳ (معلق 24 ساعة)"
         elif acc.get("approved_with_leave", False) and acc.get("leave_confirmed", False):
             leave_status = " ✅ (تم التحويل)"
-        msg += f"{idx}. 📧 `{acc.get('email', '')}`{leave_status}\n"
+        tier_icon = "🟢" if acc.get("has_app_pass", False) else "🟡" if acc.get("has_totp", False) else "🔵"
+        msg += f"{idx}. {tier_icon} 📧 `{acc.get('email', '')}` ${acc.get('amount', 0):.2f}{leave_status}\n"
         msg += f"   👤 المستخدم: {acc.get('user_id', '')}\n\n"
     
     if len(msg) > 4000:
@@ -1249,11 +1489,21 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
+    tier_icon = "🟢" if request.get("has_app_pass", False) else "🟡" if request.get("has_totp", False) else "🔵"
+    tier_text = "مكتمل" if request.get("has_app_pass", False) else "مع رمز المصادقة" if request.get("has_totp", False) else "باسورد فقط"
+    
     msg = f"📋 *تفاصيل الطلب*\n\n"
     msg += f"📧 *الإيميل:* `{request.get('email', '')}`\n"
     msg += f"🔑 *الباسورد:* `{request.get('password', '')}`\n"
-    msg += f"🔐 *رمز المصادقة:* `{request.get('totp', '')}`\n"
-    msg += f"🗝 *كلمة مرور التطبيق:* `{request.get('app_pass', '')}`\n"
+    if request.get("has_totp", False):
+        msg += f"🔐 *رمز المصادقة:* `{request.get('totp', '')}`\n"
+    else:
+        msg += f"🔐 *رمز المصادقة:* ❌ غير مرسل\n"
+    if request.get("has_app_pass", False):
+        msg += f"🗝 *كلمة مرور التطبيق:* `{request.get('app_pass', '')}`\n"
+    else:
+        msg += f"🗝 *كلمة مرور التطبيق:* ❌ غير مرسل\n"
+    msg += f"📦 *المستوى:* {tier_icon} {tier_text}\n"
     msg += f"👤 *المستخدم:* `{uid}`\n"
     msg += f"💰 *السعر:* ${request.get('amount', 0):.2f}\n"
     
@@ -1547,7 +1797,7 @@ async def approve_request_owner(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
 async def approve_with_leave(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """قبول الطلب مع إرسال فيديو المغادرة وتأخير الدفع 24 ساعة (تحويل تلقائي)"""
+    """Accept request with leave video and delay payment 24 hours (auto transfer)"""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
@@ -1641,7 +1891,7 @@ async def all_accounts_section(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
 async def hold_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """عرض الحسابات المعلقة (في انتظار التحويل التلقائي بعد 24 ساعة)"""
+    """View pending accounts (waiting for auto transfer after 24 hours)"""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
@@ -1681,7 +1931,8 @@ async def hold_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             time_display = "غير معروف"
         
-        msg += f"{idx}. 📧 `{acc.get('email', '')}`\n"
+        tier_icon = "🟢" if acc.get("has_app_pass", False) else "🟡" if acc.get("has_totp", False) else "🔵"
+        msg += f"{idx}. {tier_icon} 📧 `{acc.get('email', '')}`\n"
         msg += f"   👤 المستخدم: {acc.get('user_id', '')}\n"
         msg += f"   💰 المبلغ: ${acc.get('amount', 0):.2f}\n"
         msg += f"   ⏳ الوقت المتبقي: {time_display}\n"
@@ -1693,7 +1944,7 @@ async def hold_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         msg,
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([("🔙 جميع الحسابات", "all_accounts_section")])
+        reply_markup=kb([("🔙 جميع الحبسابات", "all_accounts_section")])
     )
 
 async def all_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1725,10 +1976,13 @@ async def all_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         leave_status = ""
         if acc.get("approved_with_leave", False) and not acc.get("leave_confirmed", False):
             leave_status = " ⏳ (معلق)"
-        msg += f"{idx}. 📧 `{acc.get('email', '')}`{leave_status}\n"
+        tier_icon = "🟢" if acc.get("has_app_pass", False) else "🟡" if acc.get("has_totp", False) else "🔵"
+        msg += f"{idx}. {tier_icon} 📧 `{acc.get('email', '')}`{leave_status}\n"
         msg += f"   🔑 {acc.get('password', '')}\n"
-        msg += f"   🔐 {acc.get('totp', '')}\n"
-        msg += f"   🗝 {acc.get('app_pass', '')}\n"
+        if acc.get("has_totp", False):
+            msg += f"   🔐 {acc.get('totp', '')}\n"
+        if acc.get("has_app_pass", False):
+            msg += f"   🗝 {acc.get('app_pass', '')}\n"
         msg += f"   👤 المستخدم: {acc.get('user_id', '')}\n"
         msg += f"   💰 السعر: ${acc.get('amount', 0):.2f}\n"
         msg += "   ─────────────\n"
@@ -1775,10 +2029,13 @@ async def unextracted_accounts(update: Update, context: ContextTypes.DEFAULT_TYP
     msg = f"🆕 *الحسابات غير المستخرجة: {total}*\n\n"
     
     for idx, acc in enumerate(unextracted[:10], 1):
-        msg += f"{idx}. 📧 `{acc.get('email', '')}`\n"
+        tier_icon = "🟢" if acc.get("has_app_pass", False) else "🟡" if acc.get("has_totp", False) else "🔵"
+        msg += f"{idx}. {tier_icon} 📧 `{acc.get('email', '')}`\n"
         msg += f"   🔑 {acc.get('password', '')}\n"
-        msg += f"   🔐 {acc.get('totp', '')}\n"
-        msg += f"   🗝 {acc.get('app_pass', '')}\n"
+        if acc.get("has_totp", False):
+            msg += f"   🔐 {acc.get('totp', '')}\n"
+        if acc.get("has_app_pass", False):
+            msg += f"   🗝 {acc.get('app_pass', '')}\n"
         msg += f"   👤 المستخدم: {acc.get('user_id', '')}\n"
         msg += "   ─────────────\n"
     
@@ -1884,10 +2141,13 @@ async def export_all_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE
         leave_status = ""
         if acc.get("approved_with_leave", False) and not acc.get("leave_confirmed", False):
             leave_status = " (معلق)"
-        export_msg += f"📧 {idx}. {acc.get('email', '')}{leave_status}\n"
+        tier_icon = "🟢" if acc.get("has_app_pass", False) else "🟡" if acc.get("has_totp", False) else "🔵"
+        export_msg += f"{tier_icon} {idx}. 📧 {acc.get('email', '')}{leave_status}\n"
         export_msg += f"🔑 {acc.get('password', '')}\n"
-        export_msg += f"🔐 {acc.get('totp', '')}\n"
-        export_msg += f"🗝 {acc.get('app_pass', '')}\n"
+        if acc.get("has_totp", False):
+            export_msg += f"🔐 {acc.get('totp', '')}\n"
+        if acc.get("has_app_pass", False):
+            export_msg += f"🗝 {acc.get('app_pass', '')}\n"
         export_msg += f"💰 ${acc.get('amount', 0):.2f}\n"
         export_msg += "─" * 20 + "\n"
 
@@ -1929,10 +2189,13 @@ async def export_unextracted(update: Update, context: ContextTypes.DEFAULT_TYPE)
     export_msg += "═" * 30 + "\n\n"
     
     for idx, acc in enumerate(unextracted, 1):
-        export_msg += f"📧 {idx}. {acc.get('email', '')}\n"
+        tier_icon = "🟢" if acc.get("has_app_pass", False) else "🟡" if acc.get("has_totp", False) else "🔵"
+        export_msg += f"{tier_icon} {idx}. 📧 {acc.get('email', '')}\n"
         export_msg += f"🔑 {acc.get('password', '')}\n"
-        export_msg += f"🔐 {acc.get('totp', '')}\n"
-        export_msg += f"🗝 {acc.get('app_pass', '')}\n"
+        if acc.get("has_totp", False):
+            export_msg += f"🔐 {acc.get('totp', '')}\n"
+        if acc.get("has_app_pass", False):
+            export_msg += f"🗝 {acc.get('app_pass', '')}\n"
         export_msg += "─" * 20 + "\n"
 
     for uid, user_data in users.items():
@@ -1957,211 +2220,7 @@ async def export_unextracted(update: Update, context: ContextTypes.DEFAULT_TYPE)
             reply_markup=kb([("🔙 الحسابات غير المستخرجة", "unextracted_accounts")])
         )
 
-# ==================== OWNER PANEL: SET PRICE ====================
-async def set_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    await query.edit_message_text("💰 أرسل السعر الجديد للحساب الواحد (رقم فقط):")
-    context.user_data["mode"] = "set_price"
-
-# ==================== OWNER PANEL: STORE SECTION ====================
-async def owner_store_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-
-    config = load_json(DATA_DIR / "config.json")
-    categories = config.get("store_categories", [])
-    
-    rows = []
-    if categories:
-        for cat in categories:
-            rows.append([(f"📂 {cat['name']}", f"store_category:{cat['id']}")])
-    
-    rows.append([("➕ إضافة فئة جديدة", "store_add_category")])
-    rows.append([("🔙 إعدادات المالك", "owner_panel")])
-    
-    await query.edit_message_text(
-        "🛒 *إدارة المبيعات*\n\nاختر فئة لعرض مبيعاتها أو أضف فئة جديدة:",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb(*rows)
-    )
-
-async def store_add_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    
-    await query.edit_message_text(
-        "✏️ *إضافة فئة جديدة*\n\nأرسل اسم الفئة (مثال: حسابات، اشتراكات، أدوات):",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([("🔙 إلغاء", "store_section")])
-    )
-    context.user_data["store_action"] = "add_category"
-
-async def store_category_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-
-    cat_id = query.data.split(":", 1)[1]
-    config = load_json(DATA_DIR / "config.json")
-    category = next((c for c in config.get("store_categories", []) if c["id"] == cat_id), None)
-    
-    if not category:
-        await query.edit_message_text("⚠️ الفئة غير موجودة.", reply_markup=kb([("🔙 المبيعات", "store_section")]))
-        return
-
-    services = category.get("services", [])
-    msg = f"📂 *{category['name']}*\n\n"
-    
-    if services:
-        for idx, s in enumerate(services, 1):
-            msg += f"{idx}. 🛒 {s['name']} - 💰 ${s['price']:.2f}\n"
-    else:
-        msg += "📭 لا توجد مبيعات في هذه الفئة.\n"
-    
-    rows = [
-        [("➕ إضافة مبيعة", f"store_add_service:{cat_id}")],
-        [("🗑️ حذف مبيعة", f"store_delete_service:{cat_id}")],
-        [("🔙 المبيعات", "store_section")]
-    ]
-    
-    await query.edit_message_text(
-        msg,
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb(*rows)
-    )
-
-async def store_add_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    
-    cat_id = query.data.split(":", 1)[1]
-    context.user_data["current_category_id"] = cat_id
-    context.user_data["store_action"] = "add_service_name"
-    
-    await query.edit_message_text(
-        "✏️ *إضافة مبيعة جديدة*\n\n📌 الخطوة 1/3: أرسل اسم المبيعة:",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([("🔙 إلغاء", f"store_category:{cat_id}")])
-    )
-
-async def store_add_service_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    
-    cat_id = query.data.split(":", 1)[1]
-    context.user_data["current_category_id"] = cat_id
-    context.user_data["store_action"] = "add_service_price"
-    
-    await query.edit_message_text(
-        "💰 *الخطوة 2/3*: أرسل سعر المبيعة (رقم فقط):",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([("🔙 إلغاء", f"store_category:{cat_id}")])
-    )
-
-async def store_add_service_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    
-    cat_id = query.data.split(":", 1)[1]
-    context.user_data["current_category_id"] = cat_id
-    context.user_data["store_action"] = "add_service_message"
-    
-    await query.edit_message_text(
-        "📝 *الخطوة 3/3*: أرسل الرسالة التي ستظهر للعميل بعد الشراء:\n\n"
-        "مثال: أرسل معرفك في ببجي ليتم إرسال الهدية.",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([("🔙 إلغاء", f"store_category:{cat_id}")])
-    )
-
-async def store_delete_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    
-    cat_id = query.data.split(":", 1)[1]
-    config = load_json(DATA_DIR / "config.json")
-    category = next((c for c in config.get("store_categories", []) if c["id"] == cat_id), None)
-    
-    if not category:
-        await query.edit_message_text("⚠️ الفئة غير موجودة.")
-        return
-    
-    services = category.get("services", [])
-    if not services:
-        await query.edit_message_text("📭 لا توجد مبيعات لحذفها.", reply_markup=kb([("🔙 الفئة", f"store_category:{cat_id}")]))
-        return
-    
-    rows = []
-    for s in services:
-        rows.append([(f"❌ {s['name']} - ${s['price']:.2f}", f"delete_service:{cat_id}:{s['id']}")])
-    rows.append([("🔙 الفئة", f"store_category:{cat_id}")])
-    
-    await query.edit_message_text(
-        "🗑️ *حذف مبيعة*\nاختر المبيعة للحذف:",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb(*rows)
-    )
-
-async def delete_service_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    
-    parts = query.data.split(":")
-    cat_id = parts[1]
-    service_id = parts[2]
-    
-    config = load_json(DATA_DIR / "config.json")
-    for cat in config.get("store_categories", []):
-        if cat["id"] == cat_id:
-            cat["services"] = [s for s in cat["services"] if s["id"] != service_id]
-            break
-    
-    save_json(DATA_DIR / "config.json", config)
-    await query.edit_message_text(
-        "✅ تم حذف المبيعة بنجاح.",
-        reply_markup=kb([("🔙 الفئة", f"store_category:{cat_id}")])
-    )
-
-# ==================== FORCED CHANNEL ====================
-async def forced_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    
-    config = load_json(DATA_DIR / "config.json")
-    current_channel = config.get("forced_channel", "")
-    
-    await query.edit_message_text(
-        "📢 *إعدادات القناة الإجبارية*\n\n"
-        f"📌 القناة الحالية: {current_channel if current_channel else 'لا توجد'}\n\n"
-        "✏️ أرسل معرف القناة الجديدة (مثال: @my_channel):",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb([
-            [("🗑️ إلغاء القناة", "remove_channel")],
-            [("🔙 إعدادات المالك", "owner_panel")]
-        ])
-    )
-    context.user_data["store_action"] = "set_channel"
-
-
+# ==================== OWNER PANEL: PURCHASE CHANNELS ====================
 def purchase_channels_keyboard():
     return kb([
         [("1️⃣ ضبط الكروب الأول", "set_purchase_channel_1")],
@@ -2206,6 +2265,27 @@ async def set_purchase_channel(
         reply_markup=purchase_channels_keyboard(),
     )
 
+# ==================== FORCED CHANNEL ====================
+async def forced_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    config = load_json(DATA_DIR / "config.json")
+    current_channel = config.get("forced_channel", "")
+    
+    await query.edit_message_text(
+        "📢 *إعدادات القناة الإجبارية*\n\n"
+        f"📌 القناة الحالية: {current_channel if current_channel else 'لا توجد'}\n\n"
+        "✏️ أرسل معرف القناة الجديدة (مثال: @my_channel):",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([
+            [("🗑️ إلغاء القناة", "remove_channel")],
+            [("🔙 إعدادات المالك", "owner_panel")]
+        ])
+    )
+    context.user_data["store_action"] = "set_channel"
 
 async def remove_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -2742,8 +2822,34 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_reject_reason_text(update, context)
         return
 
+    # Handle tier price setting
+    if context.user_data.get("mode") == "set_tier_price":
+        if user_id != OWNER_ID: 
+            return
+        try:
+            price = float(text)
+            if price <= 0:
+                await update.message.reply_text("⚠️ السعر يجب أن يكون أكبر من 0!")
+                return
+            
+            tier = context.user_data.get("setting_tier")
+            if tier:
+                config = load_json(DATA_DIR / "config.json")
+                config[f"tier_{tier}_price"] = price
+                save_json(DATA_DIR / "config.json", config)
+                await update.message.reply_text(f"✅ تم تحديث سعر المستوى {tier} إلى ${price:.2f}")
+                context.user_data.pop("mode", None)
+                context.user_data.pop("setting_tier", None)
+                await set_tier_prices(update, context)
+            else:
+                await update.message.reply_text("⚠️ حدث خطأ، حاول مرة أخرى.")
+        except ValueError:
+            await update.message.reply_text("⚠️ أرسل رقماً صحيحاً (مثال: 0.25)")
+        return
+
     if context.user_data.get("mode") == "set_price":
-        if user_id != OWNER_ID: return
+        if user_id != OWNER_ID: 
+            return
         try:
             price = float(text)
             config = load_json(DATA_DIR / "config.json")
@@ -2757,7 +2863,8 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if context.user_data.get("mode") == "set_referral_bonus":
-        if user_id != OWNER_ID: return
+        if user_id != OWNER_ID: 
+            return
         try:
             bonus = float(text)
             config = load_json(DATA_DIR / "config.json")
@@ -2891,6 +2998,179 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data.pop("current_category_id", None)
         await main_menu(update, context)
 
+# ==================== STORE SECTION (LEGACY) ====================
+async def owner_store_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+
+    config = load_json(DATA_DIR / "config.json")
+    categories = config.get("store_categories", [])
+    
+    rows = []
+    if categories:
+        for cat in categories:
+            rows.append([(f"📂 {cat['name']}", f"store_category:{cat['id']}")])
+    
+    rows.append([("➕ إضافة فئة جديدة", "store_add_category")])
+    rows.append([("🔙 إعدادات المالك", "owner_panel")])
+    
+    await query.edit_message_text(
+        "🛒 *إدارة المبيعات*\n\nاختر فئة لعرض مبيعاتها أو أضف فئة جديدة:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb(*rows)
+    )
+
+async def store_add_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    await query.edit_message_text(
+        "✏️ *إضافة فئة جديدة*\n\nأرسل اسم الفئة (مثال: حسابات، اشتراكات، أدوات):",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([("🔙 إلغاء", "store_section")])
+    )
+    context.user_data["store_action"] = "add_category"
+
+async def store_category_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+
+    cat_id = query.data.split(":", 1)[1]
+    config = load_json(DATA_DIR / "config.json")
+    category = next((c for c in config.get("store_categories", []) if c["id"] == cat_id), None)
+    
+    if not category:
+        await query.edit_message_text("⚠️ الفئة غير موجودة.", reply_markup=kb([("🔙 المبيعات", "store_section")]))
+        return
+
+    services = category.get("services", [])
+    msg = f"📂 *{category['name']}*\n\n"
+    
+    if services:
+        for idx, s in enumerate(services, 1):
+            msg += f"{idx}. 🛒 {s['name']} - 💰 ${s['price']:.2f}\n"
+    else:
+        msg += "📭 لا توجد مبيعات في هذه الفئة.\n"
+    
+    rows = [
+        [("➕ إضافة مبيعة", f"store_add_service:{cat_id}")],
+        [("🗑️ حذف مبيعة", f"store_delete_service:{cat_id}")],
+        [("🔙 المبيعات", "store_section")]
+    ]
+    
+    await query.edit_message_text(
+        msg,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb(*rows)
+    )
+
+async def store_add_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    cat_id = query.data.split(":", 1)[1]
+    context.user_data["current_category_id"] = cat_id
+    context.user_data["store_action"] = "add_service_name"
+    
+    await query.edit_message_text(
+        "✏️ *إضافة مبيعة جديدة*\n\n📌 الخطوة 1/3: أرسل اسم المبيعة:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([("🔙 إلغاء", f"store_category:{cat_id}")])
+    )
+
+async def store_add_service_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    cat_id = query.data.split(":", 1)[1]
+    context.user_data["current_category_id"] = cat_id
+    context.user_data["store_action"] = "add_service_price"
+    
+    await query.edit_message_text(
+        "💰 *الخطوة 2/3*: أرسل سعر المبيعة (رقم فقط):",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([("🔙 إلغاء", f"store_category:{cat_id}")])
+    )
+
+async def store_add_service_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    cat_id = query.data.split(":", 1)[1]
+    context.user_data["current_category_id"] = cat_id
+    context.user_data["store_action"] = "add_service_message"
+    
+    await query.edit_message_text(
+        "📝 *الخطوة 3/3*: أرسل الرسالة التي ستظهر للعميل بعد الشراء:\n\n"
+        "مثال: أرسل معرفك في ببجي ليتم إرسال الهدية.",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([("🔙 إلغاء", f"store_category:{cat_id}")])
+    )
+
+async def store_delete_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    cat_id = query.data.split(":", 1)[1]
+    config = load_json(DATA_DIR / "config.json")
+    category = next((c for c in config.get("store_categories", []) if c["id"] == cat_id), None)
+    
+    if not category:
+        await query.edit_message_text("⚠️ الفئة غير موجودة.")
+        return
+    
+    services = category.get("services", [])
+    if not services:
+        await query.edit_message_text("📭 لا توجد مبيعات لحذفها.", reply_markup=kb([("🔙 الفئة", f"store_category:{cat_id}")]))
+        return
+    
+    rows = []
+    for s in services:
+        rows.append([(f"❌ {s['name']} - ${s['price']:.2f}", f"delete_service:{cat_id}:{s['id']}")])
+    rows.append([("🔙 الفئة", f"store_category:{cat_id}")])
+    
+    await query.edit_message_text(
+        "🗑️ *حذف مبيعة*\nاختر المبيعة للحذف:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb(*rows)
+    )
+
+async def delete_service_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    parts = query.data.split(":")
+    cat_id = parts[1]
+    service_id = parts[2]
+    
+    config = load_json(DATA_DIR / "config.json")
+    for cat in config.get("store_categories", []):
+        if cat["id"] == cat_id:
+            cat["services"] = [s for s in cat["services"] if s["id"] != service_id]
+            break
+    
+    save_json(DATA_DIR / "config.json", config)
+    await query.edit_message_text(
+        "✅ تم حذف المبيعة بنجاح.",
+        reply_markup=kb([("🔙 الفئة", f"store_category:{cat_id}")])
+    )
+
 # ==================== REFERRAL HANDLER ====================
 async def handle_referral(update: Update, context: ContextTypes.DEFAULT_TYPE, referral_code: str):
     user_id = update.effective_user.id
@@ -2954,70 +3234,137 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==================== ROUTER ====================
 async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    if not query: return
+    if not query: 
+        return
     await query.answer()
     data = query.data
 
-    if data == "main_menu": await main_menu(update, context)
-    elif data == "add_account": await add_account_start(update, context)
-    elif data == "cancel": await add_account_cancel(update, context)
-    elif data == "my_wallet": await my_wallet(update, context)
-    elif data == "my_accounts": await my_accounts(update, context)
-    elif data == "tutorials": await tutorials(update, context)
-    elif data.startswith("play_video:"): await play_video(update, context)
-    elif data.startswith("show_video:"): await show_video_in_add(update, context)
-    elif data == "owner_panel": await owner_panel(update, context)
-    elif data == "set_price": await set_price(update, context)
-    elif data == "approval_requests": await approval_requests(update, context)
-    elif data == "view_pending": await view_pending_requests(update, context)
-    elif data == "view_approved": await view_approved_requests(update, context)
-    elif data == "view_rejected": await view_rejected_requests(update, context)
-    elif data.startswith("pending_detail:"): await pending_detail(update, context)
-    elif data.startswith("approve_request:"): await approve_request_owner(update, context)
-    elif data.startswith("approve_with_leave:"): await approve_with_leave(update, context)
-    elif data.startswith("reject_request:"): await reject_request_reason(update, context)
-    elif data.startswith("reject_reason:"): await execute_reject_reason(update, context)
-    elif data == "videos_section": await videos_section(update, context)
-    elif data.startswith("video_action:"): await video_action(update, context)
-    elif data.startswith("view_video:"): await view_video(update, context)
-    elif data.startswith("delete_video:"): await delete_video(update, context)
-    elif data.startswith("set_video:"): await set_video_callback(update, context)
-    elif data == "store_section": await owner_store_section(update, context)
-    elif data == "store_add_category": await store_add_category(update, context)
-    elif data.startswith("store_category:"): await store_category_menu(update, context)
-    elif data.startswith("store_add_service:"): await store_add_service(update, context)
-    elif data.startswith("store_add_service_price:"): await store_add_service_price(update, context)
-    elif data.startswith("store_add_service_message:"): await store_add_service_message(update, context)
-    elif data.startswith("store_delete_service:"): await store_delete_service(update, context)
-    elif data.startswith("delete_service:"): await delete_service_execute(update, context)
-    elif data == "forced_channel": await forced_channel(update, context)
-    elif data == "check_forced_channel": await check_forced_channel_callback(update, context)
-    elif data == "remove_channel": await remove_channel(update, context)
-    elif data == "purchase_channels": await purchase_channels(update, context)
-    elif data == "set_purchase_channel_1": await set_purchase_channel(update, context, 1)
-    elif data == "set_purchase_channel_2": await set_purchase_channel(update, context, 2)
-    elif data == "withdraw_store": await withdraw_store(update, context)
-    elif data.startswith("user_category:"): await user_category_menu(update, context)
-    elif data.startswith("user_buy:"): await user_buy_service(update, context)
-    elif data.startswith("deliver_order:"): await deliver_order(update, context)
-    elif data == "all_accounts_section": await all_accounts_section(update, context)
-    elif data == "all_accounts": await all_accounts(update, context)
-    elif data == "hold_accounts": await hold_accounts(update, context)
-    elif data == "unextracted_accounts": await unextracted_accounts(update, context)
-    elif data == "export_all_accounts": await export_all_accounts(update, context)
-    elif data == "export_unextracted": await export_unextracted(update, context)
-    elif data == "mark_extracted_menu": await mark_extracted_menu(update, context)
-    elif data.startswith("mark_extracted:"): await mark_extracted(update, context)
-    elif data == "referral_menu": await referral_menu(update, context)
-    elif data.startswith("copy_referral:"): await copy_referral(update, context)
-    elif data == "referral_settings": await referral_settings(update, context)
-    elif data == "set_referral_bonus": await set_referral_bonus(update, context)
-    elif data == "referral_stats": await referral_stats(update, context)
-    elif data == "edit_my_accounts": await edit_my_accounts(update, context)
-    elif data.startswith("edit_pending:"): await edit_pending_account(update, context)
-    elif data.startswith("edit_field:"): await edit_field(update, context)
-    elif data.startswith("delete_pending:"): await delete_pending_account(update, context)
-    else: await placeholder(update, context)
+    if data == "main_menu": 
+        await main_menu(update, context)
+    elif data == "add_account": 
+        await add_account_start(update, context)
+    elif data == "cancel": 
+        await add_account_cancel(update, context)
+    elif data.startswith("submit_tier_1:"):
+        await submit_tier_1(update, context)
+    elif data.startswith("submit_tier_2:"):
+        await submit_tier_2(update, context)
+    elif data == "my_wallet": 
+        await my_wallet(update, context)
+    elif data == "my_accounts": 
+        await my_accounts(update, context)
+    elif data == "tutorials": 
+        await tutorials(update, context)
+    elif data.startswith("play_video:"): 
+        await play_video(update, context)
+    elif data.startswith("show_video:"): 
+        await show_video_in_add(update, context)
+    elif data == "owner_panel": 
+        await owner_panel(update, context)
+    elif data == "set_tier_prices": 
+        await set_tier_prices(update, context)
+    elif data.startswith("set_tier:"): 
+        await set_tier(update, context)
+    elif data == "approval_requests": 
+        await approval_requests(update, context)
+    elif data == "view_pending": 
+        await view_pending_requests(update, context)
+    elif data == "view_approved": 
+        await view_approved_requests(update, context)
+    elif data == "view_rejected": 
+        await view_rejected_requests(update, context)
+    elif data.startswith("pending_detail:"): 
+        await pending_detail(update, context)
+    elif data.startswith("approve_request:"): 
+        await approve_request_owner(update, context)
+    elif data.startswith("approve_with_leave:"): 
+        await approve_with_leave(update, context)
+    elif data.startswith("reject_request:"): 
+        await reject_request_reason(update, context)
+    elif data.startswith("reject_reason:"): 
+        await execute_reject_reason(update, context)
+    elif data == "videos_section": 
+        await videos_section(update, context)
+    elif data.startswith("video_action:"): 
+        await video_action(update, context)
+    elif data.startswith("view_video:"): 
+        await view_video(update, context)
+    elif data.startswith("delete_video:"): 
+        await delete_video(update, context)
+    elif data.startswith("set_video:"): 
+        await set_video_callback(update, context)
+    elif data == "store_section": 
+        await owner_store_section(update, context)
+    elif data == "store_add_category": 
+        await store_add_category(update, context)
+    elif data.startswith("store_category:"): 
+        await store_category_menu(update, context)
+    elif data.startswith("store_add_service:"): 
+        await store_add_service(update, context)
+    elif data.startswith("store_add_service_price:"): 
+        await store_add_service_price(update, context)
+    elif data.startswith("store_add_service_message:"): 
+        await store_add_service_message(update, context)
+    elif data.startswith("store_delete_service:"): 
+        await store_delete_service(update, context)
+    elif data.startswith("delete_service:"): 
+        await delete_service_execute(update, context)
+    elif data == "forced_channel": 
+        await forced_channel(update, context)
+    elif data == "check_forced_channel": 
+        await check_forced_channel_callback(update, context)
+    elif data == "remove_channel": 
+        await remove_channel(update, context)
+    elif data == "purchase_channels": 
+        await purchase_channels(update, context)
+    elif data == "set_purchase_channel_1": 
+        await set_purchase_channel(update, context, 1)
+    elif data == "set_purchase_channel_2": 
+        await set_purchase_channel(update, context, 2)
+    elif data == "withdraw_store": 
+        await withdraw_store(update, context)
+    elif data.startswith("user_category:"): 
+        await user_category_menu(update, context)
+    elif data.startswith("user_buy:"): 
+        await user_buy_service(update, context)
+    elif data.startswith("deliver_order:"): 
+        await deliver_order(update, context)
+    elif data == "all_accounts_section": 
+        await all_accounts_section(update, context)
+    elif data == "all_accounts": 
+        await all_accounts(update, context)
+    elif data == "hold_accounts": 
+        await hold_accounts(update, context)
+    elif data == "unextracted_accounts": 
+        await unextracted_accounts(update, context)
+    elif data == "export_all_accounts": 
+        await export_all_accounts(update, context)
+    elif data == "export_unextracted": 
+        await export_unextracted(update, context)
+    elif data == "mark_extracted_menu": 
+        await mark_extracted_menu(update, context)
+    elif data.startswith("mark_extracted:"): 
+        await mark_extracted(update, context)
+    elif data == "referral_menu": 
+        await referral_menu(update, context)
+    elif data.startswith("copy_referral:"): 
+        await copy_referral(update, context)
+    elif data == "referral_settings": 
+        await referral_settings(update, context)
+    elif data == "set_referral_bonus": 
+        await set_referral_bonus(update, context)
+    elif data == "referral_stats": 
+        await referral_stats(update, context)
+    elif data == "edit_my_accounts": 
+        await edit_my_accounts(update, context)
+    elif data.startswith("edit_pending:"): 
+        await edit_pending_account(update, context)
+    elif data.startswith("edit_field:"): 
+        await edit_field(update, context)
+    elif data.startswith("delete_pending:"): 
+        await delete_pending_account(update, context)
+    else: 
+        await placeholder(update, context)
 
 async def placeholder(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.edit_message_text("⚠️ خيار غير معروف حالياً.", reply_markup=kb([("🔙 القائمة الرئيسية", "main_menu")]))
@@ -3042,7 +3389,7 @@ async def owner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⚙️ *لوحة تحكم المالك*\n\nاختر الإعداد الذي تريد تعديله:",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=kb([
-            [("💰 سعر كل حساب", "set_price")],
+            [("💰 أسعار المستويات", "set_tier_prices")],
             [("📋 الطلبات", "approval_requests")],
             [("📹 قسم الفيديوهات", "videos_section")],
             [("🛒 المبيعات", "store_section")],
@@ -3080,4 +3427,4 @@ def main():
     app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    main().
