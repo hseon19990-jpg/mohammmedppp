@@ -6,7 +6,7 @@ Advanced Telegram Account Manager Bot - Full Version
 - 32-Character TOTP Secret Validation
 - 16-Character App Password Validation (xxxx xxxx xxxx xxxx)
 - Duplicate App Password Prevention
-- Request TOTP and App Pass when missing
+- Request TOTP and App Pass when missing (Optional)
 - Seller name and username display
 - Points management by ID or username
 """
@@ -1269,26 +1269,39 @@ async def approve_request_owner(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text("⚠️ هذا الطلب غير موجود أو تمت معالجته مسبقاً.",
                                       reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
         return
+    
     # Check if TOTP is missing
     if not approved_request.get("has_totp", False):
         context.user_data["approval_uid"] = uid
         context.user_data["approval_email"] = email
         context.user_data["approval_step"] = "waiting_totp"
         context.user_data["approval_data"] = approved_request
+        context.user_data["approval_with_leave"] = False
         await query.edit_message_text(
             f"🔐 *طلب رمز المصادقة*\n\n📧 الإيميل: `{email}`\n\n⚠️ هذا الحساب ليس لديه رمز مصادقة.\n📌 أرسل رمز المصادقة (32 حرفاً):\nالصيغة: XXXX XXXX XXXX XXXX XXXX XXXX XXXX XXXX\n\n_يمكنك كتابة 'تخطي' لتخطي هذه الخطوة_",
-            parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 إلغاء", "view_pending"))
+            parse_mode=ParseMode.MARKDOWN, 
+            reply_markup=kb_vertical([
+                ("🔙 إلغاء", f"pending_detail:{uid}:{email}")
+            ])
+        )
         return
+    
     # Check if App Pass is missing
     if not approved_request.get("has_app_pass", False):
         context.user_data["approval_uid"] = uid
         context.user_data["approval_email"] = email
         context.user_data["approval_step"] = "waiting_app_pass"
         context.user_data["approval_data"] = approved_request
+        context.user_data["approval_with_leave"] = False
         await query.edit_message_text(
             f"🗝 *طلب كلمة مرور التطبيق*\n\n📧 الإيميل: `{email}`\n\n⚠️ هذا الحساب ليس لديه كلمة مرور تطبيق.\n📌 أرسل كلمة مرور التطبيق (16 حرفاً):\nالصيغة: XXXX XXXX XXXX XXXX\n\n_يمكنك كتابة 'تخطي' لتخطي هذه الخطوة_",
-            parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 إلغاء", "view_pending"))
+            parse_mode=ParseMode.MARKDOWN, 
+            reply_markup=kb_vertical([
+                ("🔙 إلغاء", f"pending_detail:{uid}:{email}")
+            ])
+        )
         return
+    
     # Complete approval
     await complete_approval(update, context, uid, email, approved_request, False)
     await query.edit_message_text(f"✅ تم قبول الحساب `{email}` بنجاح!\n💰 تم نقل ${approved_request.get('amount', 0):.2f} من قيد الانتظار إلى الرصيد المملوك.",
@@ -1320,7 +1333,11 @@ async def approve_with_leave(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data["approval_with_leave"] = True
         await query.edit_message_text(
             f"🔐 *طلب رمز المصادقة*\n\n📧 الإيميل: `{email}`\n\n⚠️ هذا الحساب ليس لديه رمز مصادقة.\n📌 أرسل رمز المصادقة (32 حرفاً):\nالصيغة: XXXX XXXX XXXX XXXX XXXX XXXX XXXX XXXX\n\n_يمكنك كتابة 'تخطي' لتخطي هذه الخطوة_",
-            parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 إلغاء", "view_pending"))
+            parse_mode=ParseMode.MARKDOWN, 
+            reply_markup=kb_vertical([
+                ("🔙 إلغاء", f"pending_detail:{uid}:{email}")
+            ])
+        )
         return
     # Check if App Pass is missing
     if not approved_request.get("has_app_pass", False):
@@ -1331,7 +1348,11 @@ async def approve_with_leave(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data["approval_with_leave"] = True
         await query.edit_message_text(
             f"🗝 *طلب كلمة مرور التطبيق*\n\n📧 الإيميل: `{email}`\n\n⚠️ هذا الحساب ليس لديه كلمة مرور تطبيق.\n📌 أرسل كلمة مرور التطبيق (16 حرفاً):\nالصيغة: XXXX XXXX XXXX XXXX\n\n_يمكنك كتابة 'تخطي' لتخطي هذه الخطوة_",
-            parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 إلغاء", "view_pending"))
+            parse_mode=ParseMode.MARKDOWN, 
+            reply_markup=kb_vertical([
+                ("🔙 إلغاء", f"pending_detail:{uid}:{email}")
+            ])
+        )
         return
     # Complete approval with leave
     await complete_approval(update, context, uid, email, approved_request, True)
@@ -1906,15 +1927,42 @@ async def handle_approval_totp(update: Update, context: ContextTypes.DEFAULT_TYP
     uid = context.user_data.get("approval_uid")
     email = context.user_data.get("approval_email")
     approved_request = context.user_data.get("approval_data")
+    with_leave = context.user_data.get("approval_with_leave", False)
+    
     if not uid or not email or not approved_request:
         await update.message.reply_text("⚠️ حدث خطأ، حاول مرة أخرى.")
         return
+        
     if text.lower() == "تخطي":
-        context.user_data["approval_step"] = "waiting_app_pass"
-        await update.message.reply_text(
-            f"🗝 *طلب كلمة مرور التطبيق*\n\n📧 الإيميل: `{email}`\n\n⚠️ تم تخطي رمز المصادقة.\n📌 أرسل كلمة مرور التطبيق (16 حرفاً):\nالصيغة: XXXX XXXX XXXX XXXX\n\n_يمكنك كتابة 'تخطي' لتخطي هذه الخطوة أيضاً_",
-            parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 إلغاء", "view_pending"))
+        # Skip TOTP
+        approved_request["totp"] = ""
+        approved_request["has_totp"] = False
+        # Recalculate price
+        prices = get_tier_prices()
+        if approved_request.get("has_app_pass", False):
+            approved_request["amount"] = prices["tier_1"]  # Actually, if only app pass, tier 1? Let's use correct logic
+            # If has app pass but no totp, it should be tier 1? Actually, tier 1 is no totp, no app pass.
+            # Let's recalculate properly
+            has_totp = False
+            has_app_pass = approved_request.get("has_app_pass", False)
+            approved_request["amount"] = calculate_account_price(has_totp, has_app_pass)
+        
+        context.user_data["approval_data"] = approved_request
+        # Check if we need to ask for app pass
+        if not approved_request.get("has_app_pass", False):
+            context.user_data["approval_step"] = "waiting_app_pass"
+            await update.message.reply_text(
+                f"✅ تم تخطي رمز المصادقة.\n\n🗝 *الآن أرسل كلمة مرور التطبيق (16 حرفاً):*\nالصيغة: XXXX XXXX XXXX XXXX\n\n_يمكنك كتابة 'تخطي' لتخطي هذه الخطوة_",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=kb_vertical([
+                    ("🔙 إلغاء", f"pending_detail:{uid}:{email}")
+                ])
+            )
+        else:
+            # Complete approval
+            await complete_approval(update, context, uid, email, approved_request, with_leave)
         return
+    
     # Validate TOTP secret (32 characters)
     cleaned = text.replace(" ", "").upper()
     if len(cleaned) != 32:
@@ -1929,18 +1977,27 @@ async def handle_approval_totp(update: Update, context: ContextTypes.DEFAULT_TYP
         code = pyotp.TOTP(secret).now()
         approved_request["totp"] = secret
         approved_request["has_totp"] = True
-        prices = get_tier_prices()
-        if approved_request.get("has_app_pass", False):
-            approved_request["amount"] = prices["tier_3"]
-        else:
-            approved_request["amount"] = prices["tier_2"]
+        # Recalculate price
+        has_totp = True
+        has_app_pass = approved_request.get("has_app_pass", False)
+        approved_request["amount"] = calculate_account_price(has_totp, has_app_pass)
         context.user_data["approval_data"] = approved_request
-        context.user_data["approval_step"] = "waiting_app_pass"
-
+        
         formatted_secret = format_totp_secret(secret)
-        await update.message.reply_text(
-            f"✅ رمز المصادقة صالح!\n🔐 *المفتاح:* `{formatted_secret}`\n🔢 *كود المصادقة الحالي:* `{code}`\n⏰ *الوقت:* {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n🗝 *الآن أرسل كلمة مرور التطبيق (16 حرفاً):*\nالصيغة: XXXX XXXX XXXX XXXX\n\n_يمكنك كتابة 'تخطي' لتخطي هذه الخطوة_",
-            parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 إلغاء", "view_pending"))
+        
+        # Check if we need to ask for app pass
+        if not approved_request.get("has_app_pass", False):
+            context.user_data["approval_step"] = "waiting_app_pass"
+            await update.message.reply_text(
+                f"✅ رمز المصادقة صالح!\n🔐 *المفتاح:* `{formatted_secret}`\n🔢 *كود المصادقة الحالي:* `{code}`\n⏰ *الوقت:* {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n🗝 *الآن أرسل كلمة مرور التطبيق (16 حرفاً):*\nالصيغة: XXXX XXXX XXXX XXXX\n\n_يمكنك كتابة 'تخطي' لتخطي هذه الخطوة_",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=kb_vertical([
+                    ("🔙 إلغاء", f"pending_detail:{uid}:{email}")
+                ])
+            )
+        else:
+            # Complete approval
+            await complete_approval(update, context, uid, email, approved_request, with_leave)
     except Exception as e:
         await update.message.reply_text(f"⚠️ مفتاح 2FA غير صالح: {str(e)}\n\n📌 أرسل رمز المصادقة الصحيح أو اكتب 'تخطي' لتخطي هذه الخطوة.",
                                         parse_mode=ParseMode.MARKDOWN)
@@ -1953,17 +2010,18 @@ async def handle_approval_app_pass(update: Update, context: ContextTypes.DEFAULT
     email = context.user_data.get("approval_email")
     approved_request = context.user_data.get("approval_data")
     with_leave = context.user_data.get("approval_with_leave", False)
+    
     if not uid or not email or not approved_request:
         await update.message.reply_text("⚠️ حدث خطأ، حاول مرة أخرى.")
         return
+        
     if text.lower() == "تخطي":
         approved_request["app_pass"] = ""
         approved_request["has_app_pass"] = False
-        prices = get_tier_prices()
-        if approved_request.get("has_totp", False):
-            approved_request["amount"] = prices["tier_2"]
-        else:
-            approved_request["amount"] = prices["tier_1"]
+        # Recalculate price
+        has_totp = approved_request.get("has_totp", False)
+        has_app_pass = False
+        approved_request["amount"] = calculate_account_price(has_totp, has_app_pass)
         context.user_data["approval_data"] = approved_request
         await update.message.reply_text(f"✅ تم تخطي كلمة مرور التطبيق.\n\n📌 سيتم إكمال الموافقة على الحساب `{email}`",
                                         parse_mode=ParseMode.MARKDOWN)
@@ -2009,11 +2067,10 @@ async def handle_approval_app_pass(update: Update, context: ContextTypes.DEFAULT
     user_data["used_app_passwords"] = used_passwords
     save_user(uid, user_data)
 
-    prices = get_tier_prices()
-    if approved_request.get("has_totp", False):
-        approved_request["amount"] = prices["tier_3"]
-    else:
-        approved_request["amount"] = prices["tier_2"]
+    # Recalculate price
+    has_totp = approved_request.get("has_totp", False)
+    has_app_pass = True
+    approved_request["amount"] = calculate_account_price(has_totp, has_app_pass)
     context.user_data["approval_data"] = approved_request
 
     formatted_pass = format_app_password(cleaned)
