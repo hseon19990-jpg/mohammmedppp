@@ -23,6 +23,9 @@ Advanced Telegram Account Manager Bot - Full Version with All Features
 - Enhanced Approval: Owner can add missing TOTP and App Pass during approval
 - Deduct points from approved accounts
 - Give points to rejected accounts
+- Show seller name and username in all requests lists
+- Generate 6-digit TOTP codes on approval
+- Deduct/Give points by user ID or username
 """
 
 import asyncio
@@ -224,67 +227,6 @@ def calculate_account_price(totp_submitted: bool, app_pass_submitted: bool) -> f
         return prices["tier_2"]  # Email + Password + TOTP
     else:
         return prices["tier_1"]  # Email + Password only
-
-# ==================== COMPLETE APPROVAL ====================
-async def complete_approval(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: int, email: str, approved_request: dict):
-    """Complete the approval process"""
-    user_data = get_user(uid)
-    config = load_json(DATA_DIR / "config.json")
-    default_price = float(config.get("default_price", 5.0))
-    price = float(approved_request.get("amount", default_price))
-    
-    approved_request["extracted"] = False
-    approved_request["approved_with_leave"] = False
-    approved_request["leave_confirmed"] = True
-    user_data.setdefault("approved_accounts", []).append(approved_request)
-    user_data["pending_balance"] = max(
-        0.0,
-        float(user_data.get("pending_balance", 0.0)) - price,
-    )
-    user_data["balance"] = float(user_data.get("balance", 0.0)) + price
-    user_data["pending_requests"] = [
-        req for req in user_data.get("pending_requests", []) if req["email"] != email
-    ]
-    
-    user_data["total_approved_emails"] = int(user_data.get("total_approved_emails", 0)) + 1
-    
-    save_user(uid, user_data)
-
-    referred_by = user_data.get("referred_by")
-    if referred_by:
-        referral_bonus = float(config.get("referral_bonus", 0.0))
-        if referral_bonus > 0:
-            referrer_data = get_user(referred_by)
-            referrer_data["referral_earnings"] = float(referrer_data.get("referral_earnings", 0.0)) + referral_bonus
-            referrer_data["total_referrals"] = int(referrer_data.get("total_referrals", 0)) + 1
-            save_user(referred_by, referrer_data)
-            
-            try:
-                await context.bot.send_message(
-                    chat_id=referred_by,
-                    text=f"🎉 *مبروك!*\nحصلت على مكافأة إحالة بقيمة ${referral_bonus:.2f}\n"
-                         f"بسبب إحالة المستخدم {uid} الذي أضاف حساباً جديداً.",
-                    parse_mode=ParseMode.MARKDOWN
-                )
-            except:
-                pass
-    
-    try:
-        await context.bot.send_message(
-            chat_id=uid,
-            text=f"✅ *تم قبول طلبك!*\n\n"
-                 f"📧 الإيميل: `{email}`\n"
-                 f"💰 تم إضافة *${price:.2f}* إلى رصيدك.",
-            parse_mode=ParseMode.MARKDOWN
-        )
-    except:
-        pass
-
-    # Clear approval data
-    context.user_data.pop("approval_uid", None)
-    context.user_data.pop("approval_email", None)
-    context.user_data.pop("approval_data", None)
-    context.user_data.pop("approval_step", None)
 
 # ==================== FORCED CHANNEL CHECK ====================
 def normalize_forced_channel(value: str) -> str:
@@ -820,6 +762,11 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         user_data = get_user(uid)
         
+        # Get user info
+        user = update.effective_user
+        user_full_name = user.full_name or "غير معروف"
+        user_username = user.username or "لا يوجد"
+        
         # Calculate price based on what was submitted
         final_price = calculate_account_price(session.has_totp, session.has_app_pass)
         
@@ -833,6 +780,8 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "extracted": False,
             "has_totp": session.has_totp,
             "has_app_pass": session.has_app_pass,
+            "user_name": user_full_name,
+            "user_username": user_username,
         })
         user_data["pending_balance"] = float(
             user_data.get("pending_balance", 0.0)
@@ -910,6 +859,11 @@ async def submit_tier_1(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
     
+    # Get user info
+    user = update.effective_user
+    user_full_name = user.full_name or "غير معروف"
+    user_username = user.username or "لا يوجد"
+    
     user_data["pending_requests"].append({
         "email": session.email,
         "password": session.password,
@@ -920,6 +874,8 @@ async def submit_tier_1(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "extracted": False,
         "has_totp": False,
         "has_app_pass": False,
+        "user_name": user_full_name,
+        "user_username": user_username,
     })
     user_data["pending_balance"] = float(user_data.get("pending_balance", 0.0)) + price
     save_user(uid, user_data)
@@ -969,6 +925,11 @@ async def submit_tier_2(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
     
+    # Get user info
+    user = update.effective_user
+    user_full_name = user.full_name or "غير معروف"
+    user_username = user.username or "لا يوجد"
+    
     user_data["pending_requests"].append({
         "email": session.email,
         "password": session.password,
@@ -979,6 +940,8 @@ async def submit_tier_2(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "extracted": False,
         "has_totp": True,
         "has_app_pass": False,
+        "user_name": user_full_name,
+        "user_username": user_username,
     })
     user_data["pending_balance"] = float(user_data.get("pending_balance", 0.0)) + price
     save_user(uid, user_data)
@@ -1165,6 +1128,7 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [("📨 كروبات إشعارات الشراء", "purchase_channels")],
             [("📊 جميع الحسابات المقبولة", "all_accounts_section")],
             [("🔗 نظام الإحالة", "referral_settings")],
+            [("💰 خصم/منح نقاط", "points_management")],
             [("🔙 القائمة الرئيسية", "main_menu")]
         ])
     )
@@ -1407,7 +1371,7 @@ async def approval_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
     )
 
-# ==================== VIEW PENDING REQUESTS ====================
+# ==================== VIEW PENDING REQUESTS (WITH SELLER INFO) ====================
 async def view_pending_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
@@ -1437,7 +1401,13 @@ async def view_pending_requests(update: Update, context: ContextTypes.DEFAULT_TY
             tier_icon = "🟢"
         elif req.get("has_totp", False):
             tier_icon = "🟡"
-        rows.append([(f"{tier_icon} {req.get('email', '')} (${req.get('amount', 0):.2f})", f"pending_detail:{req['user_id']}:{req.get('email', '')}")])
+        
+        # Get user info
+        user_name = req.get("user_name", "غير معروف")
+        user_username = req.get("user_username", "لا يوجد")
+        display_name = f"{user_name} (@{user_username})" if user_username != "لا يوجد" else user_name
+        
+        rows.append([(f"{tier_icon} {req.get('email', '')} - {display_name[:15]}", f"pending_detail:{req['user_id']}:{req.get('email', '')}")])
     rows.append([("🔙 الطلبات", "approval_requests")])
     
     await query.edit_message_text(
@@ -1448,7 +1418,7 @@ async def view_pending_requests(update: Update, context: ContextTypes.DEFAULT_TY
         reply_markup=kb(*rows)
     )
 
-# ==================== PENDING DETAIL ====================
+# ==================== PENDING DETAIL (WITH SELLER INFO) ====================
 async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
@@ -1472,7 +1442,13 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tier_icon = "🟢" if request.get("has_app_pass", False) else "🟡" if request.get("has_totp", False) else "🔵"
     tier_text = "مكتمل" if request.get("has_app_pass", False) else "مع رمز المصادقة" if request.get("has_totp", False) else "باسورد فقط"
     
+    # Get user info
+    user_name = request.get("user_name", "غير معروف")
+    user_username = request.get("user_username", "لا يوجد")
+    
     msg = f"📋 *تفاصيل الطلب*\n\n"
+    msg += f"👤 *البائع:* {user_name}\n"
+    msg += f"🆔 *اليوزر:* @{user_username}\n"
     msg += f"📧 *الإيميل:* `{request.get('email', '')}`\n"
     msg += f"🔑 *الباسورد:* `{request.get('password', '')}`\n"
     if request.get("has_totp", False):
@@ -1505,6 +1481,82 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=kb(*buttons)
     )
+
+# ==================== COMPLETE APPROVAL ====================
+async def complete_approval(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: int, email: str, approved_request: dict):
+    """Complete the approval process"""
+    user_data = get_user(uid)
+    config = load_json(DATA_DIR / "config.json")
+    default_price = float(config.get("default_price", 5.0))
+    price = float(approved_request.get("amount", default_price))
+    
+    # Generate TOTP code if TOTP exists
+    totp_code = ""
+    if approved_request.get("has_totp", False) and approved_request.get("totp", ""):
+        try:
+            totp = pyotp.TOTP(approved_request.get("totp", ""))
+            totp_code = totp.now()
+        except:
+            totp_code = "غير متاح"
+    
+    approved_request["extracted"] = False
+    approved_request["approved_with_leave"] = False
+    approved_request["leave_confirmed"] = True
+    approved_request["totp_code"] = totp_code  # Store the generated code
+    user_data.setdefault("approved_accounts", []).append(approved_request)
+    user_data["pending_balance"] = max(
+        0.0,
+        float(user_data.get("pending_balance", 0.0)) - price,
+    )
+    user_data["balance"] = float(user_data.get("balance", 0.0)) + price
+    user_data["pending_requests"] = [
+        req for req in user_data.get("pending_requests", []) if req["email"] != email
+    ]
+    
+    user_data["total_approved_emails"] = int(user_data.get("total_approved_emails", 0)) + 1
+    
+    save_user(uid, user_data)
+
+    referred_by = user_data.get("referred_by")
+    if referred_by:
+        referral_bonus = float(config.get("referral_bonus", 0.0))
+        if referral_bonus > 0:
+            referrer_data = get_user(referred_by)
+            referrer_data["referral_earnings"] = float(referrer_data.get("referral_earnings", 0.0)) + referral_bonus
+            referrer_data["total_referrals"] = int(referrer_data.get("total_referrals", 0)) + 1
+            save_user(referred_by, referrer_data)
+            
+            try:
+                await context.bot.send_message(
+                    chat_id=referred_by,
+                    text=f"🎉 *مبروك!*\nحصلت على مكافأة إحالة بقيمة ${referral_bonus:.2f}\n"
+                         f"بسبب إحالة المستخدم {uid} الذي أضاف حساباً جديداً.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except:
+                pass
+    
+    # Send confirmation to user with TOTP code if available
+    user_message = f"✅ *تم قبول طلبك!*\n\n"
+    user_message += f"📧 الإيميل: `{email}`\n"
+    if totp_code:
+        user_message += f"🔢 *كود المصادقة:* `{totp_code}`\n"
+    user_message += f"💰 تم إضافة *${price:.2f}* إلى رصيدك."
+    
+    try:
+        await context.bot.send_message(
+            chat_id=uid,
+            text=user_message,
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except:
+        pass
+
+    # Clear approval data
+    context.user_data.pop("approval_uid", None)
+    context.user_data.pop("approval_email", None)
+    context.user_data.pop("approval_data", None)
+    context.user_data.pop("approval_step", None)
 
 # ==================== APPROVE REQUEST (WITH TOTP AND APP PASS PROMPTS) ====================
 async def approve_request_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1644,11 +1696,21 @@ async def approve_with_leave(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # Complete approval with leave
     price = float(approved_request.get("amount", default_price))
     
+    # Generate TOTP code if TOTP exists
+    totp_code = ""
+    if approved_request.get("has_totp", False) and approved_request.get("totp", ""):
+        try:
+            totp = pyotp.TOTP(approved_request.get("totp", ""))
+            totp_code = totp.now()
+        except:
+            totp_code = "غير متاح"
+    
     approved_request["extracted"] = False
     approved_request["leave_confirmed"] = False
     approved_request["leave_sent"] = True
     approved_request["approved_with_leave"] = True
     approved_request["approval_time"] = datetime.now(timezone.utc).isoformat()
+    approved_request["totp_code"] = totp_code
     
     user_data.setdefault("approved_accounts", []).append(approved_request)
     
@@ -1667,16 +1729,21 @@ async def approve_with_leave(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     await send_leave_video_to_user(context, uid, email)
     
+    # Send confirmation with TOTP code if available
+    user_message = f"✅ *تم قبول طلبك مع فيديو المغادرة!*\n\n"
+    user_message += f"📧 الإيميل: `{email}`\n"
+    if totp_code:
+        user_message += f"🔢 *كود المصادقة:* `{totp_code}`\n"
+    user_message += f"💰 المبلغ المعلق: *${price:.2f}*\n\n"
+    user_message += f"⏰ *سيتم إضافة المبلغ إلى رصيدك تلقائياً بعد 24 ساعة.*\n\n"
+    user_message += f"📹 تم إرسال فيديو المغادرة إليك.\n"
+    user_message += f"⚠️ قم بمغادرة الحساب لتجنب أي تأخير.\n\n"
+    user_message += f"_ستتلقى إشعاراً عند إضافة المبلغ إلى رصيدك_"
+    
     try:
         await context.bot.send_message(
             chat_id=uid,
-            text=f"✅ *تم قبول طلبك مع فيديو المغادرة!*\n\n"
-                 f"📧 الإيميل: `{email}`\n"
-                 f"💰 المبلغ المعلق: *${price:.2f}*\n\n"
-                 f"⏰ *سيتم إضافة المبلغ إلى رصيدك تلقائياً بعد 24 ساعة.*\n\n"
-                 f"📹 تم إرسال فيديو المغادرة إليك.\n"
-                 f"⚠️ قم بمغادرة الحساب لتجنب أي تأخير.\n\n"
-                 f"_ستتلقى إشعاراً عند إضافة المبلغ إلى رصيدك_",
+            text=user_message,
             parse_mode=ParseMode.MARKDOWN
         )
     except:
@@ -1752,6 +1819,7 @@ async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TY
     
     user_data["pending_requests"] = [req for req in pending_requests if req.get("email") != email]
     
+    # Keep user info in rejected request
     request["reject_reason"] = reason_type
     user_data.setdefault("rejected_requests", []).append(request)
     
@@ -1889,7 +1957,7 @@ async def handle_reject_reason_text(update: Update, context: ContextTypes.DEFAUL
         reply_markup=kb([("🔙 الطلبات المنتظرة", "view_pending")])
     )
 
-# ==================== VIEW APPROVED REQUESTS ====================
+# ==================== VIEW APPROVED REQUESTS (WITH SELLER INFO AND TOTP CODE) ====================
 async def view_approved_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
@@ -1916,8 +1984,14 @@ async def view_approved_requests(update: Update, context: ContextTypes.DEFAULT_T
     rows = []
     for acc in approved[:20]:
         tier_icon = "🟢" if acc.get("has_app_pass", False) else "🟡" if acc.get("has_totp", False) else "🔵"
-        email_display = acc.get('email', '')[:20] + "..." if len(acc.get('email', '')) > 20 else acc.get('email', '')
-        rows.append([(f"{tier_icon} {email_display} (${acc.get('amount', 0):.2f})", f"approved_detail:{acc['user_id']}:{acc.get('email', '')}:{acc.get('index', 0)}")])
+        
+        # Get user info
+        user_name = acc.get("user_name", "غير معروف")
+        user_username = acc.get("user_username", "لا يوجد")
+        display_name = f"{user_name} (@{user_username})" if user_username != "لا يوجد" else user_name
+        
+        email_display = acc.get('email', '')[:15] + "..." if len(acc.get('email', '')) > 15 else acc.get('email', '')
+        rows.append([(f"{tier_icon} {email_display} - {display_name[:12]} (${acc.get('amount', 0):.2f})", f"approved_detail:{acc['user_id']}:{acc.get('email', '')}:{acc.get('index', 0)}")])
     rows.append([("🔙 الطلبات", "approval_requests")])
     
     await query.edit_message_text(
@@ -1928,7 +2002,7 @@ async def view_approved_requests(update: Update, context: ContextTypes.DEFAULT_T
         reply_markup=kb(*rows)
     )
 
-# ==================== APPROVED DETAIL ====================
+# ==================== APPROVED DETAIL (WITH SELLER INFO AND TOTP CODE) ====================
 async def approved_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
@@ -1955,11 +2029,28 @@ async def approved_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tier_icon = "🟢" if account.get("has_app_pass", False) else "🟡" if account.get("has_totp", False) else "🔵"
     tier_text = "مكتمل" if account.get("has_app_pass", False) else "مع رمز المصادقة" if account.get("has_totp", False) else "باسورد فقط"
     
+    # Get user info
+    user_name = account.get("user_name", "غير معروف")
+    user_username = account.get("user_username", "لا يوجد")
+    
     msg = f"📋 *تفاصيل الحساب المقبول*\n\n"
+    msg += f"👤 *البائع:* {user_name}\n"
+    msg += f"🆔 *اليوزر:* @{user_username}\n"
     msg += f"📧 *الإيميل:* `{account.get('email', '')}`\n"
     msg += f"🔑 *الباسورد:* `{account.get('password', '')}`\n"
     if account.get("has_totp", False):
         msg += f"🔐 *رمز المصادقة:* `{account.get('totp', '')}`\n"
+        # Show generated TOTP code
+        totp_code = account.get("totp_code", "")
+        if totp_code:
+            msg += f"🔢 *كود المصادقة (الحالي):* `{totp_code}`\n"
+        else:
+            # Generate fresh code if not stored
+            try:
+                totp = pyotp.TOTP(account.get("totp", ""))
+                msg += f"🔢 *كود المصادقة (الحالي):* `{totp.now()}`\n"
+            except:
+                pass
     else:
         msg += f"🔐 *رمز المصادقة:* ❌ غير مرسل\n"
     if account.get("has_app_pass", False):
@@ -2095,7 +2186,7 @@ async def handle_deduct_points_input(update: Update, context: ContextTypes.DEFAU
     except ValueError:
         await update.message.reply_text("⚠️ أرسل رقماً صحيحاً (مثال: 5.00)")
 
-# ==================== VIEW REJECTED REQUESTS ====================
+# ==================== VIEW REJECTED REQUESTS (WITH SELLER INFO) ====================
 async def view_rejected_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
@@ -2130,8 +2221,14 @@ async def view_rejected_requests(update: Update, context: ContextTypes.DEFAULT_T
             "other": "📝"
         }
         icon = reason_map.get(reason, "❌")
-        email_display = rej.get('email', '')[:20] + "..." if len(rej.get('email', '')) > 20 else rej.get('email', '')
-        rows.append([(f"{icon} {email_display}", f"rejected_detail:{rej['user_id']}:{rej.get('email', '')}:{rej.get('index', 0)}")])
+        
+        # Get user info
+        user_name = rej.get("user_name", "غير معروف")
+        user_username = rej.get("user_username", "لا يوجد")
+        display_name = f"{user_name} (@{user_username})" if user_username != "لا يوجد" else user_name
+        
+        email_display = rej.get('email', '')[:15] + "..." if len(rej.get('email', '')) > 15 else rej.get('email', '')
+        rows.append([(f"{icon} {email_display} - {display_name[:12]}", f"rejected_detail:{rej['user_id']}:{rej.get('email', '')}:{rej.get('index', 0)}")])
     rows.append([("🔙 الطلبات", "approval_requests")])
     
     await query.edit_message_text(
@@ -2142,7 +2239,7 @@ async def view_rejected_requests(update: Update, context: ContextTypes.DEFAULT_T
         reply_markup=kb(*rows)
     )
 
-# ==================== REJECTED DETAIL ====================
+# ==================== REJECTED DETAIL (WITH SELLER INFO) ====================
 async def rejected_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
@@ -2180,7 +2277,13 @@ async def rejected_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tier_icon = "🟢" if request.get("has_app_pass", False) else "🟡" if request.get("has_totp", False) else "🔵"
     tier_text = "مكتمل" if request.get("has_app_pass", False) else "مع رمز المصادقة" if request.get("has_totp", False) else "باسورد فقط"
     
+    # Get user info
+    user_name = request.get("user_name", "غير معروف")
+    user_username = request.get("user_username", "لا يوجد")
+    
     msg = f"📋 *تفاصيل الطلب المرفوض*\n\n"
+    msg += f"👤 *البائع:* {user_name}\n"
+    msg += f"🆔 *اليوزر:* @{user_username}\n"
     msg += f"📧 *الإيميل:* `{request.get('email', '')}`\n"
     msg += f"🔑 *الباسورد:* `{request.get('password', '')}`\n"
     if request.get("has_totp", False):
@@ -2297,6 +2400,177 @@ async def handle_give_points_input(update: Update, context: ContextTypes.DEFAULT
     except ValueError:
         await update.message.reply_text("⚠️ أرسل رقماً صحيحاً (مثال: 2.50)")
 
+# ==================== POINTS MANAGEMENT (BY ID OR USERNAME) ====================
+async def points_management(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    await query.edit_message_text(
+        "💰 *إدارة النقاط*\n\n"
+        "اختر الإجراء:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([
+            [("➕ منح نقاط", "give_points_by_id")],
+            [("➖ خصم نقاط", "deduct_points_by_id")],
+            [("🔙 إعدادات المالك", "owner_panel")]
+        ])
+    )
+
+async def give_points_by_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    await query.edit_message_text(
+        "➕ *منح نقاط لمستخدم*\n\n"
+        "أرسل معرف المستخدم (ID) أو اليوزر (@username) ثم المبلغ:\n"
+        "📌 مثال: `123456789 5.00`\n"
+        "📌 مثال: `@user 10.00`\n\n"
+        "_أو أرسل 'إلغاء' للإلغاء_",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([("🔙 إلغاء", "points_management")])
+    )
+    context.user_data["step"] = "give_points_by_id_input"
+
+async def deduct_points_by_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    await query.edit_message_text(
+        "➖ *خصم نقاط من مستخدم*\n\n"
+        "أرسل معرف المستخدم (ID) أو اليوزر (@username) ثم المبلغ:\n"
+        "📌 مثال: `123456789 5.00`\n"
+        "📌 مثال: `@user 10.00`\n\n"
+        "_أو أرسل 'إلغاء' للإلغاء_",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb([("🔙 إلغاء", "points_management")])
+    )
+    context.user_data["step"] = "deduct_points_by_id_input"
+
+async def handle_points_by_id_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    
+    if text.lower() == "الغاء":
+        context.user_data.pop("step", None)
+        await update.message.reply_text(
+            "❌ تم الإلغاء.",
+            reply_markup=kb([("🔙 إدارة النقاط", "points_management")])
+        )
+        return
+    
+    # Parse input: [user_id_or_username] [amount]
+    parts = text.split()
+    if len(parts) != 2:
+        await update.message.reply_text(
+            "⚠️ الصيغة غير صحيحة!\n"
+            "أرسل: `معرف_المستخدم المبلغ`\n"
+            "مثال: `123456789 5.00`"
+        )
+        return
+    
+    user_input = parts[0]
+    try:
+        amount = float(parts[1])
+        if amount <= 0:
+            await update.message.reply_text("⚠️ المبلغ يجب أن يكون أكبر من 0!")
+            return
+    except ValueError:
+        await update.message.reply_text("⚠️ المبلغ غير صحيح! أرسل رقم فقط.")
+        return
+    
+    # Find user by ID or username
+    target_user_id = None
+    
+    # Try as numeric ID
+    if user_input.lstrip("-").isdigit():
+        target_user_id = int(user_input)
+    else:
+        # Try as username
+        username = user_input
+        if username.startswith("@"):
+            username = username[1:]
+        users = load_json(USERS_DB)
+        for uid, u_data in users.items():
+            if u_data.get("user_username", "").lower() == username.lower():
+                target_user_id = int(uid)
+                break
+    
+    if not target_user_id:
+        await update.message.reply_text(
+            f"⚠️ لم يتم العثور على مستخدم بـ {user_input}!\n"
+            f"تأكد من المعرف أو اليوزر."
+        )
+        return
+    
+    step = context.user_data.get("step")
+    
+    if step == "give_points_by_id_input":
+        # Give points
+        user_data = get_user(target_user_id)
+        user_data["balance"] = float(user_data.get("balance", 0.0)) + amount
+        save_user(target_user_id, user_data)
+        
+        try:
+            await context.bot.send_message(
+                chat_id=target_user_id,
+                text=f"💰 *تم إضافة نقاط إلى رصيدك!*\n\n"
+                     f"💰 المبلغ المضاف: *+${amount:.2f}*\n"
+                     f"💰 الرصيد الجديد: *${user_data['balance']:.2f}*\n\n"
+                     f"_تم إضافة هذه النقاط من قبل المالك._",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except:
+            pass
+        
+        await update.message.reply_text(
+            f"✅ تم إضافة ${amount:.2f} إلى رصيد المستخدم `{target_user_id}` بنجاح!\n"
+            f"💰 الرصيد الجديد: ${user_data['balance']:.2f}",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=kb([("🔙 إدارة النقاط", "points_management")])
+        )
+        
+    elif step == "deduct_points_by_id_input":
+        # Deduct points
+        user_data = get_user(target_user_id)
+        current_balance = float(user_data.get("balance", 0.0))
+        
+        if current_balance < amount:
+            await update.message.reply_text(
+                f"⚠️ رصيد المستخدم غير كافٍ!\n"
+                f"💰 الرصيد الحالي: ${current_balance:.2f}\n"
+                f"💰 المبلغ المطلوب خصمه: ${amount:.2f}"
+            )
+            return
+        
+        user_data["balance"] = current_balance - amount
+        save_user(target_user_id, user_data)
+        
+        try:
+            await context.bot.send_message(
+                chat_id=target_user_id,
+                text=f"💰 *تم خصم نقاط من رصيدك!*\n\n"
+                     f"💰 المبلغ المخصوم: *-${amount:.2f}*\n"
+                     f"💰 الرصيد الجديد: *${user_data['balance']:.2f}*\n\n"
+                     f"_تم خصم هذه النقاط من قبل المالك._",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except:
+            pass
+        
+        await update.message.reply_text(
+            f"✅ تم خصم ${amount:.2f} من رصيد المستخدم `{target_user_id}` بنجاح!\n"
+            f"💰 الرصيد الجديد: ${user_data['balance']:.2f}",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=kb([("🔙 إدارة النقاط", "points_management")])
+        )
+    
+    context.user_data.pop("step", None)
+
 # ==================== HANDLE APPROVAL TOTP ====================
 async def handle_approval_totp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -2342,7 +2616,7 @@ async def handle_approval_totp(update: Update, context: ContextTypes.DEFAULT_TYP
         
         await update.message.reply_text(
             f"✅ رمز المصادقة صالح!\n"
-            f"🔢 الكود الحالي: `{code}`\n\n"
+            f"🔢 *كود المصادقة الحالي:* `{code}`\n\n"
             f"🗝 *الآن أرسل كلمة مرور التطبيق:*\n\n"
             f"_يمكنك كتابة 'تخطي' لتخطي هذه الخطوة_",
             parse_mode=ParseMode.MARKDOWN,
@@ -2428,11 +2702,21 @@ async def complete_approval_with_leave(update: Update, context: ContextTypes.DEF
     default_price = float(config.get("default_price", 5.0))
     price = float(approved_request.get("amount", default_price))
     
+    # Generate TOTP code if TOTP exists
+    totp_code = ""
+    if approved_request.get("has_totp", False) and approved_request.get("totp", ""):
+        try:
+            totp = pyotp.TOTP(approved_request.get("totp", ""))
+            totp_code = totp.now()
+        except:
+            totp_code = "غير متاح"
+    
     approved_request["extracted"] = False
     approved_request["leave_confirmed"] = False
     approved_request["leave_sent"] = True
     approved_request["approved_with_leave"] = True
     approved_request["approval_time"] = datetime.now(timezone.utc).isoformat()
+    approved_request["totp_code"] = totp_code
     
     user_data.setdefault("approved_accounts", []).append(approved_request)
     
@@ -2451,16 +2735,21 @@ async def complete_approval_with_leave(update: Update, context: ContextTypes.DEF
 
     await send_leave_video_to_user(context, uid, email)
     
+    # Send confirmation with TOTP code if available
+    user_message = f"✅ *تم قبول طلبك مع فيديو المغادرة!*\n\n"
+    user_message += f"📧 الإيميل: `{email}`\n"
+    if totp_code:
+        user_message += f"🔢 *كود المصادقة:* `{totp_code}`\n"
+    user_message += f"💰 المبلغ المعلق: *${price:.2f}*\n\n"
+    user_message += f"⏰ *سيتم إضافة المبلغ إلى رصيدك تلقائياً بعد 24 ساعة.*\n\n"
+    user_message += f"📹 تم إرسال فيديو المغادرة إليك.\n"
+    user_message += f"⚠️ قم بمغادرة الحساب لتجنب أي تأخير.\n\n"
+    user_message += f"_ستتلقى إشعاراً عند إضافة المبلغ إلى رصيدك_"
+    
     try:
         await context.bot.send_message(
             chat_id=uid,
-            text=f"✅ *تم قبول طلبك مع فيديو المغادرة!*\n\n"
-                 f"📧 الإيميل: `{email}`\n"
-                 f"💰 المبلغ المعلق: *${price:.2f}*\n\n"
-                 f"⏰ *سيتم إضافة المبلغ إلى رصيدك تلقائياً بعد 24 ساعة.*\n\n"
-                 f"📹 تم إرسال فيديو المغادرة إليك.\n"
-                 f"⚠️ قم بمغادرة الحساب لتجنب أي تأخير.\n\n"
-                 f"_ستتلقى إشعاراً عند إضافة المبلغ إلى رصيدك_",
+            text=user_message,
             parse_mode=ParseMode.MARKDOWN
         )
     except:
@@ -3433,6 +3722,14 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_give_points_input(update, context)
         return
 
+    if context.user_data.get("step") == "give_points_by_id_input":
+        await handle_points_by_id_input(update, context)
+        return
+
+    if context.user_data.get("step") == "deduct_points_by_id_input":
+        await handle_points_by_id_input(update, context)
+        return
+
     # Handle approval steps (TOTP and App Pass)
     if context.user_data.get("step") == "waiting_totp":
         await handle_approval_totp(update, context)
@@ -3903,6 +4200,12 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await deduct_points(update, context)
     elif data.startswith("give_points:"): 
         await give_points(update, context)
+    elif data == "points_management": 
+        await points_management(update, context)
+    elif data == "give_points_by_id": 
+        await give_points_by_id(update, context)
+    elif data == "deduct_points_by_id": 
+        await deduct_points_by_id(update, context)
     elif data.startswith("approve_request:"): 
         await approve_request_owner(update, context)
     elif data.startswith("approve_with_leave:"): 
@@ -4024,6 +4327,7 @@ async def owner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [("📢 قناة إجبارية", "forced_channel")],
             [("📊 جميع الحسابات المقبولة", "all_accounts_section")],
             [("🔗 نظام الإحالة", "referral_settings")],
+            [("💰 خصم/منح نقاط", "points_management")],
             [("🔙 القائمة الرئيسية", "main_menu")]
         ])
     )
