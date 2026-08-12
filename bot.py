@@ -168,6 +168,11 @@ def kb_single(button_text: str, callback_data: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton(button_text, callback_data=callback_data)]])
 
 
+def tg_html_escape(value: Any) -> str:
+    """Escape dynamic values before inserting them into Telegram HTML text."""
+    return html.escape(str(value), quote=False)
+
+
 # ==================== SESSION ====================
 @dataclass
 class Session:
@@ -1135,29 +1140,30 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     tier_icon = "🟢" if request.get("has_app_pass", False) else "🟡" if request.get("has_totp", False) else "🔵"
     tier_text = "مكتمل" if request.get("has_app_pass", False) else "مع رمز المصادقة" if request.get("has_totp", False) else "باسورد فقط"
-    user_name = request.get("user_name", "غير معروف")
-    user_username = request.get("user_username", "لا يوجد")
-    
-    msg = f"📋 *تفاصيل الطلب*\n\n"
-    msg += f"👤 *البائع:* {user_name}\n"
-    msg += f"🆔 *اليوزر:* @{user_username}\n"
-    msg += f"📧 *الإيميل:* `{email}`\n"
-    msg += f"🔑 *الباسورد:* `{request.get('password', '')}`\n"
+    display_email = tg_html_escape(email)
+    user_name = tg_html_escape(request.get("user_name", "غير معروف"))
+    user_username = tg_html_escape(request.get("user_username", "لا يوجد"))
+
+    msg = "📋 <b>تفاصيل الطلب</b>\n\n"
+    msg += f"👤 <b>البائع:</b> {user_name}\n"
+    msg += f"🆔 <b>اليوزر:</b> @{user_username}\n"
+    msg += f"📧 <b>الإيميل:</b> <code>{display_email}</code>\n"
+    msg += f"🔑 <b>الباسورد:</b> <code>{tg_html_escape(request.get('password', ''))}</code>\n"
     
     if request.get("has_totp", False):
-        msg += f"🔐 *رمز المصادقة:* `{request.get('totp', '')}`\n"
+        msg += f"🔐 <b>رمز المصادقة:</b> <code>{tg_html_escape(request.get('totp', ''))}</code>\n"
     else:
-        msg += f"🔐 *رمز المصادقة:* ❌ غير مرسل\n"
+        msg += "🔐 <b>رمز المصادقة:</b> ❌ غير مرسل\n"
     
     if request.get("has_app_pass", False):
-        formatted_pass = format_app_password(request.get("app_pass", ""))
-        msg += f"🗝 *كلمة مرور التطبيق:* `{formatted_pass}`\n"
+        formatted_pass = tg_html_escape(format_app_password(request.get("app_pass", "")))
+        msg += f"🗝 <b>كلمة مرور التطبيق:</b> <code>{formatted_pass}</code>\n"
     else:
-        msg += f"🗝 *كلمة مرور التطبيق:* ❌ غير مرسل\n"
+        msg += "🗝 <b>كلمة مرور التطبيق:</b> ❌ غير مرسل\n"
     
-    msg += f"📦 *المستوى:* {tier_icon} {tier_text}\n"
-    msg += f"👤 *المستخدم:* `{uid}`\n"
-    msg += f"💰 *السعر:* ${request.get('amount', 0):.2f}\n"
+    msg += f"📦 <b>المستوى:</b> {tier_icon} {tier_text}\n"
+    msg += f"👤 <b>المستخدم:</b> <code>{uid}</code>\n"
+    msg += f"💰 <b>السعر:</b> ${request.get('amount', 0):.2f}\n"
     
     config = load_json(DATA_DIR / "config.json")
     has_leave_video = config.get("video_leave") and Path(config.get("video_leave", "")).exists()
@@ -1169,7 +1175,7 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons.append(("❌ رفض", f"reject_request:{uid}:{index}"))
     buttons.append(("🔙 الطلبات المنتظرة", "view_pending"))
     
-    await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
+    await query.edit_message_text(msg, parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
 
 
 # ==================== COMPLETE APPROVAL ====================
@@ -1230,16 +1236,16 @@ async def complete_approval(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
     # Send confirmation to user
     email = approved_request.get("email", "")
-    user_message = f"✅ *تم قبول طلبك!*\n\n📧 الإيميل: `{email}`\n"
+    user_message = f"✅ <b>تم قبول طلبك!</b>\n\n📧 الإيميل: <code>{tg_html_escape(email)}</code>\n"
     if totp_code:
-        user_message += f"🔢 *كود المصادقة:* `{totp_code}`\n"
+        user_message += f"🔢 <b>كود المصادقة:</b> <code>{tg_html_escape(totp_code)}</code>\n"
     if with_leave:
-        user_message += f"💰 المبلغ المعلق: *${price:.2f}*\n\n⏰ *سيتم إضافة المبلغ إلى رصيدك تلقائياً بعد 24 ساعة.*\n\n📹 تم إرسال فيديو المغادرة إليك.\n⚠️ قم بمغادرة الحساب لتجنب أي تأخير."
+        user_message += f"💰 المبلغ المعلق: <b>${price:.2f}</b>\n\n⏰ <b>سيتم إضافة المبلغ إلى رصيدك تلقائياً بعد 24 ساعة.</b>\n\n📹 تم إرسال فيديو المغادرة إليك.\n⚠️ قم بمغادرة الحساب لتجنب أي تأخير."
     else:
-        user_message += f"💰 تم إضافة *${price:.2f}* إلى رصيدك."
+        user_message += f"💰 تم إضافة <b>${price:.2f}</b> إلى رصيدك."
 
     try:
-        await context.bot.send_message(chat_id=uid, text=user_message, parse_mode=ParseMode.MARKDOWN)
+        await context.bot.send_message(chat_id=uid, text=user_message, parse_mode=ParseMode.HTML)
     except:
         pass
 
@@ -1275,6 +1281,7 @@ async def approve_request_owner(update: Update, context: ContextTypes.DEFAULT_TY
     
     approved_request = pending[index]
     email = approved_request.get("email", "")
+    display_email = tg_html_escape(email)
     
     # Check if TOTP is missing
     if not approved_request.get("has_totp", False):
@@ -1284,8 +1291,8 @@ async def approve_request_owner(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data["approval_data"] = approved_request
         context.user_data["approval_with_leave"] = False
         await query.edit_message_text(
-            f"🔐 *طلب رمز المصادقة*\n\n📧 الإيميل: `{email}`\n\n⚠️ هذا الحساب ليس لديه رمز مصادقة.\n📌 أرسل رمز المصادقة (32 حرفاً):\nالصيغة: XXXX XXXX XXXX XXXX XXXX XXXX XXXX XXXX\n\n_يمكنك كتابة 'تخطي' لتخطي هذه الخطوة_",
-            parse_mode=ParseMode.MARKDOWN, 
+            f"🔐 <b>طلب رمز المصادقة</b>\n\n📧 الإيميل: <code>{display_email}</code>\n\n⚠️ هذا الحساب ليس لديه رمز مصادقة.\n📌 أرسل رمز المصادقة (32 حرفاً):\nالصيغة: XXXX XXXX XXXX XXXX XXXX XXXX XXXX XXXX\n\n<i>يمكنك كتابة 'تخطي' لتخطي هذه الخطوة</i>",
+            parse_mode=ParseMode.HTML,
             reply_markup=kb_vertical([
                 ("🔙 إلغاء", f"pending_detail:{uid}:{index}")
             ])
@@ -1300,8 +1307,8 @@ async def approve_request_owner(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data["approval_data"] = approved_request
         context.user_data["approval_with_leave"] = False
         await query.edit_message_text(
-            f"🗝 *طلب كلمة مرور التطبيق*\n\n📧 الإيميل: `{email}`\n\n⚠️ هذا الحساب ليس لديه كلمة مرور تطبيق.\n📌 أرسل كلمة مرور التطبيق (16 حرفاً):\nالصيغة: XXXX XXXX XXXX XXXX\n\n_يمكنك كتابة 'تخطي' لتخطي هذه الخطوة_",
-            parse_mode=ParseMode.MARKDOWN, 
+            f"🗝 <b>طلب كلمة مرور التطبيق</b>\n\n📧 الإيميل: <code>{display_email}</code>\n\n⚠️ هذا الحساب ليس لديه كلمة مرور تطبيق.\n📌 أرسل كلمة مرور التطبيق (16 حرفاً):\nالصيغة: XXXX XXXX XXXX XXXX\n\n<i>يمكنك كتابة 'تخطي' لتخطي هذه الخطوة</i>",
+            parse_mode=ParseMode.HTML,
             reply_markup=kb_vertical([
                 ("🔙 إلغاء", f"pending_detail:{uid}:{index}")
             ])
@@ -1310,8 +1317,11 @@ async def approve_request_owner(update: Update, context: ContextTypes.DEFAULT_TY
     
     # Complete approval
     await complete_approval(update, context, uid, index, approved_request, False)
-    await query.edit_message_text(f"✅ تم قبول الحساب `{email}` بنجاح!\n💰 تم نقل ${approved_request.get('amount', 0):.2f} من قيد الانتظار إلى الرصيد المملوك.",
-                                  parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
+    await query.edit_message_text(
+        f"✅ تم قبول الحساب <code>{display_email}</code> بنجاح!\n💰 تم نقل ${approved_request.get('amount', 0):.2f} من قيد الانتظار إلى الرصيد المملوك.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"),
+    )
 
 
 # ==================== APPROVE WITH LEAVE ====================
@@ -1333,6 +1343,7 @@ async def approve_with_leave(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     approved_request = pending[index]
     email = approved_request.get("email", "")
+    display_email = tg_html_escape(email)
     
     # Check if TOTP is missing
     if not approved_request.get("has_totp", False):
@@ -1342,8 +1353,8 @@ async def approve_with_leave(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data["approval_data"] = approved_request
         context.user_data["approval_with_leave"] = True
         await query.edit_message_text(
-            f"🔐 *طلب رمز المصادقة*\n\n📧 الإيميل: `{email}`\n\n⚠️ هذا الحساب ليس لديه رمز مصادقة.\n📌 أرسل رمز المصادقة (32 حرفاً):\nالصيغة: XXXX XXXX XXXX XXXX XXXX XXXX XXXX XXXX\n\n_يمكنك كتابة 'تخطي' لتخطي هذه الخطوة_",
-            parse_mode=ParseMode.MARKDOWN, 
+            f"🔐 <b>طلب رمز المصادقة</b>\n\n📧 الإيميل: <code>{display_email}</code>\n\n⚠️ هذا الحساب ليس لديه رمز مصادقة.\n📌 أرسل رمز المصادقة (32 حرفاً):\nالصيغة: XXXX XXXX XXXX XXXX XXXX XXXX XXXX XXXX\n\n<i>يمكنك كتابة 'تخطي' لتخطي هذه الخطوة</i>",
+            parse_mode=ParseMode.HTML,
             reply_markup=kb_vertical([
                 ("🔙 إلغاء", f"pending_detail:{uid}:{index}")
             ])
@@ -1358,8 +1369,8 @@ async def approve_with_leave(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data["approval_data"] = approved_request
         context.user_data["approval_with_leave"] = True
         await query.edit_message_text(
-            f"🗝 *طلب كلمة مرور التطبيق*\n\n📧 الإيميل: `{email}`\n\n⚠️ هذا الحساب ليس لديه كلمة مرور تطبيق.\n📌 أرسل كلمة مرور التطبيق (16 حرفاً):\nالصيغة: XXXX XXXX XXXX XXXX\n\n_يمكنك كتابة 'تخطي' لتخطي هذه الخطوة_",
-            parse_mode=ParseMode.MARKDOWN, 
+            f"🗝 <b>طلب كلمة مرور التطبيق</b>\n\n📧 الإيميل: <code>{display_email}</code>\n\n⚠️ هذا الحساب ليس لديه كلمة مرور تطبيق.\n📌 أرسل كلمة مرور التطبيق (16 حرفاً):\nالصيغة: XXXX XXXX XXXX XXXX\n\n<i>يمكنك كتابة 'تخطي' لتخطي هذه الخطوة</i>",
+            parse_mode=ParseMode.HTML,
             reply_markup=kb_vertical([
                 ("🔙 إلغاء", f"pending_detail:{uid}:{index}")
             ])
@@ -1368,8 +1379,11 @@ async def approve_with_leave(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     # Complete approval with leave
     await complete_approval(update, context, uid, index, approved_request, True)
-    await query.edit_message_text(f"✅ تم قبول الحساب `{email}` مع فيديو المغادرة!\n💰 المبلغ ${approved_request.get('amount', 0):.2f} معلق لمدة 24 ساعة.\n⏰ سيتم تحويله تلقائياً بعد 24 ساعة.",
-                                  parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
+    await query.edit_message_text(
+        f"✅ تم قبول الحساب <code>{display_email}</code> مع فيديو المغادرة!\n💰 المبلغ ${approved_request.get('amount', 0):.2f} معلق لمدة 24 ساعة.\n⏰ سيتم تحويله تلقائياً بعد 24 ساعة.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"),
+    )
 
 
 # ==================== REJECT REQUEST ====================
@@ -1389,6 +1403,7 @@ async def reject_request_reason(update: Update, context: ContextTypes.DEFAULT_TY
         return
     
     email = pending[index].get("email", "")
+    display_email = tg_html_escape(email)
     context.user_data["reject_uid"] = uid
     context.user_data["reject_index"] = index
     
@@ -1400,8 +1415,11 @@ async def reject_request_reason(update: Update, context: ContextTypes.DEFAULT_TY
         ("📝 خطأ آخر (اكتب السبب)", f"reject_reason:other:{uid}:{index}"),
         ("🔙 التفاصيل", f"pending_detail:{uid}:{index}")
     ]
-    await query.edit_message_text(f"❌ *رفض الطلب*\n\n📧 الإيميل: `{email}`\n\nاختر سبب الرفض:",
-                                  parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
+    await query.edit_message_text(
+        f"❌ <b>رفض الطلب</b>\n\n📧 الإيميل: <code>{display_email}</code>\n\nاختر سبب الرفض:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_vertical(buttons),
+    )
 
 
 async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1422,6 +1440,7 @@ async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TY
     
     request = pending[index]
     email = request.get("email", "")
+    display_email = tg_html_escape(email)
     pending.pop(index)
     request["reject_reason"] = reason_type
     user_data.setdefault("rejected_requests", []).append(request)
@@ -1455,8 +1474,11 @@ async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data["reject_uid"] = uid
         context.user_data["reject_index"] = index
         context.user_data["reject_reason"] = "other"
-        await query.edit_message_text(f"📝 *اكتب سبب الرفض*\n\nأرسل رسالة توضح سبب رفض طلب `{email}`:",
-                                      parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 إلغاء", f"pending_detail:{uid}:{index}"))
+        await query.edit_message_text(
+            f"📝 <b>اكتب سبب الرفض</b>\n\nأرسل رسالة توضح سبب رفض طلب <code>{display_email}</code>:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_single("🔙 إلغاء", f"pending_detail:{uid}:{index}"),
+        )
         context.user_data["step"] = "reject_reason_text"
         return
     
@@ -1466,8 +1488,11 @@ async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TY
                                        parse_mode=ParseMode.MARKDOWN)
     except:
         pass
-    await query.edit_message_text(f"✅ تم رفض الطلب `{email}` وإرسال السبب للمستخدم.", parse_mode=ParseMode.MARKDOWN,
-                                  reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
+    await query.edit_message_text(
+        f"✅ تم رفض الطلب <code>{display_email}</code> وإرسال السبب للمستخدم.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"),
+    )
 
 
 async def handle_reject_reason_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
