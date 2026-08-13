@@ -7,4 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-CMD ["python", "bot.py"]
+# Keep the deployment entrypoint explicit so Railway cannot start the
+# retired PostgreSQL-based bot_app.py process from an older image.
+ENV PYTHONUNBUFFERED=1
+CMD ["python", "/app/bot.py"]
