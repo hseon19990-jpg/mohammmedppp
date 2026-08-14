@@ -15,7 +15,7 @@ import shutil
 import secrets
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Optional, List, Any, Union
 
@@ -188,6 +188,7 @@ class Session:
 
 SESSIONS: Dict[int, Session] = {}
 PENDING_PURCHASES: Dict[int, Dict] = {}
+LEAVE_HOLD_SECONDS = 24 * 60 * 60
 
 
 # ==================== PRICING CONFIG ====================
@@ -685,6 +686,7 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "totp": session.totp if session.has_totp else "",
             "app_pass": session.app_pass,
             "amount": final_price,
+            "requested_amount": final_price,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "extracted": False,
             "has_totp": session.has_totp,
@@ -750,6 +752,7 @@ async def submit_tier_1(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "totp": "",
         "app_pass": "",
         "amount": price,
+        "requested_amount": price,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "extracted": False,
         "has_totp": False,
@@ -795,6 +798,7 @@ async def submit_tier_2(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "totp": session.totp,
         "app_pass": "",
         "amount": price,
+        "requested_amount": price,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "extracted": False,
         "has_totp": True,
@@ -856,20 +860,50 @@ async def send_leave_video_reminder(context: ContextTypes.DEFAULT_TYPE, user_id:
             pass
 
 
-async def schedule_leave_check(context: ContextTypes.DEFAULT_TYPE, user_id: int, email: str):
+def parse_iso_datetime(value: Any) -> Optional[datetime]:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+async def schedule_leave_check(
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    email: str,
+    release_at: Optional[str] = None,
+):
     job_name = f"leave_check_{user_id}_{email}"
     current_jobs = context.job_queue.get_jobs_by_name(job_name)
     for job in current_jobs:
         job.schedule_removal()
-    context.job_queue.run_once(callback=check_leave_status, when=86400,
-                               data={"user_id": user_id, "email": email}, name=job_name)
-    logger.info(f"Scheduled auto-transfer for user {user_id}, email {email} in 24 hours")
+    release_time = parse_iso_datetime(release_at)
+    if release_time is None:
+        release_time = datetime.now(timezone.utc) + timedelta(seconds=LEAVE_HOLD_SECONDS)
+        release_at = release_time.isoformat()
+    delay = max(0, (release_time - datetime.now(timezone.utc)).total_seconds())
+    context.job_queue.run_once(
+        callback=check_leave_status,
+        when=delay,
+        data={"user_id": user_id, "email": email, "release_at": release_at},
+        name=job_name,
+    )
+    logger.info("Scheduled auto-transfer for user %s, email %s in %.0f seconds", user_id, email, delay)
 
 
 async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
     job_data = context.job.data
     user_id = job_data["user_id"]
     email = job_data["email"]
+    release_at = parse_iso_datetime(job_data.get("release_at"))
+    if release_at and release_at > datetime.now(timezone.utc):
+        await schedule_leave_check(context, user_id, email, release_at.isoformat())
+        return
     user_data = get_user(user_id)
     accounts = user_data.get("approved_accounts", [])
     account = next((acc for acc in accounts if acc.get("email") == email), None)
@@ -880,11 +914,15 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"Leave already confirmed for {email}")
         return
     price = float(account.get("amount", 0.0))
-    user_data["hold_balance"] = max(0.0, float(user_data.get("hold_balance", 0.0)) - price)
-    user_data["balance"] = float(user_data.get("balance", 0.0)) + price
+    user_data["hold_balance"] = round(
+        max(0.0, float(user_data.get("hold_balance", 0.0)) - price),
+        2,
+    )
+    user_data["balance"] = round(float(user_data.get("balance", 0.0)) + price, 2)
     account["leave_confirmed"] = True
     account["auto_confirmed"] = True
     account["confirmed_at"] = datetime.now(timezone.utc).isoformat()
+    account["released_amount"] = price
     save_user(user_id, user_data)
     try:
         await context.bot.send_message(chat_id=user_id,
@@ -893,6 +931,52 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Could not send auto-confirmation to user {user_id}: {e}")
     logger.info(f"Auto-confirmed leave for {email}, user {user_id}, amount ${price:.2f}")
+
+
+async def restore_leave_checks(application: Application):
+    """Restore pending 24-hour transfers after a bot restart."""
+    users = load_json(USERS_DB)
+    changed = False
+    now = datetime.now(timezone.utc)
+
+    for user_id, user_data in users.items():
+        for account in user_data.get("approved_accounts", []):
+            if not account.get("approved_with_leave", False):
+                continue
+            if account.get("leave_confirmed", False):
+                continue
+
+            release_at = parse_iso_datetime(account.get("release_at"))
+            if release_at is None:
+                approval_time = parse_iso_datetime(account.get("approval_time"))
+                if approval_time is None:
+                    logger.warning(
+                        "Cannot restore delayed transfer for user %s, email %s: missing approval time",
+                        user_id,
+                        account.get("email", ""),
+                    )
+                    continue
+                release_at = approval_time + timedelta(seconds=LEAVE_HOLD_SECONDS)
+                account["release_at"] = release_at.isoformat()
+                changed = True
+
+            email = account.get("email", "")
+            job_name = f"leave_check_{user_id}_{email}"
+            for job in application.job_queue.get_jobs_by_name(job_name):
+                job.schedule_removal()
+            application.job_queue.run_once(
+                callback=check_leave_status,
+                when=max(0, (release_at - now).total_seconds()),
+                data={
+                    "user_id": int(user_id),
+                    "email": email,
+                    "release_at": release_at.isoformat(),
+                },
+                name=job_name,
+            )
+
+    if changed:
+        save_json(USERS_DB, users)
 
 
 # ==================== OWNER PANEL ====================
@@ -1184,8 +1268,17 @@ async def complete_approval(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     """Complete the approval process"""
     user_data = get_user(uid)
     config = load_json(DATA_DIR / "config.json")
-    default_price = float(config.get("default_price", 5.0))
-    price = float(approved_request.get("amount", default_price))
+    requested_amount = approved_request.get(
+        "requested_amount",
+        approved_request.get("amount"),
+    )
+    if requested_amount is None:
+        requested_amount = calculate_account_price(
+            bool(approved_request.get("has_totp", False)),
+            bool(approved_request.get("has_app_pass", False)),
+        )
+    price = round(float(requested_amount), 2)
+    approved_request["amount"] = price
 
     # Generate TOTP code if TOTP exists
     totp_code = ""
@@ -1201,15 +1294,25 @@ async def complete_approval(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     approved_request["leave_confirmed"] = not with_leave
     approved_request["totp_code"] = totp_code
     if with_leave:
-        approved_request["approval_time"] = datetime.now(timezone.utc).isoformat()
+        approval_time = datetime.now(timezone.utc)
+        approved_request["approval_time"] = approval_time.isoformat()
+        approved_request["release_at"] = (
+            approval_time + timedelta(seconds=LEAVE_HOLD_SECONDS)
+        ).isoformat()
 
     user_data.setdefault("approved_accounts", []).append(approved_request)
     user_data["pending_balance"] = max(0.0, float(user_data.get("pending_balance", 0.0)) - price)
 
     if with_leave:
-        user_data["hold_balance"] = float(user_data.get("hold_balance", 0.0)) + price
+        user_data["hold_balance"] = round(
+            float(user_data.get("hold_balance", 0.0)) + price,
+            2,
+        )
     else:
-        user_data["balance"] = float(user_data.get("balance", 0.0)) + price
+        user_data["balance"] = round(
+            float(user_data.get("balance", 0.0)) + price,
+            2,
+        )
 
     pending = user_data.get("pending_requests", [])
     if index < len(pending):
@@ -1252,7 +1355,12 @@ async def complete_approval(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     # Schedule leave check if with_leave
     if with_leave:
         await send_leave_video_to_user(context, uid, email)
-        await schedule_leave_check(context, uid, email)
+        await schedule_leave_check(
+            context,
+            uid,
+            email,
+            approved_request.get("release_at"),
+        )
 
     # Clear approval data
     context.user_data.pop("approval_uid", None)
@@ -1551,9 +1659,6 @@ async def handle_approval_totp(update: Update, context: ContextTypes.DEFAULT_TYP
         # Skip TOTP
         approved_request["totp"] = ""
         approved_request["has_totp"] = False
-        has_totp = False
-        has_app_pass = approved_request.get("has_app_pass", False)
-        approved_request["amount"] = calculate_account_price(has_totp, has_app_pass)
         context.user_data["approval_data"] = approved_request
         
         # Check if we need to ask for app pass
@@ -1585,9 +1690,6 @@ async def handle_approval_totp(update: Update, context: ContextTypes.DEFAULT_TYP
         code = pyotp.TOTP(secret).now()
         approved_request["totp"] = secret
         approved_request["has_totp"] = True
-        has_totp = True
-        has_app_pass = approved_request.get("has_app_pass", False)
-        approved_request["amount"] = calculate_account_price(has_totp, has_app_pass)
         context.user_data["approval_data"] = approved_request
         
         formatted_secret = format_totp_secret(secret)
@@ -1633,9 +1735,6 @@ async def handle_approval_app_pass(update: Update, context: ContextTypes.DEFAULT
     if text.lower() == "تخطي":
         approved_request["app_pass"] = ""
         approved_request["has_app_pass"] = False
-        has_totp = approved_request.get("has_totp", False)
-        has_app_pass = False
-        approved_request["amount"] = calculate_account_price(has_totp, has_app_pass)
         context.user_data["approval_data"] = approved_request
         await update.message.reply_text(f"✅ تم تخطي كلمة مرور التطبيق.\n\n📌 سيتم إكمال الموافقة على الحساب `{email}`",
                                         parse_mode=ParseMode.MARKDOWN)
@@ -1681,9 +1780,6 @@ async def handle_approval_app_pass(update: Update, context: ContextTypes.DEFAULT
     save_user(uid, user_data)
 
     # Recalculate price
-    has_totp = approved_request.get("has_totp", False)
-    has_app_pass = True
-    approved_request["amount"] = calculate_account_price(has_totp, has_app_pass)
     context.user_data["approval_data"] = approved_request
 
     formatted_pass = format_app_password(cleaned)
@@ -3361,7 +3457,12 @@ async def store_list_categories(update: Update, context: ContextTypes.DEFAULT_TY
 
 # ==================== MAIN ====================
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(restore_leave_checks)
+        .build()
+    )
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("debug", debug_command))
     app.add_handler(CommandHandler("owner", owner_command))
