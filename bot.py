@@ -129,6 +129,8 @@ def get_user(user_id: int) -> dict:
         "balance": 0.0,
         "pending_balance": 0.0,
         "hold_balance": 0.0,
+        "total_credited_balance": 0.0,
+        "spent_balance": 0.0,
         "approved_accounts": [],
         "pending_requests": [],
         "rejected_emails": [],
@@ -151,6 +153,65 @@ def save_user(user_id: int, user_data: dict):
 
 def generate_referral_code():
     return secrets.token_hex(4).upper()
+
+
+def resolve_member_id(user_input: str) -> Optional[int]:
+    """Resolve a Telegram ID or username from the persisted users database."""
+    users = load_json(USERS_DB)
+    cleaned_input = user_input.strip()
+    if cleaned_input.lstrip("-").isdigit():
+        candidate = cleaned_input.lstrip("-")
+        return int(cleaned_input) if candidate in users else None
+
+    username = cleaned_input.removeprefix("@").casefold()
+    if not username:
+        return None
+
+    for uid, user_data in users.items():
+        candidates = [user_data.get("user_username"), user_data.get("username")]
+        for collection_name in ("approved_accounts", "pending_requests", "rejected_requests"):
+            for record in user_data.get(collection_name, []):
+                candidates.append(record.get("user_username"))
+        if any(str(candidate or "").removeprefix("@").casefold() == username for candidate in candidates):
+            try:
+                return int(uid)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def member_balance_stats(user_data: dict) -> dict:
+    """Return current, consumed, and total credited balance for a member.
+
+    Older data files do not have a balance ledger, so the consumed amount is
+    reconstructed from approved account values and the available balances.
+    Newer records use the explicit fields maintained by the approval/payment
+    flows.
+    """
+    current = round(float(user_data.get("balance", 0.0) or 0.0), 2)
+    hold = round(float(user_data.get("hold_balance", 0.0) or 0.0), 2)
+    approved_total = sum(
+        float(account.get("amount", 0.0) or 0.0)
+        for account in user_data.get("approved_accounts", [])
+    )
+    referral_earnings = float(user_data.get("referral_earnings", 0.0) or 0.0)
+    recorded_total = float(user_data.get("total_credited_balance", 0.0) or 0.0)
+    total_credited = max(approved_total + referral_earnings, recorded_total, current + hold)
+
+    recorded_spent = user_data.get("spent_balance")
+    if recorded_spent is None:
+        spent = max(0.0, total_credited - current - hold)
+    else:
+        spent = max(0.0, float(recorded_spent or 0.0))
+
+    total_balance = max(total_credited, current + spent + hold)
+    return {
+        "current": current,
+        "spent": round(spent, 2),
+        "hold": hold,
+        "pending": round(float(user_data.get("pending_balance", 0.0) or 0.0), 2),
+        "total": round(total_balance, 2),
+    }
 
 
 # ==================== KEYBOARD HELPERS ====================
@@ -1122,12 +1183,126 @@ async def owner_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def check_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+
+    context.user_data["step"] = "check_member_input"
+    await query.edit_message_text(
+        "🔎 <b>فحص عضو</b>\n\n"
+        "أرسل معرف العضو الرقمي أو اليوزر مع @:\n"
+        "مثال: <code>123456789</code>\n"
+        "مثال: <code>@username</code>\n\n"
+        "أو أرسل «إلغاء» للعودة.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_single("🔙 لوحة المالك", "owner_panel"),
+    )
+
+
+async def handle_member_check_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        return
+
+    text = update.message.text.strip()
+    if text.casefold() in {"إلغاء", "الغاء", "cancel"}:
+        context.user_data.pop("step", None)
+        await update.message.reply_text(
+            "❌ تم إلغاء فحص العضو.",
+            reply_markup=kb_single("🔙 لوحة المالك", "owner_panel"),
+        )
+        return
+
+    member_id = resolve_member_id(text)
+    if member_id is None:
+        await update.message.reply_text(
+            "⚠️ لم يتم العثور على هذا العضو.\n"
+            "أرسل المعرف الرقمي الصحيح أو اليوزر المسجل في البيانات.",
+            reply_markup=kb_single("🔙 لوحة المالك", "owner_panel"),
+        )
+        return
+
+    users = load_json(USERS_DB)
+    user_data = users.get(str(member_id), {})
+    approved = user_data.get("approved_accounts", [])
+    pending = user_data.get("pending_requests", [])
+    rejected = user_data.get("rejected_requests", [])
+    submitted_accounts = approved + pending + rejected
+    submitted_count = len(submitted_accounts)
+
+    password_only = sum(
+        1 for account in submitted_accounts
+        if not account.get("has_totp", False) and not account.get("has_app_pass", False)
+    )
+    totp_only = sum(
+        1 for account in submitted_accounts
+        if account.get("has_totp", False) and not account.get("has_app_pass", False)
+    )
+    app_password = sum(
+        1 for account in submitted_accounts
+        if account.get("has_totp", False) and account.get("has_app_pass", False)
+    )
+    balances = member_balance_stats(user_data)
+
+    display_username = next(
+        (
+            record.get("user_username")
+            for records in (approved, pending, rejected)
+            for record in records
+            if record.get("user_username")
+        ),
+        user_data.get("user_username") or "لا يوجد",
+    )
+    display_name = next(
+        (
+            record.get("user_name")
+            for records in (approved, pending, rejected)
+            for record in records
+            if record.get("user_name")
+        ),
+        user_data.get("user_name") or "غير معروف",
+    )
+
+    message = (
+        "🔎 <b>تقرير فحص العضو</b>\n\n"
+        f"👤 <b>الاسم:</b> {tg_html_escape(display_name)}\n"
+        f"🆔 <b>المعرف:</b> <code>{member_id}</code>\n"
+        f"🔗 <b>اليوزر:</b> @{tg_html_escape(display_username)}\n\n"
+        f"📧 <b>عدد الإيميلات المقدمة:</b> <code>{submitted_count}</code>\n"
+        f"✅ <b>الإيميلات المقبولة:</b> <code>{len(approved)}</code>\n"
+        f"⏳ <b>الإيميلات قيد الانتظار:</b> <code>{len(pending)}</code>\n"
+        f"❌ <b>الإيميلات المرفوضة:</b> <code>{len(rejected)}</code>\n\n"
+        "📦 <b>تفصيل الإيميلات المقدمة</b>\n"
+        f"🔵 إيميل + باسورد فقط: <code>{password_only}</code>\n"
+        f"🟣 إيميل + باسورد + رمز مصادقة فقط: <code>{totp_only}</code>\n"
+        f"🟢 إيميل + باسورد + رمز مصادقة + كلمة مرور التطبيق: <code>{app_password}</code>\n\n"
+        "💰 <b>تفصيل الرصيد</b>\n"
+        f"💵 الرصيد الحالي: <code>${balances['current']:.2f}</code>\n"
+        f"📉 الرصيد المستهلك: <code>${balances['spent']:.2f}</code>\n"
+        f"📊 الرصيد الكلي: <code>${balances['total']:.2f}</code>\n"
+        f"⏳ رصيد قيد الانتظار: <code>${balances['pending']:.2f}</code>\n"
+        f"🔒 رصيد معلّق للتحويل: <code>${balances['hold']:.2f}</code>"
+    )
+
+    context.user_data.pop("step", None)
+    await update.message.reply_text(
+        message,
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_vertical([
+            ("🔎 فحص عضو آخر", "check_member"),
+            ("🔙 لوحة المالك", "owner_panel"),
+        ]),
+    )
+
+
 # ==================== OWNER PANEL ====================
 async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
+    context.user_data.pop("step", None)
     buttons = [
         ("💰 أسعار المستويات", "set_tier_prices"),
         ("📋 الطلبات", "approval_requests"),
@@ -1137,6 +1312,7 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ("📨 كروبات إشعارات الشراء", "purchase_channels"),
         ("📊 جميع الحسابات المقبولة", "all_accounts_section"),
         ("📈 إحصائيات المستخدمين", "owner_stats"),
+        ("🔎 فحص عضو", "check_member"),
         ("🔗 نظام الإحالة", "referral_settings"),
         ("💰 خصم/منح نقاط", "points_management"),
         ("🔙 القائمة الرئيسية", "main_menu")
@@ -1457,6 +1633,10 @@ async def complete_approval(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             float(user_data.get("balance", 0.0)) + price,
             2,
         )
+    user_data["total_credited_balance"] = round(
+        float(user_data.get("total_credited_balance", 0.0) or 0.0) + price,
+        2,
+    )
 
     pending = user_data.get("pending_requests", [])
     if index < len(pending):
@@ -1472,6 +1652,10 @@ async def complete_approval(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         if referral_bonus > 0:
             referrer_data = get_user(referred_by)
             referrer_data["referral_earnings"] = float(referrer_data.get("referral_earnings", 0.0)) + referral_bonus
+            referrer_data["total_credited_balance"] = round(
+                float(referrer_data.get("total_credited_balance", 0.0) or 0.0) + referral_bonus,
+                2,
+            )
             referrer_data["total_referrals"] = int(referrer_data.get("total_referrals", 0)) + 1
             save_user(referred_by, referrer_data)
             try:
@@ -2382,6 +2566,10 @@ async def handle_points_by_id_input(update: Update, context: ContextTypes.DEFAUL
     if step == "give_points_by_id_input":
         user_data = get_user(target_user_id)
         user_data["balance"] = float(user_data.get("balance", 0.0)) + amount
+        user_data["total_credited_balance"] = round(
+            float(user_data.get("total_credited_balance", 0.0) or 0.0) + amount,
+            2,
+        )
         save_user(target_user_id, user_data)
         try:
             await context.bot.send_message(chat_id=target_user_id,
@@ -2399,6 +2587,10 @@ async def handle_points_by_id_input(update: Update, context: ContextTypes.DEFAUL
             await update.message.reply_text(f"⚠️ رصيد المستخدم غير كافٍ!\n💰 الرصيد الحالي: ${current_balance:.2f}\n💰 المبلغ المطلوب خصمه: ${amount:.2f}")
             return
         user_data["balance"] = current_balance - amount
+        user_data["spent_balance"] = round(
+            float(user_data.get("spent_balance", 0.0) or 0.0) + amount,
+            2,
+        )
         save_user(target_user_id, user_data)
         try:
             await context.bot.send_message(chat_id=target_user_id,
@@ -2869,6 +3061,10 @@ async def handle_purchase_message(update: Update, context: ContextTypes.DEFAULT_
         PENDING_PURCHASES.pop(user_id, None)
         return
     user_data["balance"] -= price
+    user_data["spent_balance"] = round(
+        float(user_data.get("spent_balance", 0.0) or 0.0) + price,
+        2,
+    )
     save_user(user_id, user_data)
     user = update.effective_user
     user_name = user.full_name or "غير معروف"
@@ -3075,6 +3271,10 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     if context.user_data.get("step") == "deduct_points_by_id_input":
         await handle_points_by_id_input(update, context)
+        return
+
+    if context.user_data.get("step") == "check_member_input":
+        await handle_member_check_input(update, context)
         return
     
     # KEY FIX: Check for approval_step instead of step
@@ -3430,6 +3630,8 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_video_in_add(update, context)
     elif data == "owner_panel":
         await owner_panel(update, context)
+    elif data == "check_member":
+        await check_member(update, context)
     elif data == "set_tier_prices":
         await set_tier_prices(update, context)
     elif data.startswith("set_tier:"):
@@ -3579,6 +3781,7 @@ async def owner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ("📢 قناة إجبارية", "forced_channel"),
         ("📊 جميع الحسابات المقبولة", "all_accounts_section"),
         ("📈 إحصائيات المستخدمين", "owner_stats"),
+        ("🔎 فحص عضو", "check_member"),
         ("🔗 نظام الإحالة", "referral_settings"),
         ("💰 خصم/منح نقاط", "points_management"),
         ("🔙 القائمة الرئيسية", "main_menu")
