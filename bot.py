@@ -979,6 +979,149 @@ async def restore_leave_checks(application: Application):
         save_json(USERS_DB, users)
 
 
+def create_owner_stats_chart(path: Path, password_only: int, extra_sections: int) -> bool:
+    """Create a small aggregate chart without exposing user data."""
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        logger.exception("Pillow is required to create the owner statistics chart.")
+        return False
+
+    width, height = 1000, 620
+    image = Image.new("RGB", (width, height), "#101827")
+    draw = ImageDraw.Draw(image)
+
+    font_paths = (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+    )
+    font_path = next((candidate for candidate in font_paths if Path(candidate).exists()), None)
+    if font_path:
+        title_font = ImageFont.truetype(font_path, 34)
+        label_font = ImageFont.truetype(font_path, 24)
+        value_font = ImageFont.truetype(font_path, 30)
+    else:
+        title_font = label_font = value_font = ImageFont.load_default()
+
+    draw.text((60, 42), "Accepted email breakdown", fill="#F8FAFC", font=title_font)
+    draw.text((60, 92), "Password only vs. extra sections", fill="#94A3B8", font=label_font)
+
+    values = [max(0, password_only), max(0, extra_sections)]
+    labels = ["Email + password only", "Extra sections"]
+    colors = ["#38BDF8", "#A78BFA"]
+    max_value = max(max(values), 1)
+    baseline = 500
+    chart_top = 160
+    chart_height = baseline - chart_top
+    bar_width = 270
+    bar_gap = 170
+    start_x = 150
+
+    draw.line((90, baseline, 910, baseline), fill="#475569", width=3)
+    for index, (value, label, color) in enumerate(zip(values, labels, colors)):
+        x = start_x + index * (bar_width + bar_gap)
+        bar_height = int(chart_height * value / max_value)
+        y = baseline - bar_height
+        draw.rounded_rectangle(
+            (x, y, x + bar_width, baseline),
+            radius=18,
+            fill=color,
+        )
+        value_box = draw.textbbox((0, 0), str(value), font=value_font)
+        value_width = value_box[2] - value_box[0]
+        draw.text(
+            (x + (bar_width - value_width) / 2, max(y - 46, chart_top - 10)),
+            str(value),
+            fill="#F8FAFC",
+            font=value_font,
+        )
+        label_box = draw.textbbox((0, 0), label, font=label_font)
+        label_width = label_box[2] - label_box[0]
+        draw.text(
+            (x + (bar_width - label_width) / 2, baseline + 24),
+            label,
+            fill="#CBD5E1",
+            font=label_font,
+        )
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    image.save(path, format="PNG")
+    return True
+
+
+async def owner_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+
+    await query.answer()
+    users = load_json(USERS_DB)
+    rows = []
+    total_accepted = 0
+    password_only = 0
+    extra_sections = 0
+
+    for user_id, user_data in users.items():
+        approved_accounts = user_data.get("approved_accounts", [])
+        user_password_only = 0
+        user_extra_sections = 0
+        for account in approved_accounts:
+            if account.get("has_totp", False) or account.get("has_app_pass", False):
+                user_extra_sections += 1
+            else:
+                user_password_only += 1
+
+        total_accepted += len(approved_accounts)
+        password_only += user_password_only
+        extra_sections += user_extra_sections
+        rows.append({
+            "user_id": str(user_id),
+            "points": round(float(user_data.get("balance", 0.0) or 0.0), 2),
+            "accepted": len(approved_accounts),
+        })
+
+    top_users = sorted(
+        rows,
+        key=lambda row: (row["points"], row["accepted"]),
+        reverse=True,
+    )[:10]
+    message = (
+        "📊 <b>إحصائيات المستخدمين</b>\n\n"
+        f"👥 عدد المستخدمين: <b>{len(rows)}</b>\n"
+        f"📧 الإيميلات المقبولة: <b>{total_accepted}</b>\n"
+        f"🔵 إيميل + باسورد فقط: <b>{password_only}</b>\n"
+        f"🟣 أقسام إضافية: <b>{extra_sections}</b>\n\n"
+        "🏆 <b>أكثر المستخدمين نقاطاً:</b>\n"
+    )
+    if top_users:
+        for index, row in enumerate(top_users, 1):
+            message += (
+                f"{index}. المستخدم <code>{row['user_id']}</code> — "
+                f"💰 {row['points']:.2f} نقطة — 📧 {row['accepted']} إيميل\n"
+            )
+    else:
+        message += "لا توجد بيانات مستخدمين حتى الآن.\n"
+
+    chart_path = DATA_DIR / "owner_stats_chart.png"
+    if create_owner_stats_chart(chart_path, password_only, extra_sections):
+        with chart_path.open("rb") as chart_file:
+            await context.bot.send_photo(
+                chat_id=update.effective_chat.id,
+                photo=chart_file,
+                caption=message,
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb_single("🔙 إعدادات المالك", "owner_panel"),
+            )
+    else:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=message,
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_single("🔙 إعدادات المالك", "owner_panel"),
+        )
+
+
 # ==================== OWNER PANEL ====================
 async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -993,6 +1136,7 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ("📢 قناة إجبارية", "forced_channel"),
         ("📨 كروبات إشعارات الشراء", "purchase_channels"),
         ("📊 جميع الحسابات المقبولة", "all_accounts_section"),
+        ("📈 إحصائيات المستخدمين", "owner_stats"),
         ("🔗 نظام الإحالة", "referral_settings"),
         ("💰 خصم/منح نقاط", "points_management"),
         ("🔙 القائمة الرئيسية", "main_menu")
@@ -3372,6 +3516,8 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await deliver_order(update, context)
     elif data == "all_accounts_section":
         await all_accounts_section(update, context)
+    elif data == "owner_stats":
+        await owner_stats(update, context)
     elif data == "all_accounts":
         await all_accounts(update, context)
     elif data == "hold_accounts":
@@ -3432,6 +3578,7 @@ async def owner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ("🛒 المبيعات", "store_section"),
         ("📢 قناة إجبارية", "forced_channel"),
         ("📊 جميع الحسابات المقبولة", "all_accounts_section"),
+        ("📈 إحصائيات المستخدمين", "owner_stats"),
         ("🔗 نظام الإحالة", "referral_settings"),
         ("💰 خصم/منح نقاط", "points_management"),
         ("🔙 القائمة الرئيسية", "main_menu")
