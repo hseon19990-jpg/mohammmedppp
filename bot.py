@@ -5,6 +5,8 @@ Advanced Telegram Account Manager Bot - Full Version (COMPLETELY FIXED)
 - All features working perfectly
 - NEW: 24-hour delayed verification with email deduplication
 - NEW: Direct verification for owner
+- NEW: Proxy pool management
+- NEW: Smart verification engine
 """
 
 import asyncio
@@ -39,8 +41,15 @@ from dotenv import load_dotenv
 from config import BotConfig
 from email_manager import EmailManager
 from delayed_verifier import DelayedVerifier
-from utils import get_user, save_user, calculate_price, format_app_password, format_totp_secret, load_json, save_json
+from utils import get_user, save_user, calculate_account_price, format_app_password, format_totp_secret, load_json, save_json
 from data_structure import USER_DATA_TEMPLATE, PENDING_ACCOUNT_TEMPLATE
+from proxy_pool_manager import SmartProxyPool
+from smart_verifier import SmartVerifier
+from account_manager import AccountManager
+from advanced_monitor import AdvancedMonitor
+from delayed_monitor import DelayedMonitor
+from verification_engine import VerificationEngine
+from fingerprint_generator import FingerprintGenerator
 
 load_dotenv()
 
@@ -102,8 +111,14 @@ VIDEOS_DIR = DATA_DIR / "videos"
 VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
 
 # ==================== INIT NEW COMPONENTS ====================
+proxy_pool = SmartProxyPool()
+delayed_verifier = DelayedVerifier(proxy_pool)
+smart_verifier = SmartVerifier(proxy_pool)
 email_manager = EmailManager()
-delayed_verifier = DelayedVerifier()
+account_manager = AccountManager()
+advanced_monitor = AdvancedMonitor()
+delayed_monitor = DelayedMonitor()
+fingerprint_generator = FingerprintGenerator()
 
 
 # ==================== KEYBOARD HELPERS ====================
@@ -545,7 +560,7 @@ async def handle_edit_field_input(update: Update, context: ContextTypes.DEFAULT_
         account[field] = text
         account["has_totp"] = bool(account.get("totp_secret"))
         account["has_app_pass"] = bool(account.get("app_password"))
-        account["amount"] = calculate_price(account.get("has_totp", False), account.get("has_app_pass", False))
+        account["amount"] = calculate_account_price(account.get("has_totp", False), account.get("has_app_pass", False))
         pending_accounts[email] = account
         user_data["pending_accounts"] = pending_accounts
     else:
@@ -869,6 +884,9 @@ async def schedule_24h_verification(context: ContextTypes.DEFAULT_TYPE, user_id:
         name=f"24h_verify_{user_id}_{email}"
     )
     
+    # Record in monitor
+    delayed_monitor.record_scheduled(account_data.get("amount", 0.0))
+    
     logger.info(f"Scheduled 24h verification for {email} at {release_time}")
     return release_time
 
@@ -893,7 +911,12 @@ async def check_account_after_24h(context: ContextTypes.DEFAULT_TYPE):
         return
     
     # Perform verification
+    start_time = time.time()
     result = await delayed_verifier.verify_after_24h(user_id, account)
+    duration = time.time() - start_time
+    
+    # Record in monitor
+    delayed_monitor.record_result(result, account.get("amount", 0.0), duration)
     
     # Process result
     if result["status"] == "verified":
@@ -919,6 +942,9 @@ async def check_account_after_24h(context: ContextTypes.DEFAULT_TYPE):
         user_data["approved_accounts"].append(account)
         
         save_user(user_id, user_data)
+        
+        # Record in account manager
+        account_manager.move_to_ready(account, result)
         
         # Notify user
         await context.bot.send_message(
@@ -962,7 +988,9 @@ async def check_account_after_24h(context: ContextTypes.DEFAULT_TYPE):
             "totp_invalid": "رمز TOTP غير صحيح",
             "app_password_invalid": "كلمة مرور التطبيق غير صحيحة",
             "account_not_found": "الحساب غير موجود",
-            "login_failed": "فشل تسجيل الدخول"
+            "login_failed": "فشل تسجيل الدخول",
+            "email_invalid": "الإيميل غير صحيح",
+            "technical_error": "خطأ تقني"
         }
         
         reason_text = reason_map.get(result.get("reason", ""), result.get("message", "سبب غير معروف"))
@@ -1599,6 +1627,8 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ("🔗 نظام الإحالة", "referral_settings"),
         ("💰 خصم/منح نقاط", "points_management"),
         ("🔍 تحقق مباشر من الحسابات", "owner_verify_direct"),
+        ("📊 تقرير التحقق المتأخر", "delayed_verification_report"),
+        ("📈 تقرير الأداء", "performance_report"),
         ("🔙 القائمة الرئيسية", "main_menu")
     ]
     await query.edit_message_text("⚙️ *لوحة تحكم المالك*\n\nاختر الإعداد الذي تريد تعديله:", parse_mode=ParseMode.MARKDOWN,
@@ -3982,6 +4012,42 @@ async def owner_reject_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# ==================== DELAYED VERIFICATION REPORT ====================
+async def delayed_verification_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show delayed verification report to owner"""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    await query.answer()
+    report = delayed_monitor.get_report()
+    
+    await query.edit_message_text(
+        report,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_single("🔙 إعدادات المالك", "owner_panel")
+    )
+
+
+# ==================== PERFORMANCE REPORT ====================
+async def performance_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show performance report to owner"""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    await query.answer()
+    report = advanced_monitor.get_detailed_report()
+    
+    await query.edit_message_text(
+        report,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_single("🔙 إعدادات المالك", "owner_panel")
+    )
+
+
 def generate_referral_code():
     return secrets.token_hex(4).upper()
 
@@ -4518,6 +4584,10 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await owner_accept_new(update, context)
     elif data.startswith("owner_reject_new:"):
         await owner_reject_new(update, context)
+    elif data == "delayed_verification_report":
+        await delayed_verification_report(update, context)
+    elif data == "performance_report":
+        await performance_report(update, context)
     else:
         await placeholder(update, context)
 
@@ -4551,6 +4621,8 @@ async def owner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ("🔗 نظام الإحالة", "referral_settings"),
         ("💰 خصم/منح نقاط", "points_management"),
         ("🔍 تحقق مباشر من الحسابات", "owner_verify_direct"),
+        ("📊 تقرير التحقق المتأخر", "delayed_verification_report"),
+        ("📈 تقرير الأداء", "performance_report"),
         ("🔙 القائمة الرئيسية", "main_menu")
     ]
     await update.message.reply_text("⚙️ *لوحة تحكم المالك*\n\nاختر الإعداد الذي تريد تعديله:",
