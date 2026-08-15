@@ -3,3 +3,6 @@ pyotp==2.9.0
 python-dotenv==1.0.1
 curl-cffi
 Pillow==10.4.0
+playwright==1.40.0
+aiohttp==3.9.1
+dns-python==1.16.0
