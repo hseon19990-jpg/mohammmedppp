@@ -66,7 +66,10 @@ class SmartProxyPool:
     
     def get_proxy(self, preferred_region: Optional[str] = None, avoid_recent: bool = True) -> Optional[str]:
         """
-        اختيار بروكسي ذكي
+        اختيار بروكسي ذكي:
+        1. يفضل البروكسيات من نفس المنطقة
+        2. يتجنب البروكسيات المستخدمة مؤخراً
+        3. يختار البروكسيات ذات الدرجة الأعلى
         """
         if self.used_today >= self.daily_limit:
             logger.warning("Daily proxy limit reached")
@@ -108,6 +111,7 @@ class SmartProxyPool:
                 weight = max(1, score / 10)
                 weights.append(weight)
             
+            # اختيار بروكسي حسب الوزن
             proxy = random.choices(available, weights=weights, k=1)[0]
             
             self.usage_tracker[proxy] += 1
