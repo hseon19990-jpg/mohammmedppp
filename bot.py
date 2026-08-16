@@ -7,6 +7,7 @@ Advanced Telegram Account Manager Bot - Full Version (COMPLETELY FIXED)
 - NEW: Direct verification for owner
 - NEW: Proxy pool management
 - NEW: Smart verification engine
+- NEW: Account classification based on completed data (Email Only / TOTP Only / Full)
 """
 
 import asyncio
@@ -2203,7 +2204,7 @@ async def approve_request_owner(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def complete_approval_legacy(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: int, index: int,
                                    approved_request: dict, with_leave: bool = False):
-    """Complete approval for legacy requests"""
+    """Complete approval for legacy requests - مع تصنيف الحساب حسب البيانات المكتملة"""
     user_data = get_user(uid)
     config = load_json(DATA_DIR / "config.json")
     price = approved_request.get("amount", 0.0)
@@ -2222,6 +2223,19 @@ async def complete_approval_legacy(update: Update, context: ContextTypes.DEFAULT
     approved_request["leave_confirmed"] = not with_leave
     approved_request["totp_code"] = totp_code
     
+    # ====== تصنيف الحساب حسب البيانات المكتملة ======
+    has_totp = bool(approved_request.get("has_totp", False))
+    has_app_pass = bool(approved_request.get("has_app_pass", False))
+    
+    # إضافة حقل "section" لتحديد نوع الحساب
+    if has_totp and has_app_pass:
+        approved_request["section"] = "full"  # إيميل + باسورد + TOTP + App Pass
+    elif has_totp:
+        approved_request["section"] = "totp_only"  # إيميل + باسورد + TOTP فقط
+    else:
+        approved_request["section"] = "email_only"  # إيميل + باسورد فقط
+    
+    # ====== معالجة الرصيد ======
     if with_leave:
         approval_time = datetime.now(timezone.utc)
         approved_request["approval_time"] = approval_time.isoformat()
@@ -2245,7 +2259,7 @@ async def complete_approval_legacy(update: Update, context: ContextTypes.DEFAULT
     
     save_user(uid, user_data)
     
-    # Referral bonus
+    # ====== مكافأة الإحالة ======
     referred_by = user_data.get("referred_by")
     if referred_by:
         referral_bonus = float(config.get("referral_bonus", 0.0))
@@ -2265,11 +2279,23 @@ async def complete_approval_legacy(update: Update, context: ContextTypes.DEFAULT
             except:
                 pass
     
-    # Send confirmation to user
+    # ====== إرسال تأكيد للمستخدم ======
     email = approved_request.get("email", "")
-    user_message = f"✅ <b>تم قبول طلبك!</b>\n\n📧 الإيميل: <code>{tg_html_escape(email)}</code>\n"
+    
+    # تحديد أيقونة القسم
+    section_icons = {
+        "full": "🔑",
+        "totp_only": "🔐",
+        "email_only": "📧"
+    }
+    section_icon = section_icons.get(approved_request.get("section", "email_only"), "📧")
+    
+    user_message = f"✅ <b>تم قبول طلبك!</b>\n\n"
+    user_message += f"{section_icon} 📧 الإيميل: <code>{tg_html_escape(email)}</code>\n"
+    
     if totp_code:
         user_message += f"🔢 <b>كود المصادقة:</b> <code>{tg_html_escape(totp_code)}</code>\n"
+    
     if with_leave:
         user_message += f"💰 المبلغ المعلق: <b>${price:.2f}</b>\n\n⏰ <b>سيتم إضافة المبلغ إلى رصيدك تلقائياً بعد 24 ساعة.</b>\n\n📹 تم إرسال فيديو المغادرة إليك.\n⚠️ قم بمغادرة الحساب لتجنب أي تأخير."
     else:
@@ -2280,6 +2306,7 @@ async def complete_approval_legacy(update: Update, context: ContextTypes.DEFAULT
     except:
         pass
     
+    # ====== جدولة فحص المغادرة (إذا كان مع فيديو) ======
     if with_leave:
         await send_leave_video_to_user(context, uid, email)
         await schedule_leave_check(context, uid, email, approved_request.get("release_at"))
@@ -3223,12 +3250,28 @@ async def all_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     total = len(all_accounts)
     msg = f"📊 *إجمالي الحسابات: {total}*\n\n"
+    
+    # تصنيف الحسابات
+    email_only = 0
+    totp_only = 0
+    full = 0
+    
     for idx, acc in enumerate(all_accounts[:10], 1):
+        section = acc.get("section", "email_only")
+        if section == "full":
+            icon = "🔑"
+            full += 1
+        elif section == "totp_only":
+            icon = "🔐"
+            totp_only += 1
+        else:
+            icon = "📧"
+            email_only += 1
+        
         leave_status = ""
         if acc.get("approved_with_leave", False) and not acc.get("leave_confirmed", False):
             leave_status = " ⏳ (معلق)"
-        tier_icon = "🟢" if acc.get("has_app_pass", False) else "🟡" if acc.get("has_totp", False) else "🔵"
-        msg += f"{idx}. {tier_icon} 📧 `{acc.get('email', '')}`{leave_status}\n"
+        msg += f"{idx}. {icon} 📧 `{acc.get('email', '')}`{leave_status}\n"
         msg += f"   🔑 `{acc.get('password', '')}`\n"
         if acc.get("has_totp", False):
             msg += f"   🔐 `{acc.get('totp_secret') or acc.get('totp', '')}`\n"
@@ -3238,9 +3281,16 @@ async def all_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"   👤 المستخدم: {acc.get('user_id', '')}\n"
         msg += f"   💰 السعر: ${acc.get('amount', 0):.2f}\n"
         msg += "   ─────────────\n"
+    
+    msg += f"\n📊 *توزيع الحسابات:*\n"
+    msg += f"📧 إيميل + باسورد فقط: {email_only}\n"
+    msg += f"🔐 إيميل + باسورد + TOTP: {totp_only}\n"
+    msg += f"🔑 إيميل + باسورد + TOTP + App Pass: {full}\n"
+    
     if total > 10:
         msg += f"\n📌 *ملاحظة:* تم عرض أول 10 حسابات من أصل {total}"
         msg += "\nلتصدير جميع الحسابات استخدم زر التصدير أدناه"
+    
     buttons = [
         ("📥 تصدير جميع الحسابات", "export_all_accounts"),
         ("🆕 عرض الحسابات غير المستخرجة", "unextracted_accounts"),
