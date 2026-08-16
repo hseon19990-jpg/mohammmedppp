@@ -919,6 +919,7 @@ async def schedule_quick_verification(context: ContextTypes.DEFAULT_TYPE, user_i
 
 
 async def check_account_after_24h(context: ContextTypes.DEFAULT_TYPE):
+    # Keep the scheduled callback at module scope so the job queue can resolve it.
     """Called after 24 hours (or 1 minute) to verify the account"""
     job_data = context.job.data
     user_id = job_data["user_id"]
