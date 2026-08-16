@@ -3937,7 +3937,6 @@ async def owner_verify_direct(update: Update, context: ContextTypes.DEFAULT_TYPE
         reply_markup=kb_vertical(buttons)
     )
 
-
 async def owner_verify_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Confirm and perform direct verification for an account"""
     query = update.callback_query
@@ -3987,12 +3986,11 @@ async def owner_verify_confirm(update: Update, context: ContextTypes.DEFAULT_TYP
     
     result = await delayed_verifier.verify_after_24h(target_user_id, account_data)
     
-    if result["status"] == "verified":
+    if result.get("success", False):
         response = (
             f"✅ *نتيجة التحقق المباشر: نجاح!*\n\n"
             f"📧 الإيميل: `{email}`\n"
             f"👤 المستخدم: `{target_user_id}`\n"
-            f"🔑 كلمة المرور: ✅ صحيحة\n"
         )
         
         has_totp = bool(account.get('totp_secret'))
@@ -4018,6 +4016,13 @@ async def owner_verify_confirm(update: Update, context: ContextTypes.DEFAULT_TYP
         )
     else:
         reason = result.get("reason", "unknown")
+        details = result.get("details", {})
+        
+        step = details.get("step", "غير معروف")
+        error_type = details.get("error_type", "غير معروف")
+        error_message = details.get("error_message", "غير معروف")
+        solution = details.get("solution", "لا يوجد حل مقترح")
+        
         reason_map = {
             "email_invalid": "الإيميل غير موجود أو غير صالح",
             "account_not_found": "الحساب غير موجود",
@@ -4029,7 +4034,11 @@ async def owner_verify_confirm(update: Update, context: ContextTypes.DEFAULT_TYP
             "account_banned": "🚫 الحساب محظور من Telegram",
             "phone_required": "📱 يطلب رقم هاتف للتحقق",
             "login_failed": "فشل تسجيل الدخول",
-            "technical_error": "⚠️ خطأ تقني"
+            "browser_launch_failed": "⚠️ فشل تشغيل المتصفح",
+            "context_creation_failed": "⚠️ فشل إنشاء سياق المتصفح",
+            "page_load_failed": "⚠️ فشل تحميل صفحة Telegram",
+            "unexpected_error": "⚠️ خطأ غير متوقع",
+            "technical_error": "⚠️ خطأ تقني عام"
         }
         
         response = (
@@ -4037,6 +4046,11 @@ async def owner_verify_confirm(update: Update, context: ContextTypes.DEFAULT_TYP
             f"📧 الإيميل: `{email}`\n"
             f"👤 المستخدم: `{target_user_id}`\n"
             f"📝 السبب: {reason_map.get(reason, result.get('message', 'سبب غير معروف'))}\n\n"
+            f"🔍 *تفاصيل الخطأ:*\n"
+            f"📌 الخطوة: `{step}`\n"
+            f"🛑 نوع الخطأ: `{error_type}`\n"
+            f"📄 رسالة الخطأ: `{error_message}`\n"
+            f"🛠️ *الحل المقترح:*\n`{solution}`\n\n"
             f"📌 *ماذا تريد أن تفعل؟*"
         )
         
@@ -4051,6 +4065,7 @@ async def owner_verify_confirm(update: Update, context: ContextTypes.DEFAULT_TYP
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=kb_vertical(buttons)
         )
+
 
 
 async def owner_accept_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
