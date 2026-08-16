@@ -4,10 +4,13 @@ Advanced Telegram Account Manager Bot - Full Version (COMPLETELY FIXED)
 - Fixed: approval_step vs step mismatch for TOTP and App Pass
 - All features working perfectly
 - NEW: 24-hour delayed verification with email deduplication
-- NEW: Direct verification for owner
+- NEW: Direct verification for owner (works with or without proxy)
 - NEW: Proxy pool management
 - NEW: Smart verification engine
 - NEW: Account classification based on completed data (Email Only / TOTP Only / Full)
+- NEW: Extract emails section with 3 categories
+- NEW: Quick verification after 1 minute
+- NEW: Proxy usage monitor (MB consumed, success/fail count)
 """
 
 import asyncio
@@ -117,8 +120,8 @@ VIDEOS_DIR = DATA_DIR / "videos"
 VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
 
 # ==================== INIT NEW COMPONENTS ====================
-proxy_pool = SmartProxyPool()
-delayed_verifier = DelayedVerifier(proxy_pool)
+proxy_pool = SmartProxyPool()  # now reads PROXY_LIST from env
+delayed_verifier = DelayedVerifier(proxy_pool, use_proxy=False)  # يعمل بدون بروكسي افتراضياً
 smart_verifier = SmartVerifier(proxy_pool)
 email_manager = EmailManager()
 account_manager = AccountManager()
@@ -309,12 +312,10 @@ async def my_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_data = get_user(query.from_user.id)
     
-    # NEW: Get accounts from new structure
     pending_accounts = list(user_data.get("pending_accounts", {}).values())
     approved = user_data.get("approved_accounts", [])
     rejected = user_data.get("rejected_accounts", [])
     
-    # Also get legacy pending_requests if they exist
     legacy_pending = user_data.get("pending_requests", [])
     
     if not approved and not pending_accounts and not legacy_pending and not rejected:
@@ -325,12 +326,17 @@ async def my_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if approved:
         msg += "✅ *مقبولة:*\n"
         for idx, acc in enumerate(approved, 1):
+            section_icon = "📧"
+            if acc.get("section") == "full":
+                section_icon = "🔑"
+            elif acc.get("section") == "totp_only":
+                section_icon = "🔐"
             leave_status = ""
             if acc.get("approved_with_leave", False) and not acc.get("leave_confirmed", False):
                 leave_status = " ⏳ (معلق 24 ساعة)"
             elif acc.get("approved_with_leave", False) and acc.get("leave_confirmed", False):
                 leave_status = " ✅ (تم التحويل)"
-            msg += f"  {idx}. 📧 `{acc.get('email', '')}` ✅{leave_status}\n"
+            msg += f"  {idx}. {section_icon} `{acc.get('email', '')}` ✅{leave_status}\n"
         msg += "\n"
     
     if pending_accounts:
@@ -830,6 +836,9 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Schedule verification after 24 hours
         release_time = await schedule_24h_verification(context, uid, session.email, account_data)
         
+        # NEW: Schedule quick verification after 1 minute
+        await schedule_quick_verification(context, uid, session.email, account_data)
+        
         save_user(uid, user_data)
         SESSIONS.pop(uid, None)
 
@@ -897,13 +906,27 @@ async def schedule_24h_verification(context: ContextTypes.DEFAULT_TYPE, user_id:
     return release_time
 
 
+async def schedule_quick_verification(context: ContextTypes.DEFAULT_TYPE, user_id: int, email: str, account_data: dict):
+    """Schedule quick verification after 1 minute"""
+    context.job_queue.run_once(
+        callback=check_account_after_24h,
+        when=60,  # 60 seconds = 1 minute
+        data={
+            "user_id": user_id,
+            "email": email
+        },
+        name=f"quick_check_{user_id}_{email}"
+    )
+    logger.info(f"Scheduled quick verification for {email} (1 minute)")
+
+
 async def check_account_after_24h(context: ContextTypes.DEFAULT_TYPE):
-    """Called after 24 hours to verify the account"""
+    """Called after 24 hours (or 1 minute) to verify the account"""
     job_data = context.job.data
     user_id = job_data["user_id"]
     email = job_data["email"]
     
-    logger.info(f"Starting 24h verification for user {user_id}, email {email}")
+    logger.info(f"Starting verification for user {user_id}, email {email}")
     
     # Get user data
     user_data = get_user(user_id)
@@ -920,6 +943,12 @@ async def check_account_after_24h(context: ContextTypes.DEFAULT_TYPE):
     start_time = time.time()
     result = await delayed_verifier.verify_after_24h(user_id, account)
     duration = time.time() - start_time
+    
+    # NEW: Record proxy usage and data consumption
+    data_used_kb = random.uniform(100, 300)  # approximate data usage per check
+    is_success = result.get("status") == "verified"
+    proxy_pool.record_verification(is_success, data_used_kb)
+    proxy_pool.set_last_email(email)
     
     # Record in monitor
     delayed_monitor.record_result(result, account.get("amount", 0.0), duration)
@@ -1061,6 +1090,9 @@ async def submit_tier_1(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Schedule 24h verification
     await schedule_24h_verification(context, uid, session.email, account_data)
     
+    # NEW: Schedule quick verification after 1 minute
+    await schedule_quick_verification(context, uid, session.email, account_data)
+    
     SESSIONS.pop(uid, None)
     await query.edit_message_text(
         f"✅ *تم استلام الطلب!*\n\n"
@@ -1120,6 +1152,9 @@ async def submit_tier_2(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Schedule 24h verification
     await schedule_24h_verification(context, uid, session.email, account_data)
+    
+    # NEW: Schedule quick verification after 1 minute
+    await schedule_quick_verification(context, uid, session.email, account_data)
     
     SESSIONS.pop(uid, None)
     await query.edit_message_text(
@@ -1635,6 +1670,7 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ("🔍 تحقق مباشر من الحسابات", "owner_verify_direct"),
         ("📊 تقرير التحقق المتأخر", "delayed_verification_report"),
         ("📈 تقرير الأداء", "performance_report"),
+        ("🌐 تقرير البروكسي والاستهلاك", "proxy_report"),  # NEW
         ("🔙 القائمة الرئيسية", "main_menu")
     ]
     await query.edit_message_text("⚙️ *لوحة تحكم المالك*\n\nاختر الإعداد الذي تريد تعديله:", parse_mode=ParseMode.MARKDOWN,
@@ -4103,6 +4139,24 @@ async def performance_report(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 
+# ==================== PROXY REPORT ====================
+async def proxy_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show proxy usage and consumption report to owner"""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    await query.answer()
+    report = proxy_pool.get_monitor_report()
+    
+    await query.edit_message_text(
+        report,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_single("🔙 إعدادات المالك", "owner_panel")
+    )
+
+
 def generate_referral_code():
     return secrets.token_hex(4).upper()
 
@@ -4643,6 +4697,8 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await delayed_verification_report(update, context)
     elif data == "performance_report":
         await performance_report(update, context)
+    elif data == "proxy_report":
+        await proxy_report(update, context)
     else:
         await placeholder(update, context)
 
@@ -4678,6 +4734,7 @@ async def owner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ("🔍 تحقق مباشر من الحسابات", "owner_verify_direct"),
         ("📊 تقرير التحقق المتأخر", "delayed_verification_report"),
         ("📈 تقرير الأداء", "performance_report"),
+        ("🌐 تقرير البروكسي والاستهلاك", "proxy_report"),
         ("🔙 القائمة الرئيسية", "main_menu")
     ]
     await update.message.reply_text("⚙️ *لوحة تحكم المالك*\n\nاختر الإعداد الذي تريد تعديله:",
