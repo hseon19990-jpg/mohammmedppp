@@ -37,6 +37,11 @@ from telegram.ext import (
 
 from dotenv import load_dotenv
 
+# Load local .env values before reading any configuration. In deployed
+# environments the variables are injected by the platform, while local
+# development relies on python-dotenv.
+load_dotenv()
+
 # ==================== NEW IMPORTS ====================
 from config import BotConfig
 from email_manager import EmailManager
@@ -50,8 +55,6 @@ from advanced_monitor import AdvancedMonitor
 from delayed_monitor import DelayedMonitor
 from verification_engine import VerificationEngine
 from fingerprint_generator import FingerprintGenerator
-
-load_dotenv()
 
 # ==================== CONFIGURATION ====================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
@@ -4687,12 +4690,31 @@ async def restore_24h_verifications(application: Application):
 
 
 # ==================== MAIN ====================
+async def post_init(application: Application):
+    """Restore scheduled jobs after the Telegram application is initialized."""
+    await restore_leave_checks(application)
+    await restore_24h_verifications(application)
+
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Log update errors without stopping the polling loop."""
+    logger.error(
+        "Unhandled Telegram update error: %s",
+        context.error,
+        exc_info=context.error,
+    )
+
+
 def main():
+    if not BOT_TOKEN:
+        raise RuntimeError(
+            "BOT_TOKEN is not configured. Set BOT_TOKEN before starting the bot."
+        )
+
     app = (
         Application.builder()
         .token(BOT_TOKEN)
-        .post_init(restore_leave_checks)
-        .post_init(restore_24h_verifications)
+        .post_init(post_init)
         .build()
     )
     app.add_handler(CommandHandler("start", start_command))
@@ -4701,6 +4723,7 @@ def main():
     app.add_handler(CallbackQueryHandler(router))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_input))
     app.add_handler(MessageHandler(filters.VIDEO, handle_video_upload))
+    app.add_error_handler(error_handler)
     app.run_polling()
 
 
