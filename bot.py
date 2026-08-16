@@ -112,8 +112,6 @@ def migrate_legacy_data():
                     logger.info("Migrated video %s to persistent storage.", source_video.name)
 
 
-delayed_verifier = DelayedVerifier(proxy_pool)  # يعمل مع أو بدون بروكسي تلقائياً
-
 # ==================== CONSTANTS ====================
 USERS_DB = DATA_DIR / "users.json"
 VIDEOS_DIR = DATA_DIR / "videos"
@@ -121,7 +119,7 @@ VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
 
 # ==================== INIT NEW COMPONENTS ====================
 proxy_pool = SmartProxyPool()  # now reads PROXY_LIST from env
-delayed_verifier = DelayedVerifier(proxy_pool, use_proxy=False)  # يعمل بدون بروكسي افتراضياً
+delayed_verifier = DelayedVerifier(proxy_pool)  # يعمل مع أو بدون بروكسي تلقائياً
 smart_verifier = SmartVerifier(proxy_pool)
 email_manager = EmailManager()
 account_manager = AccountManager()
