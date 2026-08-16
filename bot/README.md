@@ -28,6 +28,8 @@ new persistent directory is empty. Do not delete the volume.
 ## Run locally
 
 ```bash
+python -m venv .venv
+. .venv/bin/activate
 pip install -r requirements.txt
-python bot.py
+python main.py
 ```
