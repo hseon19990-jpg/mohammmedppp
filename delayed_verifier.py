@@ -1,3 +1,4 @@
+# delayed_verifier.py
 import asyncio
 import random
 from datetime import datetime, timedelta, timezone
@@ -9,7 +10,7 @@ import pyotp
 logger = logging.getLogger(__name__)
 
 class DelayedVerifier:
-    """التحقق من الحساب بعد 24 ساعة"""
+    """التحقق من الحساب بعد 24 ساعة (مع دعم البروكسي وبدونه)"""
     
     def __init__(self, proxy_pool=None):
         self.proxy_pool = proxy_pool
@@ -20,9 +21,9 @@ class DelayedVerifier:
         totp_secret = account_data.get("totp_secret")
         app_password = account_data.get("app_password")
         
-        logger.info(f"Starting 24h verification for {email}")
+        logger.info(f"Starting verification for {email}")
         
-        proxy = self._get_optimal_proxy(email)
+        proxy = self._get_optimal_proxy(email) if self.proxy_pool else None
         
         try:
             async with async_playwright() as p:
@@ -33,6 +34,7 @@ class DelayedVerifier:
                         '--disable-blink-features=AutomationControlled',
                         '--disable-dev-shm-usage',
                         '--no-sandbox',
+                        '--disable-setuid-sandbox',  # <-- الحل الحاسم لمشكلة Railway
                         '--disable-images',
                     ]
                 )
@@ -78,8 +80,14 @@ class DelayedVerifier:
             'gmail.com': 'US',
             'yahoo.com': 'US', 
             'outlook.com': 'US',
+            'hotmail.com': 'US',
             'protonmail.com': 'CH',
             'mail.ru': 'RU',
+            'yandex.ru': 'RU',
+            'gmx.com': 'DE',
+            'web.de': 'DE',
+            'libero.it': 'IT',
+            'orange.fr': 'FR',
         }
         preferred_region = regions.get(domain, 'US')
         return self.proxy_pool.get_proxy(preferred_region=preferred_region) if self.proxy_pool else None
