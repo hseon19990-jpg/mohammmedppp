@@ -112,7 +112,7 @@ def migrate_legacy_data():
                     logger.info("Migrated video %s to persistent storage.", source_video.name)
 
 
-migrate_legacy_data()
+delayed_verifier = DelayedVerifier(proxy_pool)  # يعمل مع أو بدون بروكسي تلقائياً
 
 # ==================== CONSTANTS ====================
 USERS_DB = DATA_DIR / "users.json"
