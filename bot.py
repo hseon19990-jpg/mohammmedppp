@@ -918,7 +918,7 @@ async def schedule_quick_verification(context: ContextTypes.DEFAULT_TYPE, user_i
     logger.info(f"Scheduled quick verification for {email} (1 minute)")
 
 
-        async def check_account_after_24h(context: ContextTypes.DEFAULT_TYPE):
+async def check_account_after_24h(context: ContextTypes.DEFAULT_TYPE):
     """Called after 24 hours (or 1 minute) to verify the account"""
     job_data = context.job.data
     user_id = job_data["user_id"]
