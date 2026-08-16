@@ -918,7 +918,7 @@ async def schedule_quick_verification(context: ContextTypes.DEFAULT_TYPE, user_i
     logger.info(f"Scheduled quick verification for {email} (1 minute)")
 
 
-async def check_account_after_24h(context: ContextTypes.DEFAULT_TYPE):
+        async def check_account_after_24h(context: ContextTypes.DEFAULT_TYPE):
     """Called after 24 hours (or 1 minute) to verify the account"""
     job_data = context.job.data
     user_id = job_data["user_id"]
@@ -941,12 +941,6 @@ async def check_account_after_24h(context: ContextTypes.DEFAULT_TYPE):
     start_time = time.time()
     result = await delayed_verifier.verify_after_24h(user_id, account)
     duration = time.time() - start_time
-    
-    # NEW: Record proxy usage and data consumption
-    data_used_kb = random.uniform(100, 300)  # approximate data usage per check
-    is_success = result.get("status") == "verified"
-    proxy_pool.record_verification(is_success, data_used_kb)
-    proxy_pool.set_last_email(email)
     
     # Record in monitor
     delayed_monitor.record_result(result, account.get("amount", 0.0), duration)
@@ -975,9 +969,6 @@ async def check_account_after_24h(context: ContextTypes.DEFAULT_TYPE):
         user_data["approved_accounts"].append(account)
         
         save_user(user_id, user_data)
-        
-        # Record in account manager
-        account_manager.move_to_ready(account, result)
         
         # Notify user
         await context.bot.send_message(
