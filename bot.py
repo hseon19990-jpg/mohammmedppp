@@ -37,11 +37,13 @@ from telegram.ext import (
 
 from dotenv import load_dotenv
 
+load_dotenv()
+
 # ==================== NEW IMPORTS ====================
 from config import BotConfig
 from email_manager import EmailManager
 from delayed_verifier import DelayedVerifier
-from utils import get_user, save_user, calculate_account_price, format_app_password, format_totp_secret, load_json, save_json
+from utils import get_user, save_user, format_app_password, format_totp_secret, load_json, save_json
 from data_structure import USER_DATA_TEMPLATE, PENDING_ACCOUNT_TEMPLATE
 from proxy_pool_manager import SmartProxyPool
 from smart_verifier import SmartVerifier
@@ -51,8 +53,6 @@ from delayed_monitor import DelayedMonitor
 from verification_engine import VerificationEngine
 from fingerprint_generator import FingerprintGenerator
 
-load_dotenv()
-
 # ==================== CONFIGURATION ====================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 OWNER_ID = int(os.environ.get("OWNER_TELEGRAM_ID", "0"))
@@ -61,7 +61,12 @@ PURCHASE_CHANNEL_2 = os.environ.get("PURCHASE_CHANNEL_2", "").strip()
 
 configured_data_dir = os.environ.get("DATA_DIR", "").strip()
 railway_volume_dir = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
-DATA_DIR = Path(configured_data_dir or railway_volume_dir or "/app/data").resolve()
+default_data_dir = Path("/app/data")
+if not os.access(default_data_dir.parent, os.W_OK):
+    default_data_dir = Path(__file__).resolve().parent / "data"
+DATA_DIR = Path(
+    configured_data_dir or railway_volume_dir or default_data_dir
+).resolve()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
@@ -4687,21 +4692,63 @@ async def restore_24h_verifications(application: Application):
 
 
 # ==================== MAIN ====================
-def main():
-    app = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .post_init(restore_leave_checks)
-        .post_init(restore_24h_verifications)
-        .build()
+async def post_init(application: Application):
+    """Restore scheduled jobs after the Telegram application is initialized."""
+    await restore_leave_checks(application)
+    await restore_24h_verifications(application)
+
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Log update errors without stopping the polling loop."""
+    logger.error(
+        "Unhandled Telegram update error: %s",
+        context.error,
+        exc_info=context.error,
     )
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("debug", debug_command))
-    app.add_handler(CommandHandler("owner", owner_command))
-    app.add_handler(CallbackQueryHandler(router))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_input))
-    app.add_handler(MessageHandler(filters.VIDEO, handle_video_upload))
-    app.run_polling()
+
+
+def main():
+    if not BOT_TOKEN:
+        raise RuntimeError(
+            "BOT_TOKEN is not configured. Set BOT_TOKEN before starting the bot."
+        )
+
+    retry_delay = 5
+    while True:
+        try:
+            app = (
+                Application.builder()
+                .token(BOT_TOKEN)
+                .post_init(post_init)
+                .build()
+            )
+            app.add_handler(CommandHandler("start", start_command))
+            app.add_handler(CommandHandler("debug", debug_command))
+            app.add_handler(CommandHandler("owner", owner_command))
+            app.add_handler(CallbackQueryHandler(router))
+            app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_input))
+            app.add_handler(MessageHandler(filters.VIDEO, handle_video_upload))
+            app.add_error_handler(error_handler)
+
+            logger.info("Starting Telegram polling.")
+            # Keep the event loop available so a transient polling failure can
+            # be recovered in this same process instead of leaving the service
+            # stopped until a manual redeploy.
+            app.run_polling(close_loop=False)
+            logger.warning(
+                "Telegram polling stopped without an exception; restarting."
+            )
+        except KeyboardInterrupt:
+            logger.info("Shutdown requested.")
+            return
+        except Exception:
+            logger.exception(
+                "Telegram polling stopped unexpectedly; retrying in %s seconds.",
+                retry_delay,
+            )
+
+        time.sleep(retry_delay)
+        retry_delay = min(retry_delay * 2, 300)
 
 
 if __name__ == "__main__":

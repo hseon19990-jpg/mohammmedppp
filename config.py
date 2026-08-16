@@ -37,7 +37,14 @@ class BotConfig:
     }
     
     # ========== إعدادات البيانات ==========
-    DATA_DIR = Path(os.environ.get("DATA_DIR", "/app/data")).resolve()
+    configured_data_dir = os.environ.get("DATA_DIR", "").strip()
+    railway_volume_dir = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
+    default_data_dir = Path("/app/data")
+    if not os.access(default_data_dir.parent, os.W_OK):
+        default_data_dir = Path(__file__).resolve().parent / "data"
+    DATA_DIR = Path(
+        configured_data_dir or railway_volume_dir or default_data_dir
+    ).resolve()
     USERS_DB = DATA_DIR / "users.json"
     VIDEOS_DIR = DATA_DIR / "videos"
     
