@@ -4,6 +4,8 @@ Advanced Telegram Account Manager Bot - FINAL VERSION
 - Fixed: Auto-delete sensitive messages
 - Fixed: TOTP 6-digit code display
 - All info copyable
+- Added: Tutorial buttons during each step
+- Fixed: Store section and withdrawal
 """
 
 import html
@@ -78,7 +80,7 @@ def get_user(user_id: int) -> dict:
         "approved_accounts": [],
         "pending_accounts": {},
         "rejected_accounts": [],
-        "deleted_accounts": [],  # جديد: الإيميلات التي حذفها المستخدمون
+        "deleted_accounts": [],
         "used_app_passwords": [],
         "referral_code": "",
         "referred_by": None,
@@ -120,12 +122,10 @@ def delete_pending_key(key: str):
 
 # ==================== LOST/DELETED REQUESTS SYSTEM ====================
 def save_deleted_request(user_id: int, email: str, password: str, totp: str = "", app_pass: str = "", reason: str = "deleted_by_user"):
-    """حفظ الإيميلات التي حذفها المستخدمون"""
     user_data = get_user(user_id)
     if "deleted_accounts" not in user_data:
         user_data["deleted_accounts"] = []
     
-    # تجنب التكرار
     for item in user_data["deleted_accounts"]:
         if item.get("email") == email:
             return
@@ -244,7 +244,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ("💰 أموالي", "my_wallet"),
         ("📋 حساباتي", "my_accounts"),
         ("📺 تعليم", "tutorials"),
-        ("🛒 سحب", "withdraw_store"),
+        ("🛒 سحب", "store_section"),  # تم التصحيح: store_section بدلاً من withdraw_store
         ("🔗 الإحالة", "referral_menu"),
         ("✏️ تعديل حساباتي", "edit_my_accounts"),
     ]
@@ -292,14 +292,31 @@ async def my_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += "\n"
     await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
 
+# ==================== VIDEO CHECK HELPERS ====================
+def get_video_button(video_type: str, label: str) -> Optional[InlineKeyboardButton]:
+    config = load_json(DATA_DIR / "config.json")
+    video_path = config.get(f"video_{video_type}")
+    if video_path and Path(video_path).exists():
+        return InlineKeyboardButton(f"📺 شاهد شرح {label}", callback_data=f"play_video:{video_type}")
+    return None
+
 # ==================== ADD ACCOUNT FLOW ====================
 async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     SESSIONS[uid] = Session(step="email")
     prices = get_tier_prices()
+    
+    # بناء الأزرار مع زر الفيديو إذا وجد
+    buttons = [("❌ إلغاء", "cancel")]
+    video_btn = get_video_button("email", "إنشاء إيميل")
+    if video_btn:
+        buttons.insert(0, (video_btn.text, video_btn.callback_data))
+    
     await update.callback_query.edit_message_text(
         f"📝 *إضافة حساب جديد*\n\n💵 *نظام المكافآت:*\n• إيميل + باسورد فقط → ${prices['tier_1']:.2f}\n• إيميل + باسورد + رمز مصادقة → ${prices['tier_2']:.2f}\n• كامل → ${prices['tier_3']:.2f}\n\n📧 *الخطوة 1/4*: أرسل الإيميل:",
-        parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical([("❌ إلغاء", "cancel")]))
+        parse_mode=ParseMode.MARKDOWN, 
+        reply_markup=kb_vertical(buttons)
+    )
 
 async def add_account_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -319,6 +336,8 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not re.match(r"[^@]+@[^@]+\.[^@]+", text):
             await update.message.reply_text("❌ إيميل غير صالح.")
             return
+        
+        # التحقق من وجود الإيميل في الحسابات
         user_data = get_user(uid)
         for acc in user_data.get("approved_accounts", []):
             if acc.get("email") == text:
@@ -331,22 +350,50 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         session.email = text
         session.step = "password"
+        
+        buttons = [("❌ إلغاء", "cancel")]
+        video_btn = get_video_button("password", "كلمة المرور")
+        if video_btn:
+            buttons.insert(0, (video_btn.text, video_btn.callback_data))
+            
         await update.message.reply_text(
             f"🔑 *الخطوة 2/4*: أرسل كلمة المرور الأساسية:\n\n💰 *السعر الحالي:* ${prices['tier_1']:.2f}",
-            parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical([("❌ إلغاء", "cancel")]))
+            parse_mode=ParseMode.MARKDOWN, 
+            reply_markup=kb_vertical(buttons)
+        )
     
     elif session.step == "password":
+        # حذف رسالة المستخدم التي تحتوي على كلمة المرور
+        try:
+            await update.message.delete()
+        except:
+            pass
+            
         session.password = text
         session.has_password = True
         session.step = "totp"
+        
+        buttons = [
+            ("✅ استلم $0.10 (باسورد فقط)", f"submit_tier_1:{uid}"),
+            ("❌ إلغاء", "cancel")
+        ]
+        video_btn = get_video_button("totp", "رمز المصادقة")
+        if video_btn:
+            buttons.insert(0, (video_btn.text, video_btn.callback_data))
+            
         await update.message.reply_text(
             f"🔐 *الخطوة 3/4*: أرسل مفتاح المصادقة (Secret Key):\n\n💰 *السعر مع رمز المصادقة:* ${prices['tier_2']:.2f}\n\n📌 *يمكنك استلام {prices['tier_1']:.2f}$ الآن وإكمال الباقي لاحقاً*",
-            parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical([
-                ("✅ استلم $0.10 (باسورد فقط)", f"submit_tier_1:{uid}"),
-                ("❌ إلغاء", "cancel")
-            ]))
+            parse_mode=ParseMode.MARKDOWN, 
+            reply_markup=kb_vertical(buttons)
+        )
     
     elif session.step == "totp":
+        # حذف رسالة المستخدم التي تحتوي على رمز المصادقة
+        try:
+            await update.message.delete()
+        except:
+            pass
+            
         cleaned = text.replace(" ", "").upper()
         if len(cleaned) != 32 or not re.match(r'^[A-Z2-7]{32}$', cleaned):
             await update.message.reply_text("⚠️ مفتاح المصادقة غير صالح (32 حرفاً).")
@@ -354,14 +401,28 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session.totp = cleaned
         session.has_totp = True
         session.step = "app_pass"
+        
+        buttons = [
+            ("✅ استلم $0.15 (مع رمز المصادقة)", f"submit_tier_2:{uid}"),
+            ("❌ إلغاء", "cancel")
+        ]
+        video_btn = get_video_button("app_pass", "كلمة مرور التطبيق")
+        if video_btn:
+            buttons.insert(0, (video_btn.text, video_btn.callback_data))
+            
         await update.message.reply_text(
             f"🗝 *الخطوة 4/4*: أرسل كلمة مرور التطبيق (16 حرف):\n\n💰 *السعر الكامل:* ${prices['tier_3']:.2f}\n\n📌 *يمكنك استلام {prices['tier_2']:.2f}$ الآن وإكمال الباقي لاحقاً*",
-            parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical([
-                ("✅ استلم $0.15 (مع رمز المصادقة)", f"submit_tier_2:{uid}"),
-                ("❌ إلغاء", "cancel")
-            ]))
+            parse_mode=ParseMode.MARKDOWN, 
+            reply_markup=kb_vertical(buttons)
+        )
     
     elif session.step == "app_pass":
+        # حذف رسالة المستخدم التي تحتوي على كلمة مرور التطبيق
+        try:
+            await update.message.delete()
+        except:
+            pass
+            
         cleaned = text.replace(" ", "").upper()
         if len(cleaned) != 16 or not re.match(r'^[A-Z0-9]{16}$', cleaned):
             await update.message.reply_text("⚠️ كلمة مرور التطبيق غير صالحة (16 حرفاً).")
@@ -375,11 +436,14 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         try:
             user_data = get_user(uid)
+            
+            # التحقق مرة أخرى من عدم وجود الإيميل
             if session.email in user_data["pending_accounts"]:
                 await update.message.reply_text("⚠️ هذا الإيميل قيد الانتظار بالفعل!")
                 SESSIONS.pop(uid, None)
                 return
             
+            # حفظ الحساب
             user_data["pending_accounts"][session.email] = {
                 "email": session.email,
                 "password": session.password,
@@ -399,11 +463,18 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             await update.message.reply_text(
                 f"✅ *تم إرسال الطلب للمالك!*\n💰 تمت إضافة *${final_price:.2f}* إلى الأموال قيد الانتظار.\n📧 الإيميل: `{session.email}`",
-                parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+                parse_mode=ParseMode.MARKDOWN, 
+                reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu")
+            )
         except Exception as e:
             logger.error(f"Error saving account: {e}")
-            save_lost_request(uid, session.email, session.password, session.totp, session.app_pass, f"error_saving: {str(e)}")
-            await update.message.reply_text("⚠️ حدث خطأ في حفظ الطلب. سيتم حفظه في قائمة الطلبات المفقودة.", reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+            # لا نحفظ في المفقودات إذا كان الإيميل موجوداً بالفعل
+            if session.email not in user_data.get("pending_accounts", {}):
+                save_lost_request(uid, session.email, session.password, session.totp, session.app_pass, f"error_saving: {str(e)}")
+            await update.message.reply_text(
+                "⚠️ حدث خطأ في حفظ الطلب. يرجى المحاولة مرة أخرى.",
+                reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu")
+            )
             SESSIONS.pop(uid, None)
 
 async def submit_tier_1(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -418,6 +489,14 @@ async def submit_tier_1(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         user_data = get_user(uid)
+        
+        # التحقق من عدم وجود الإيميل
+        if session.email in user_data["pending_accounts"]:
+            await query.edit_message_text("⚠️ هذا الإيميل قيد الانتظار بالفعل!", 
+                reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+            SESSIONS.pop(uid, None)
+            return
+            
         user_data["pending_accounts"][session.email] = {
             "email": session.email,
             "password": session.password,
@@ -436,10 +515,13 @@ async def submit_tier_1(update: Update, context: ContextTypes.DEFAULT_TYPE):
         SESSIONS.pop(uid, None)
         await query.edit_message_text(
             f"✅ *تم إرسال الطلب!*\n💰 تمت إضافة *${price:.2f}* إلى الأموال قيد الانتظار.",
-            parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+            parse_mode=ParseMode.MARKDOWN, 
+            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu")
+        )
     except Exception as e:
-        save_lost_request(uid, session.email, session.password, "", "", f"submit_tier_1_error: {str(e)}")
-        await query.edit_message_text("⚠️ حدث خطأ. تم حفظ الطلب في قائمة الطلبات المفقودة.", reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        logger.error(f"Error in submit_tier_1: {e}")
+        await query.edit_message_text("⚠️ حدث خطأ. يرجى المحاولة مرة أخرى.", 
+            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
         SESSIONS.pop(uid, None)
 
 async def submit_tier_2(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -454,6 +536,14 @@ async def submit_tier_2(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         user_data = get_user(uid)
+        
+        # التحقق من عدم وجود الإيميل
+        if session.email in user_data["pending_accounts"]:
+            await query.edit_message_text("⚠️ هذا الإيميل قيد الانتظار بالفعل!", 
+                reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+            SESSIONS.pop(uid, None)
+            return
+            
         user_data["pending_accounts"][session.email] = {
             "email": session.email,
             "password": session.password,
@@ -472,10 +562,13 @@ async def submit_tier_2(update: Update, context: ContextTypes.DEFAULT_TYPE):
         SESSIONS.pop(uid, None)
         await query.edit_message_text(
             f"✅ *تم إرسال الطلب!*\n💰 تمت إضافة *${price:.2f}* إلى الأموال قيد الانتظار.",
-            parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+            parse_mode=ParseMode.MARKDOWN, 
+            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu")
+        )
     except Exception as e:
-        save_lost_request(uid, session.email, session.password, session.totp, "", f"submit_tier_2_error: {str(e)}")
-        await query.edit_message_text("⚠️ حدث خطأ. تم حفظ الطلب في قائمة الطلبات المفقودة.", reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        logger.error(f"Error in submit_tier_2: {e}")
+        await query.edit_message_text("⚠️ حدث خطأ. يرجى المحاولة مرة أخرى.", 
+            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
         SESSIONS.pop(uid, None)
 
 # ==================== MY WALLET ====================
@@ -484,7 +577,136 @@ async def my_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = get_user(query.from_user.id)
     await query.edit_message_text(
         f"💰 *أموالي*\n\n⏳ قيد الانتظار: ${float(user.get('pending_balance', 0.0)):.2f}\n✅ الرصيد المملوك: ${float(user.get('balance', 0.0)):.2f}",
-        parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        parse_mode=ParseMode.MARKDOWN, 
+        reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu")
+    )
+
+# ==================== STORE SECTION (للمستخدمين) ====================
+async def user_store_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """قسم السحب للمستخدمين العاديين"""
+    query = update.callback_query
+    user_data = get_user(query.from_user.id)
+    balance = user_data.get("balance", 0.0)
+    
+    if balance <= 0:
+        await query.edit_message_text(
+            "💰 *السحب*\n\n⚠️ لا يوجد رصيد قابل للسحب حالياً.\n\n📌 يمكنك كسب الرصيد عن طريق إضافة حسابات جديدة.",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu")
+        )
+        return
+    
+    buttons = [
+        (f"💸 سحب ${balance:.2f}", f"withdraw:{query.from_user.id}"),
+        ("🔙 القائمة الرئيسية", "main_menu")
+    ]
+    
+    await query.edit_message_text(
+        f"💰 *السحب*\n\n📌 رصيدك الحالي: *${balance:.2f}*\n\n🛒 يمكنك سحب رصيدك عن طريق الضغط على الزر أدناه.\n\n⚠️ سيتم مراجعة طلب السحب من قبل المالك.",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_vertical(buttons)
+    )
+
+async def withdraw_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالجة طلب السحب"""
+    query = update.callback_query
+    user_id = int(query.data.split(":")[1])
+    user_data = get_user(user_id)
+    balance = user_data.get("balance", 0.0)
+    
+    if balance <= 0:
+        await query.edit_message_text("⚠️ لا يوجد رصيد للسحب.", 
+            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        return
+    
+    # إرسال طلب السحب للمالك
+    msg = f"💰 *طلب سحب جديد*\n\n👤 المستخدم: {query.from_user.full_name} (@{query.from_user.username})\n🆔 المعرف: `{user_id}`\n💵 المبلغ: *${balance:.2f}*\n📊 الرصيد الكلي: ${user_data.get('balance', 0.0):.2f}\n\n📌 تم إرسال طلب السحب للمالك للمراجعة."
+    
+    # إرسال للمالك
+    if OWNER_ID:
+        try:
+            await context.bot.send_message(
+                chat_id=OWNER_ID,
+                text=msg,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ قبول السحب", callback_data=f"approve_withdraw:{user_id}:{balance}")],
+                    [InlineKeyboardButton("❌ رفض السحب", callback_data=f"reject_withdraw:{user_id}")]
+                ])
+            )
+        except Exception as e:
+            logger.error(f"Error sending withdraw notification: {e}")
+    
+    await query.edit_message_text(
+        f"✅ *تم إرسال طلب السحب!*\n\n💰 المبلغ: *${balance:.2f}*\n⏳ في انتظار موافقة المالك.\n\n📌 سيتم إعلامك عند الموافقة.",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu")
+    )
+
+async def approve_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """قبول طلب السحب من المالك"""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    parts = query.data.split(":")
+    user_id = int(parts[1])
+    amount = float(parts[2])
+    
+    user_data = get_user(user_id)
+    current_balance = user_data.get("balance", 0.0)
+    
+    if current_balance < amount:
+        await query.edit_message_text("⚠️ الرصيد غير كافٍ للسحب.", 
+            reply_markup=kb_single("🔙 إعدادات المالك", "owner_panel"))
+        return
+    
+    # خصم الرصيد
+    user_data["balance"] -= amount
+    user_data["spent_balance"] += amount
+    save_user(user_id, user_data)
+    
+    # إرسال إشعار للمستخدم
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"✅ *تم قبول طلب السحب الخاص بك!*\n\n💰 المبلغ: *${amount:.2f}*\n📌 تم خصم المبلغ من رصيدك.\n\n📊 الرصيد المتبقي: ${user_data.get('balance', 0.0):.2f}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except Exception as e:
+        logger.error(f"Error sending withdraw confirmation: {e}")
+    
+    await query.edit_message_text(
+        f"✅ *تم قبول طلب السحب!*\n\n👤 المستخدم: `{user_id}`\n💰 المبلغ: *${amount:.2f}*\n📌 تم خصم الرصيد بنجاح.",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_single("🔙 إعدادات المالك", "owner_panel")
+    )
+
+async def reject_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """رفض طلب السحب من المالك"""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    user_id = int(query.data.split(":")[1])
+    
+    # إرسال إشعار للمستخدم
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="❌ *تم رفض طلب السحب الخاص بك.*\n\n📌 يرجى التواصل مع المالك لمعرفة السبب.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except Exception as e:
+        logger.error(f"Error sending withdraw rejection: {e}")
+    
+    await query.edit_message_text(
+        f"❌ *تم رفض طلب السحب!*\n\n👤 المستخدم: `{user_id}`",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_single("🔙 إعدادات المالك", "owner_panel")
+    )
 
 # ==================== OWNER PANEL ====================
 async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -500,9 +722,29 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ("📢 قناة إجبارية", "forced_channel"),
         ("📊 جميع الحسابات", "all_accounts_section"),
         ("📂 الطلبات المفقودة", "view_lost_requests"),
+        ("💸 طلبات السحب", "withdraw_requests"),
         ("🔙 القائمة الرئيسية", "main_menu")
     ]
-    await query.edit_message_text("⚙️ *لوحة تحكم المالك*\n\nاختر الإعداد الذي تريد تعديله:", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
+    await query.edit_message_text("⚙️ *لوحة تحكم المالك*\n\nاختر الإعداد الذي تريد تعديله:", 
+        parse_mode=ParseMode.MARKDOWN, 
+        reply_markup=kb_vertical(buttons)
+    )
+
+# ==================== WITHDRAW REQUESTS (للمالك) ====================
+async def owner_withdraw_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """عرض طلبات السحب للمالك"""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    
+    # هنا يمكن إضافة نظام لتخزين طلبات السحب
+    # حالياً سنعرض رسالة بسيطة
+    await query.edit_message_text(
+        "💸 *طلبات السحب*\n\n📌 هذا القسم قيد التطوير.\n\n📊 حالياً يتم إرسال طلبات السحب مباشرة للمالك عبر الرسائل الخاصة.",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_single("🔙 إعدادات المالك", "owner_panel")
+    )
 
 # ==================== TIER PRICES ====================
 async def set_tier_prices(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -519,7 +761,9 @@ async def set_tier_prices(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     await query.edit_message_text(
         f"💰 *إعدادات أسعار المستويات*\n\n📌 *المستوى 1:* إيميل + باسورد فقط → `${prices['tier_1']:.2f}`\n📌 *المستوى 2:* إيميل + باسورد + رمز مصادقة → `${prices['tier_2']:.2f}`\n📌 *المستوى 3:* إيميل + باسورد + رمز مصادقة + كلمة مرور تطبيق → `${prices['tier_3']:.2f}`\n\nاختر المستوى لتعديل سعره:",
-        parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
+        parse_mode=ParseMode.MARKDOWN, 
+        reply_markup=kb_vertical(buttons)
+    )
 
 async def set_tier(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -530,7 +774,8 @@ async def set_tier(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["setting_tier"] = tier
     tier_names = {"1": "المستوى 1 (إيميل + باسورد فقط)", "2": "المستوى 2 (إيميل + باسورد + رمز مصادقة)", "3": "المستوى 3 (كامل)"}
     await query.edit_message_text(f"💰 *تعديل سعر {tier_names[tier]}*\n\nأرسل السعر الجديد (رقم فقط):\n📌 مثال: 0.25",
-                                  parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 إلغاء", "set_tier_prices"))
+                                  parse_mode=ParseMode.MARKDOWN, 
+                                  reply_markup=kb_single("🔙 إلغاء", "set_tier_prices"))
     context.user_data["mode"] = "set_tier_price"
 
 # ==================== VIDEOS SECTION ====================
@@ -540,9 +785,14 @@ async def videos_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
     config = load_json(DATA_DIR / "config.json")
-    video_types = {"general": "📖 شرح عام للبوت", "email": "📹 فيديو إنشاء إيميل", "password": "📹 فيديو تغيير باسورد",
-                   "totp": "📹 فيديو إضافة 2FA", "app_pass": "📹 فيديو كلمة مرور التطبيق",
-                   "leave": "📹 فيديو المغادرة"}
+    video_types = {
+        "general": "📖 شرح عام للبوت", 
+        "email": "📹 فيديو إنشاء إيميل", 
+        "password": "📹 فيديو تغيير باسورد",
+        "totp": "📹 فيديو إضافة 2FA", 
+        "app_pass": "📹 فيديو كلمة مرور التطبيق",
+        "leave": "📹 فيديو المغادرة"
+    }
     buttons = []
     for key, name in video_types.items():
         video_path = config.get(f"video_{key}")
@@ -550,8 +800,11 @@ async def videos_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status = "✅" if exists else "❌"
         buttons.append((f"{status} {name}", f"video_action:{key}"))
     buttons.append(("🔙 إعدادات المالك", "owner_panel"))
-    await query.edit_message_text("📹 *قسم الفيديوهات*\n\n✅ = فيديو موجود\n❌ = فيديو غير موجود\n\nاختر الفيديو لإدارته:",
-                                  parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
+    await query.edit_message_text(
+        "📹 *قسم الفيديوهات*\n\n✅ = فيديو موجود\n❌ = فيديو غير موجود\n\nاختر الفيديو لإدارته:",
+        parse_mode=ParseMode.MARKDOWN, 
+        reply_markup=kb_vertical(buttons)
+    )
 
 async def video_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -569,8 +822,11 @@ async def video_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons.append(("📤 رفع فيديو جديد", f"set_video:{video_type}"))
     buttons.append(("🔙 قسم الفيديوهات", "videos_section"))
     status = "✅ موجود" if exists else "❌ غير موجود"
-    await query.edit_message_text(f"📹 *فيديو {video_type}*\n\nالحالة: {status}\n\nاختر الإجراء المناسب:",
-                                  parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
+    await query.edit_message_text(
+        f"📹 *فيديو {video_type}*\n\nالحالة: {status}\n\nاختر الإجراء المناسب:",
+        parse_mode=ParseMode.MARKDOWN, 
+        reply_markup=kb_vertical(buttons)
+    )
 
 async def view_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -582,7 +838,11 @@ async def view_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     video_path = config.get(f"video_{video_type}")
     if video_path and Path(video_path).exists():
         try:
-            await context.bot.send_video(chat_id=query.from_user.id, video=open(video_path, "rb"), caption=f"📹 *فيديو {video_type}*")
+            await context.bot.send_video(
+                chat_id=query.from_user.id, 
+                video=open(video_path, "rb"), 
+                caption=f"📹 *فيديو {video_type}*"
+            )
             await video_action(update, context)
         except:
             await query.edit_message_text("⚠️ حدث خطأ في عرض الفيديو.")
@@ -615,7 +875,8 @@ async def set_video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     video_type = query.data.split(":", 1)[1]
     context.user_data["pending_video_type"] = video_type
-    await query.edit_message_text(f"📤 *أرسل الفيديو الخاص بـ {video_type} الآن (كملف فيديو):*", parse_mode=ParseMode.MARKDOWN)
+    await query.edit_message_text(f"📤 *أرسل الفيديو الخاص بـ {video_type} الآن (كملف فيديو):*", 
+        parse_mode=ParseMode.MARKDOWN)
 
 async def handle_video_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
@@ -838,7 +1099,8 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     key_data = get_pending_key(short_key)
     if not key_data:
-        await query.edit_message_text("⚠️ هذا الطلب غير موجود أو انتهت صلاحيته.", reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
+        await query.edit_message_text("⚠️ هذا الطلب غير موجود أو انتهت صلاحيته.", 
+            reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
         return
     
     uid = key_data["user_id"]
@@ -848,7 +1110,8 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     account = user_data.get("pending_accounts", {}).get(email)
     
     if not account:
-        await query.edit_message_text("⚠️ هذا الطلب غير موجود.", reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
+        await query.edit_message_text("⚠️ هذا الطلب غير موجود.", 
+            reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
         return
     
     msg = "📋 *تفاصيل الطلب*\n\n"
@@ -881,11 +1144,9 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def safe_reply_text(update: Update, text: str, parse_mode: str = ParseMode.MARKDOWN, reply_markup=None):
     """إرسال رسالة مع حذف رسالة المستخدم تلقائياً"""
     try:
-        # حذف رسالة المستخدم
         await update.message.delete()
     except:
         pass
-    # إرسال الرد
     await update.message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
 
 # ==================== TIERED APPROVAL HANDLERS ====================
@@ -898,7 +1159,8 @@ async def approve_tier1(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     key_data = get_pending_key(short_key)
     if not key_data:
-        await query.edit_message_text("⚠️ لم يتم العثور على الطلب.", reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
+        await query.edit_message_text("⚠️ لم يتم العثور على الطلب.", 
+            reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
         return
     
     uid = key_data["user_id"]
@@ -925,7 +1187,8 @@ async def approve_tier2(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     key_data = get_pending_key(short_key)
     if not key_data:
-        await query.edit_message_text("⚠️ لم يتم العثور على الطلب.", reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
+        await query.edit_message_text("⚠️ لم يتم العثور على الطلب.", 
+            reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
         return
     
     uid = key_data["user_id"]
@@ -952,14 +1215,17 @@ async def approve_tier3(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     key_data = get_pending_key(short_key)
     if not key_data:
-        await query.edit_message_text("⚠️ لم يتم العثور على الطلب.", reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
+        await query.edit_message_text("⚠️ لم يتم العثور على الطلب.", 
+            reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
         return
     
     uid = key_data["user_id"]
     email = key_data["email"]
     
     await complete_approval(update, context, uid, email, short_key)
-    await query.edit_message_text(f"✅ تم قبول الحساب `{email}` بنجاح!", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
+    await query.edit_message_text(f"✅ تم قبول الحساب `{email}` بنجاح!", 
+        parse_mode=ParseMode.MARKDOWN, 
+        reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
 
 async def handle_approval_totp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -975,7 +1241,8 @@ async def handle_approval_totp(update: Update, context: ContextTypes.DEFAULT_TYP
     account = user_data.get("pending_accounts", {}).get(email)
     
     if not account:
-        await safe_reply_text(update, "⚠️ الطلب غير موجود.", reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
+        await safe_reply_text(update, "⚠️ الطلب غير موجود.", 
+            reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
         return
     
     if text.lower() == "تخطي":
@@ -1001,7 +1268,6 @@ async def handle_approval_totp(update: Update, context: ContextTypes.DEFAULT_TYP
     save_user(uid, user_data)
     context.user_data["approval_step"] = "waiting_app_pass"
     
-    # توليد كود TOTP من 6 أرقام
     try:
         totp = pyotp.TOTP(cleaned)
         totp_code = totp.now()
@@ -1027,7 +1293,8 @@ async def handle_approval_app_pass(update: Update, context: ContextTypes.DEFAULT
     account = user_data.get("pending_accounts", {}).get(email)
     
     if not account:
-        await safe_reply_text(update, "⚠️ الطلب غير موجود.", reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
+        await safe_reply_text(update, "⚠️ الطلب غير موجود.", 
+            reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
         return
     
     if text.lower() == "تخطي":
@@ -1036,7 +1303,8 @@ async def handle_approval_app_pass(update: Update, context: ContextTypes.DEFAULT
         user_data["pending_accounts"][email] = account
         save_user(uid, user_data)
         await complete_approval(update, context, uid, email, short_key)
-        await safe_reply_text(update, "✅ تم قبول الحساب!", reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        await safe_reply_text(update, "✅ تم قبول الحساب!", 
+            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
         context.user_data.pop("approval_step", None)
         context.user_data.pop("approval_uid", None)
         context.user_data.pop("approval_email", None)
@@ -1055,7 +1323,8 @@ async def handle_approval_app_pass(update: Update, context: ContextTypes.DEFAULT
     save_user(uid, user_data)
     
     await complete_approval(update, context, uid, email, short_key)
-    await safe_reply_text(update, "✅ تم قبول الحساب بنجاح!", reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+    await safe_reply_text(update, "✅ تم قبول الحساب بنجاح!", 
+        reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
     context.user_data.pop("approval_step", None)
     context.user_data.pop("approval_uid", None)
     context.user_data.pop("approval_email", None)
@@ -1088,7 +1357,8 @@ async def reject_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     key_data = get_pending_key(short_key)
     if not key_data:
-        await query.edit_message_text("⚠️ لم يتم العثور على الطلب.", reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
+        await query.edit_message_text("⚠️ لم يتم العثور على الطلب.", 
+            reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
         return
     
     uid = key_data["user_id"]
@@ -1098,7 +1368,8 @@ async def reject_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     account = user_data.get("pending_accounts", {}).get(email)
     
     if not account:
-        await query.edit_message_text("⚠️ هذا الطلب غير موجود.", reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
+        await query.edit_message_text("⚠️ هذا الطلب غير موجود.", 
+            reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
         return
     
     price = account.get("amount", 0.0)
@@ -1109,7 +1380,9 @@ async def reject_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     delete_pending_key(short_key)
     
-    await query.edit_message_text(f"❌ تم رفض الحساب `{email}`.", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
+    await query.edit_message_text(f"❌ تم رفض الحساب `{email}`.", 
+        parse_mode=ParseMode.MARKDOWN, 
+        reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
 
 # ==================== RECOVER LOST ====================
 async def recover_all_lost(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1154,7 +1427,8 @@ async def recover_all_lost(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     clear_lost_request("", 0)
     
-    await query.edit_message_text(f"✅ تم استعادة {recovered} طلب بنجاح!", reply_markup=kb_single("🔙 الطلبات المفقودة", "view_lost_requests"))
+    await query.edit_message_text(f"✅ تم استعادة {recovered} طلب بنجاح!", 
+        reply_markup=kb_single("🔙 الطلبات المفقودة", "view_lost_requests"))
 
 # ==================== ALL ACCOUNTS SECTION ====================
 async def all_accounts_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1167,7 +1441,9 @@ async def all_accounts_section(update: Update, context: ContextTypes.DEFAULT_TYP
         ("🆕 الحسابات غير المستخرجة", "unextracted_accounts"),
         ("🔙 إعدادات المالك", "owner_panel")
     ]
-    await query.edit_message_text("📊 *جميع الحسابات المقبولة*\n\nاختر الخيار المناسب:", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
+    await query.edit_message_text("📊 *جميع الحسابات المقبولة*\n\nاختر الخيار المناسب:", 
+        parse_mode=ParseMode.MARKDOWN, 
+        reply_markup=kb_vertical(buttons))
 
 async def all_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1181,7 +1457,8 @@ async def all_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
             all_accounts.append(acc)
     
     if not all_accounts:
-        await query.edit_message_text("📭 لا توجد حسابات.", reply_markup=kb_single("🔙 جميع الحسابات", "all_accounts_section"))
+        await query.edit_message_text("📭 لا توجد حسابات.", 
+            reply_markup=kb_single("🔙 جميع الحسابات", "all_accounts_section"))
         return
     
     msg = f"📊 *جميع الحسابات ({len(all_accounts)})*\n\n"
@@ -1245,7 +1522,8 @@ async def unextracted_accounts(update: Update, context: ContextTypes.DEFAULT_TYP
                 unextracted.append({"user_id": uid, "index": idx, "account": acc})
     
     if not unextracted:
-        await query.edit_message_text("✅ لا توجد حسابات غير مستخرجة.", reply_markup=kb_single("🔙 جميع الحسابات", "all_accounts_section"))
+        await query.edit_message_text("✅ لا توجد حسابات غير مستخرجة.", 
+            reply_markup=kb_single("🔙 جميع الحسابات", "all_accounts_section"))
         return
     
     msg = f"🆕 *الحسابات غير المستخرجة ({len(unextracted)})*\n\n"
@@ -1277,10 +1555,12 @@ async def mark_all_extracted(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 acc["extracted"] = True
                 marked += 1
         save_user(int(uid), user_data)
-    await query.edit_message_text(f"✅ تم وضع علامة مستخرجة على {marked} حساب.", reply_markup=kb_single("🔙 جميع الحسابات", "all_accounts_section"))
+    await query.edit_message_text(f"✅ تم وضع علامة مستخرجة على {marked} حساب.", 
+        reply_markup=kb_single("🔙 جميع الحسابات", "all_accounts_section"))
 
-# ==================== STORE SECTION ====================
+# ==================== STORE SECTION (للمالك) ====================
 async def store_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """قسم المبيعات للمالك"""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
@@ -1293,14 +1573,18 @@ async def store_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
             buttons.append((f"📂 {cat['name']}", f"store_category:{cat['id']}"))
     buttons.append(("➕ إضافة فئة جديدة", "store_add_category"))
     buttons.append(("🔙 إعدادات المالك", "owner_panel"))
-    await query.edit_message_text("🛒 *إدارة المبيعات*\n\nاختر فئة لعرض مبيعاتها أو أضف فئة جديدة:", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
+    await query.edit_message_text("🛒 *إدارة المبيعات*\n\nاختر فئة لعرض مبيعاتها أو أضف فئة جديدة:", 
+        parse_mode=ParseMode.MARKDOWN, 
+        reply_markup=kb_vertical(buttons))
 
 async def store_add_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
-    await query.edit_message_text("✏️ *إضافة فئة جديدة*\n\nأرسل اسم الفئة (مثال: حسابات، اشتراكات، أدوات):", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 إلغاء", "store_section"))
+    await query.edit_message_text("✏️ *إضافة فئة جديدة*\n\nأرسل اسم الفئة (مثال: حسابات، اشتراكات، أدوات):", 
+        parse_mode=ParseMode.MARKDOWN, 
+        reply_markup=kb_single("🔙 إلغاء", "store_section"))
     context.user_data["store_action"] = "add_category"
 
 async def store_category_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1312,7 +1596,8 @@ async def store_category_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
     config = load_json(DATA_DIR / "config.json")
     category = next((c for c in config.get("store_categories", []) if c["id"] == cat_id), None)
     if not category:
-        await query.edit_message_text("⚠️ الفئة غير موجودة.", reply_markup=kb_single("🔙 المبيعات", "store_section"))
+        await query.edit_message_text("⚠️ الفئة غير موجودة.", 
+            reply_markup=kb_single("🔙 المبيعات", "store_section"))
         return
     services = category.get("services", [])
     msg = f"📂 *{category['name']}*\n\n"
@@ -1336,7 +1621,9 @@ async def store_add_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cat_id = query.data.split(":", 1)[1]
     context.user_data["current_category_id"] = cat_id
     context.user_data["store_action"] = "add_service_name"
-    await query.edit_message_text("✏️ *إضافة مبيعة جديدة*\n\n📌 الخطوة 1/3: أرسل اسم المبيعة:", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 إلغاء", f"store_category:{cat_id}"))
+    await query.edit_message_text("✏️ *إضافة مبيعة جديدة*\n\n📌 الخطوة 1/3: أرسل اسم المبيعة:", 
+        parse_mode=ParseMode.MARKDOWN, 
+        reply_markup=kb_single("🔙 إلغاء", f"store_category:{cat_id}"))
 
 async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
@@ -1358,7 +1645,9 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     elif action == "add_service_name":
         context.user_data["store_service_name"] = text
         context.user_data["store_action"] = "add_service_price"
-        await update.message.reply_text("💰 *الخطوة 2/3*: أرسل سعر المبيعة (رقم فقط):", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 إلغاء", f"store_category:{context.user_data.get('current_category_id')}"))
+        await update.message.reply_text("💰 *الخطوة 2/3*: أرسل سعر المبيعة (رقم فقط):", 
+            parse_mode=ParseMode.MARKDOWN, 
+            reply_markup=kb_single("🔙 إلغاء", f"store_category:{context.user_data.get('current_category_id')}"))
     elif action == "add_service_price":
         try:
             price = float(text)
@@ -1367,7 +1656,9 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 return
             context.user_data["store_service_price"] = price
             context.user_data["store_action"] = "add_service_message"
-            await update.message.reply_text("📝 *الخطوة 3/3*: أرسل الرسالة التي ستظهر للعميل بعد الشراء:", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 إلغاء", f"store_category:{context.user_data.get('current_category_id')}"))
+            await update.message.reply_text("📝 *الخطوة 3/3*: أرسل الرسالة التي ستظهر للعميل بعد الشراء:", 
+                parse_mode=ParseMode.MARKDOWN, 
+                reply_markup=kb_single("🔙 إلغاء", f"store_category:{context.user_data.get('current_category_id')}"))
         except ValueError:
             await update.message.reply_text("⚠️ يرجى إرسال رقم صحيح (مثال: 10.50)")
     elif action == "add_service_message":
@@ -1400,13 +1691,16 @@ async def store_delete_service(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     services = category.get("services", [])
     if not services:
-        await query.edit_message_text("📭 لا توجد مبيعات لحذفها.", reply_markup=kb_single("🔙 الفئة", f"store_category:{cat_id}"))
+        await query.edit_message_text("📭 لا توجد مبيعات لحذفها.", 
+            reply_markup=kb_single("🔙 الفئة", f"store_category:{cat_id}"))
         return
     buttons = []
     for s in services:
         buttons.append((f"❌ {s['name']} - ${s['price']:.2f}", f"delete_service:{cat_id}:{s['id']}"))
     buttons.append(("🔙 الفئة", f"store_category:{cat_id}"))
-    await query.edit_message_text("🗑️ *حذف مبيعة*\nاختر المبيعة للحذف:", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
+    await query.edit_message_text("🗑️ *حذف مبيعة*\nاختر المبيعة للحذف:", 
+        parse_mode=ParseMode.MARKDOWN, 
+        reply_markup=kb_vertical(buttons))
 
 async def delete_service_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1422,7 +1716,8 @@ async def delete_service_execute(update: Update, context: ContextTypes.DEFAULT_T
             cat["services"] = [s for s in cat["services"] if s["id"] != service_id]
             break
     save_json(DATA_DIR / "config.json", config)
-    await query.edit_message_text("✅ تم حذف المبيعة بنجاح.", reply_markup=kb_single("🔙 الفئة", f"store_category:{cat_id}"))
+    await query.edit_message_text("✅ تم حذف المبيعة بنجاح.", 
+        reply_markup=kb_single("🔙 الفئة", f"store_category:{cat_id}"))
 
 # ==================== FORCED CHANNEL ====================
 async def forced_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1434,7 +1729,8 @@ async def forced_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     current_channel = config.get("forced_channel", "")
     await query.edit_message_text(
         f"📢 *إعدادات القناة الإجبارية*\n\n📌 القناة الحالية: {current_channel if current_channel else 'لا توجد'}\n\n✏️ أرسل معرف القناة الجديدة (مثال: @my_channel):",
-        parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical([("🔙 إعدادات المالك", "owner_panel")]))
+        parse_mode=ParseMode.MARKDOWN, 
+        reply_markup=kb_vertical([("🔙 إعدادات المالك", "owner_panel")]))
     context.user_data["store_action"] = "set_channel"
 
 async def remove_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1445,7 +1741,8 @@ async def remove_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_json(DATA_DIR / "config.json")
     config["forced_channel"] = ""
     save_json(DATA_DIR / "config.json", config)
-    await query.edit_message_text("✅ تم إلغاء القناة الإجبارية.", reply_markup=kb_single("🔙 إعدادات المالك", "owner_panel"))
+    await query.edit_message_text("✅ تم إلغاء القناة الإجبارية.", 
+        reply_markup=kb_single("🔙 إعدادات المالك", "owner_panel"))
 
 # ==================== REFERRAL ====================
 async def referral_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1468,16 +1765,26 @@ async def copy_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
     code = query.data.split(":")[1]
     bot_username = (await context.bot.get_me()).username
     link = f"https://t.me/{bot_username}?start={code}"
-    await query.edit_message_text(f"📋 *رابط الإحالة:*\n\n`{link}`\n\n📌 يمكنك نسخ الرابط ومشاركته.", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 الإحالة", "referral_menu"))
+    await query.edit_message_text(f"📋 *رابط الإحالة:*\n\n`{link}`\n\n📌 يمكنك نسخ الرابط ومشاركته.", 
+        parse_mode=ParseMode.MARKDOWN, 
+        reply_markup=kb_single("🔙 الإحالة", "referral_menu"))
 
 # ==================== TUTORIALS ====================
 async def tutorials(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     config = load_json(DATA_DIR / "config.json")
     buttons = []
-    for key in ["general", "email", "password", "totp", "app_pass", "leave"]:
+    video_names = {
+        "general": "شرح عام للبوت",
+        "email": "إنشاء إيميل",
+        "password": "كلمة المرور",
+        "totp": "رمز المصادقة (2FA)",
+        "app_pass": "كلمة مرور التطبيق",
+        "leave": "المغادرة"
+    }
+    for key, name in video_names.items():
         if config.get(f"video_{key}") and Path(config.get(f"video_{key}", "")).exists():
-            buttons.append((f"📹 {key}", f"play_video:{key}"))
+            buttons.append((f"📹 {name}", f"play_video:{key}"))
     buttons.append(("🔙 القائمة الرئيسية", "main_menu"))
     await query.edit_message_text("📺 *اختر الدرس:*", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
 
@@ -1488,7 +1795,11 @@ async def play_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     path = config.get(f"video_{vtype}")
     if path and Path(path).exists():
         try:
-            await context.bot.send_video(chat_id=query.from_user.id, video=open(path, "rb"), caption=f"📹 *فيديو {vtype}*")
+            await context.bot.send_video(
+                chat_id=query.from_user.id, 
+                video=open(path, "rb"), 
+                caption=f"📹 *فيديو {vtype}*"
+            )
             await tutorials(update, context)
         except:
             await query.edit_message_text("⚠️ حدث خطأ في تشغيل الفيديو.")
@@ -1559,7 +1870,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await delete_video(update, context)
     elif data.startswith("set_video:"):
         await set_video_callback(update, context)
-    elif data == "store_section":
+    elif data == "store_section":  # للمالك
         await store_section(update, context)
     elif data == "store_add_category":
         await store_add_category(update, context)
@@ -1591,11 +1902,20 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await copy_referral(update, context)
     elif data == "recover_all_lost":
         await recover_all_lost(update, context)
+    elif data == "withdraw_requests":
+        await owner_withdraw_requests(update, context)
+    elif data.startswith("withdraw:"):
+        await withdraw_request(update, context)
+    elif data.startswith("approve_withdraw:"):
+        await approve_withdraw(update, context)
+    elif data.startswith("reject_withdraw:"):
+        await reject_withdraw(update, context)
     else:
         await placeholder(update, context)
 
 async def placeholder(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.edit_message_text("⚠️ خيار غير معروف حالياً.", reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+    await update.callback_query.edit_message_text("⚠️ خيار غير معروف حالياً.", 
+        reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
 
 # ==================== TEXT INPUT ====================
 async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1654,7 +1974,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if referrer_id:
                 user_data["referred_by"] = referrer_id
                 save_user(update.effective_user.id, user_data)
-                await update.message.reply_text(f"✅ *تم تفعيل الإحالة!*\n\n👤 تمت إحالتك بواسطة: {referrer_id}", parse_mode=ParseMode.MARKDOWN)
+                await update.message.reply_text(f"✅ *تم تفعيل الإحالة!*\n\n👤 تمت إحالتك بواسطة: {referrer_id}", 
+                    parse_mode=ParseMode.MARKDOWN)
                 return
     await main_menu(update, context)
 
