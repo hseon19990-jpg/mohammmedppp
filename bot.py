@@ -1,6 +1,7 @@
 """
 Advanced Telegram Account Manager Bot - FINAL 100% WORKING
 - Fixed: view_pending button not working
+- Fixed: BadRequest error
 - Fixed: All approval buttons working
 - Added: Deleted/Lost requests section
 - All info copyable
@@ -13,7 +14,7 @@ import os
 import re
 import secrets
 from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional, List, Any, Union
 
@@ -95,12 +96,10 @@ def generate_referral_code():
 
 # ==================== LOST/DELETED EMAILS SYSTEM ====================
 def save_lost_request(user_id: int, email: str, password: str, totp: str = "", app_pass: str = "", reason: str = "unknown"):
-    """حفظ إيميل فشل في الوصول إلى النظام لاستعادته لاحقاً"""
     lost_data = load_json(LOST_DB)
     if not isinstance(lost_data, list):
         lost_data = []
     
-    # تجنب التكرار
     for item in lost_data:
         if item.get("email") == email and item.get("user_id") == user_id:
             return
@@ -155,7 +154,6 @@ class Session:
 
 SESSIONS: Dict[int, Session] = {}
 PENDING_PURCHASES: Dict[int, Dict] = {}
-LEAVE_HOLD_SECONDS = 24 * 60 * 60
 
 # ==================== PRICING ====================
 def get_tier_prices() -> dict:
@@ -237,9 +235,7 @@ async def my_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if pending_accounts:
         msg += "⏳ *منتظرة:*\n"
         for idx, acc in enumerate(pending_accounts, 1):
-            status = acc.get("verification_status", "pending")
-            icon = "🔄" if status == "verifying" else "⏳"
-            msg += f"  {idx}. 📧 `{acc.get('email', '')}` {icon}\n"
+            msg += f"  {idx}. 📧 `{acc.get('email', '')}` ⏳\n"
         msg += "\n"
     if rejected:
         msg += "❌ *مرفوضة:*\n"
@@ -275,7 +271,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not re.match(r"[^@]+@[^@]+\.[^@]+", text):
             await update.message.reply_text("❌ إيميل غير صالح.")
             return
-        # التحقق من التكرار
         user_data = get_user(uid)
         for acc in user_data.get("approved_accounts", []):
             if acc.get("email") == text:
@@ -359,7 +354,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
         except Exception as e:
             logger.error(f"Error saving account: {e}")
-            # حفظ الطلب المفقود
             save_lost_request(uid, session.email, session.password, session.totp, session.app_pass, f"error_saving: {str(e)}")
             await update.message.reply_text("⚠️ حدث خطأ في حفظ الطلب. سيتم حفظه في قائمة الطلبات المفقودة.", reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
             SESSIONS.pop(uid, None)
@@ -609,36 +603,48 @@ async def approval_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     await query.edit_message_text("📋 *الطلبات*\n\nاختر القسم:", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
 
-# ==================== VIEW PENDING ====================
+# ==================== VIEW PENDING (FIXED) ====================
 async def view_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
     
-    users = load_json(USERS_DB)
-    pending = []
-    for uid, u_data in users.items():
-        for email, account in u_data.get("pending_accounts", {}).items():
-            pending.append({"user_id": uid, "email": email, "account": account})
-    
-    if not pending:
-        await query.edit_message_text("📭 لا توجد طلبات منتظرة.", reply_markup=kb_single("🔙 الطلبات", "approval_requests"))
-        return
-    
-    buttons = []
-    for req in pending:
-        account = req["account"]
-        tier_icon = "🟢" if account.get("has_app_pass") else "🟡" if account.get("has_totp") else "🔵"
-        email_display = req["email"][:15] + "..." if len(req["email"]) > 15 else req["email"]
-        buttons.append((f"{tier_icon} {email_display}", f"pending_detail:{req['user_id']}:{req['email']}"))
-    buttons.append(("🔙 الطلبات", "approval_requests"))
-    
-    await query.edit_message_text(
-        "⏳ *الطلبات المنتظرة*\n🟢 مكتمل | 🟡 مع رمز المصادقة | 🔵 باسورد فقط\n\nاختر الإيميل:",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb_vertical(buttons)
-    )
+    try:
+        users = load_json(USERS_DB)
+        pending = []
+        for uid, u_data in users.items():
+            for email, account in u_data.get("pending_accounts", {}).items():
+                pending.append({"user_id": uid, "email": email, "account": account})
+        
+        if not pending:
+            # إرسال رسالة جديدة بدلاً من تعديل الرسالة القديمة
+            await query.message.reply_text(
+                "📭 لا توجد طلبات منتظرة.",
+                reply_markup=kb_single("🔙 الطلبات", "approval_requests")
+            )
+            return
+        
+        buttons = []
+        for req in pending:
+            account = req["account"]
+            tier_icon = "🟢" if account.get("has_app_pass") else "🟡" if account.get("has_totp") else "🔵"
+            email_display = req["email"][:15] + "..." if len(req["email"]) > 15 else req["email"]
+            buttons.append((f"{tier_icon} {email_display}", f"pending_detail:{req['user_id']}:{req['email']}"))
+        buttons.append(("🔙 الطلبات", "approval_requests"))
+        
+        # إرسال رسالة جديدة
+        await query.message.reply_text(
+            "⏳ *الطلبات المنتظرة*\n🟢 مكتمل | 🟡 مع رمز المصادقة | 🔵 باسورد فقط\n\nاختر الإيميل:",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=kb_vertical(buttons)
+        )
+    except Exception as e:
+        logger.exception(f"Error in view_pending: {e}")
+        await query.message.reply_text(
+            "⚠️ حدث خطأ أثناء تحميل الطلبات.",
+            reply_markup=kb_single("🔙 الطلبات", "approval_requests")
+        )
 
 async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -656,7 +662,6 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("⚠️ هذا الطلب غير موجود.", reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
         return
     
-    # بناء رسالة قابلة للنسخ
     msg = "📋 *تفاصيل الطلب*\n\n"
     msg += f"📧 الإيميل: `{email}`\n"
     msg += f"🔑 الباسورد: `{account.get('password', '')}`\n"
