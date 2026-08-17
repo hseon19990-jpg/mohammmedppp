@@ -1,8 +1,7 @@
 """
 Advanced Telegram Account Manager Bot - ULTIMATE FIXED
-- Fixed: view_pending error with corrupted data
-- Fixed: BadRequest error
-- Added: Deleted/Lost requests section
+- Fixed: Button_data_invalid (using short keys)
+- Fixed: view_pending error
 - All info copyable
 """
 
@@ -599,7 +598,7 @@ async def approval_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     await query.edit_message_text("📋 *الطلبات*\n\nاختر القسم:", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
 
-# ==================== VIEW PENDING (ULTIMATE FIX) ====================
+# ==================== VIEW PENDING ====================
 async def view_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
@@ -609,8 +608,8 @@ async def view_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         users = load_json(USERS_DB)
         pending = []
+        pending_keys = {}  # تخزين مفاتيح مختصرة للأزرار
         
-        # تصفية البيانات التالفة
         for uid, u_data in users.items():
             if not isinstance(u_data, dict):
                 continue
@@ -620,7 +619,15 @@ async def view_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for email, account in pending_accounts.items():
                 if not isinstance(email, str) or not isinstance(account, dict):
                     continue
-                pending.append({"user_id": uid, "email": email, "account": account})
+                # إنشاء مفتاح فريد قصير
+                short_key = f"{uid}_{email[:5]}{secrets.token_hex(2)}"
+                pending_keys[short_key] = {"uid": uid, "email": email}
+                pending.append({
+                    "short_key": short_key,
+                    "uid": uid,
+                    "email": email,
+                    "account": account
+                })
         
         if not pending:
             await query.message.reply_text(
@@ -634,7 +641,7 @@ async def view_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
             account = req["account"]
             tier_icon = "🟢" if account.get("has_app_pass") else "🟡" if account.get("has_totp") else "🔵"
             email_display = req["email"][:15] + "..." if len(req["email"]) > 15 else req["email"]
-            buttons.append((f"{tier_icon} {email_display}", f"pending_detail:{req['user_id']}:{req['email']}"))
+            buttons.append((f"{tier_icon} {email_display}", f"pending:{req['short_key']}"))
         buttons.append(("🔙 الطلبات", "approval_requests"))
         
         await query.message.reply_text(
@@ -649,21 +656,71 @@ async def view_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=kb_single("🔙 الطلبات", "approval_requests")
         )
 
+# ==================== PENDING DETAIL (مع مفاتيح مختصرة) ====================
 async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
-    parts = query.data.split(":")
-    uid = int(parts[1])
-    email = parts[2]
+    short_key = query.data.split(":")[1]
     
-    user_data = get_user(uid)
-    account = user_data.get("pending_accounts", {}).get(email)
+    # استرجاع البيانات من المفاتيح المخزنة
+    users = load_json(USERS_DB)
+    found_uid = None
+    found_email = None
+    found_account = None
     
-    if not account:
+    # البحث عن الإيميل المرتبط بالمفتاح
+    for uid, u_data in users.items():
+        if not isinstance(u_data, dict):
+            continue
+        pending_accounts = u_data.get("pending_accounts", {})
+        if not isinstance(pending_accounts, dict):
+            continue
+        for email, account in pending_accounts.items():
+            if not isinstance(email, str) or not isinstance(account, dict):
+                continue
+            # إنشاء مفتاح بنفس الطريقة للتحقق
+            test_key = f"{uid}_{email[:5]}{secrets.token_hex(2)}"
+            # سنخزن المفاتيح في الذاكرة المؤقتة بدلاً من ذلك
+            if short_key in context.user_data.get("pending_keys", {}):
+                data = context.user_data["pending_keys"][short_key]
+                found_uid = data["uid"]
+                found_email = data["email"]
+                found_account = pending_accounts[found_email]
+                break
+        if found_uid:
+            break
+    
+    # إذا لم نجد، نبحث مباشرة
+    if not found_uid:
+        for uid, u_data in users.items():
+            if not isinstance(u_data, dict):
+                continue
+            pending_accounts = u_data.get("pending_accounts", {})
+            if not isinstance(pending_accounts, dict):
+                continue
+            for email, account in pending_accounts.items():
+                if not isinstance(email, str) or not isinstance(account, dict):
+                    continue
+                # تخزين كل المفاتيح
+                for key in context.user_data.get("pending_keys", {}):
+                    data = context.user_data["pending_keys"][key]
+                    if data["uid"] == str(uid) and data["email"] == email:
+                        found_uid = uid
+                        found_email = email
+                        found_account = account
+                        break
+            if found_uid:
+                break
+    
+    if not found_uid or not found_email or not found_account:
         await query.edit_message_text("⚠️ هذا الطلب غير موجود.", reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
         return
+    
+    uid = int(found_uid) if isinstance(found_uid, str) else found_uid
+    email = found_email
+    account = found_account
     
     msg = "📋 *تفاصيل الطلب*\n\n"
     msg += f"📧 الإيميل: `{email}`\n"
@@ -680,36 +737,43 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     has_app_pass = account.get("has_app_pass", False)
     
     if not has_totp and not has_app_pass:
-        buttons.append(("✅ قبول (سيطلب TOTP ثم App Pass)", f"approve_tier1:{uid}:{email}"))
+        buttons.append(("✅ قبول (سيطلب TOTP ثم App Pass)", f"approve_tier1:{short_key}"))
     elif has_totp and not has_app_pass:
-        buttons.append(("✅ قبول (سيطلب App Pass)", f"approve_tier2:{uid}:{email}"))
+        buttons.append(("✅ قبول (سيطلب App Pass)", f"approve_tier2:{short_key}"))
     else:
-        buttons.append(("✅ قبول فوري", f"approve_tier3:{uid}:{email}"))
+        buttons.append(("✅ قبول فوري", f"approve_tier3:{short_key}"))
     
-    buttons.append(("❌ رفض", f"reject_request:{uid}:{email}"))
+    buttons.append(("❌ رفض", f"reject:{short_key}"))
     buttons.append(("🔙 الطلبات المنتظرة", "view_pending"))
     
     await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
 
-# ==================== TIERED APPROVAL HANDLERS ====================
+# ==================== TIERED APPROVAL HANDLERS (مع مفاتيح مختصرة) ====================
 async def approve_tier1(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
-    parts = query.data.split(":")
-    uid = int(parts[1])
-    email = parts[2]
+    short_key = query.data.split(":")[1]
+    
+    data = context.user_data.get("pending_keys", {}).get(short_key)
+    if not data:
+        await query.edit_message_text("⚠️ لم يتم العثور على الطلب.", reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
+        return
+    
+    uid = int(data["uid"])
+    email = data["email"]
     
     context.user_data["approval_uid"] = uid
     context.user_data["approval_email"] = email
+    context.user_data["approval_short_key"] = short_key
     context.user_data["approval_step"] = "waiting_totp"
     context.user_data["approval_tier"] = 1
     
     await query.edit_message_text(
         f"🔐 *طلب رمز المصادقة (TOTP)*\n\n📧 الإيميل: `{email}`\n\nأرسل رمز المصادقة (32 حرفاً):\nالصيغة: XXXX XXXX XXXX XXXX XXXX XXXX XXXX XXXX\n\n_يمكنك كتابة 'تخطي' لتخطي هذه الخطوة_",
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb_single("🔙 إلغاء", f"pending_detail:{uid}:{email}")
+        reply_markup=kb_single("🔙 إلغاء", f"pending:{short_key}")
     )
 
 async def approve_tier2(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -717,19 +781,26 @@ async def approve_tier2(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
-    parts = query.data.split(":")
-    uid = int(parts[1])
-    email = parts[2]
+    short_key = query.data.split(":")[1]
+    
+    data = context.user_data.get("pending_keys", {}).get(short_key)
+    if not data:
+        await query.edit_message_text("⚠️ لم يتم العثور على الطلب.", reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
+        return
+    
+    uid = int(data["uid"])
+    email = data["email"]
     
     context.user_data["approval_uid"] = uid
     context.user_data["approval_email"] = email
+    context.user_data["approval_short_key"] = short_key
     context.user_data["approval_step"] = "waiting_app_pass"
     context.user_data["approval_tier"] = 2
     
     await query.edit_message_text(
         f"🗝 *طلب كلمة مرور التطبيق (App Pass)*\n\n📧 الإيميل: `{email}`\n\nأرسل كلمة مرور التطبيق (16 حرفاً):\nالصيغة: XXXX XXXX XXXX XXXX\n\n_يمكنك كتابة 'تخطي' لتخطي هذه الخطوة_",
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb_single("🔙 إلغاء", f"pending_detail:{uid}:{email}")
+        reply_markup=kb_single("🔙 إلغاء", f"pending:{short_key}")
     )
 
 async def approve_tier3(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -737,17 +808,24 @@ async def approve_tier3(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
-    parts = query.data.split(":")
-    uid = int(parts[1])
-    email = parts[2]
+    short_key = query.data.split(":")[1]
     
-    await complete_approval(update, context, uid, email)
+    data = context.user_data.get("pending_keys", {}).get(short_key)
+    if not data:
+        await query.edit_message_text("⚠️ لم يتم العثور على الطلب.", reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
+        return
+    
+    uid = int(data["uid"])
+    email = data["email"]
+    
+    await complete_approval(update, context, uid, email, short_key)
     await query.edit_message_text(f"✅ تم قبول الحساب `{email}` بنجاح!", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
 
 async def handle_approval_totp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     uid = context.user_data.get("approval_uid")
     email = context.user_data.get("approval_email")
+    short_key = context.user_data.get("approval_short_key")
     
     if not uid or not email:
         await update.message.reply_text("⚠️ حدث خطأ، حاول مرة أخرى.")
@@ -769,7 +847,7 @@ async def handle_approval_totp(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(
             f"✅ تم تخطي رمز المصادقة.\n\n🗝 *الآن أرسل كلمة مرور التطبيق (16 حرفاً):*",
             parse_mode=ParseMode.MARKDOWN,
-            reply_markup=kb_single("🔙 إلغاء", f"pending_detail:{uid}:{email}")
+            reply_markup=kb_single("🔙 إلغاء", f"pending:{short_key}")
         )
         return
     
@@ -787,13 +865,14 @@ async def handle_approval_totp(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.message.reply_text(
         f"✅ تم استلام رمز المصادقة!\n\n🗝 *الآن أرسل كلمة مرور التطبيق (16 حرفاً):*",
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb_single("🔙 إلغاء", f"pending_detail:{uid}:{email}")
+        reply_markup=kb_single("🔙 إلغاء", f"pending:{short_key}")
     )
 
 async def handle_approval_app_pass(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     uid = context.user_data.get("approval_uid")
     email = context.user_data.get("approval_email")
+    short_key = context.user_data.get("approval_short_key")
     
     if not uid or not email:
         await update.message.reply_text("⚠️ حدث خطأ، حاول مرة أخرى.")
@@ -811,11 +890,12 @@ async def handle_approval_app_pass(update: Update, context: ContextTypes.DEFAULT
         account["has_app_pass"] = False
         user_data["pending_accounts"][email] = account
         save_user(uid, user_data)
-        await complete_approval(update, context, uid, email)
+        await complete_approval(update, context, uid, email, short_key)
         await update.message.reply_text("✅ تم قبول الحساب!", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
         context.user_data.pop("approval_step", None)
         context.user_data.pop("approval_uid", None)
         context.user_data.pop("approval_email", None)
+        context.user_data.pop("approval_short_key", None)
         context.user_data.pop("approval_tier", None)
         return
     
@@ -829,14 +909,15 @@ async def handle_approval_app_pass(update: Update, context: ContextTypes.DEFAULT
     user_data["pending_accounts"][email] = account
     save_user(uid, user_data)
     
-    await complete_approval(update, context, uid, email)
+    await complete_approval(update, context, uid, email, short_key)
     await update.message.reply_text("✅ تم قبول الحساب بنجاح!", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
     context.user_data.pop("approval_step", None)
     context.user_data.pop("approval_uid", None)
     context.user_data.pop("approval_email", None)
+    context.user_data.pop("approval_short_key", None)
     context.user_data.pop("approval_tier", None)
 
-async def complete_approval(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: int, email: str):
+async def complete_approval(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: int, email: str, short_key: str):
     user_data = get_user(uid)
     account = user_data.get("pending_accounts", {}).get(email)
     
@@ -850,15 +931,25 @@ async def complete_approval(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     user_data["approved_accounts"].append(account)
     user_data["total_approved_emails"] += 1
     save_user(uid, user_data)
+    
+    # حذف المفتاح من الذاكرة
+    if short_key in context.user_data.get("pending_keys", {}):
+        del context.user_data["pending_keys"][short_key]
 
 async def reject_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
-    parts = query.data.split(":")
-    uid = int(parts[1])
-    email = parts[2]
+    short_key = query.data.split(":")[1]
+    
+    data = context.user_data.get("pending_keys", {}).get(short_key)
+    if not data:
+        await query.edit_message_text("⚠️ لم يتم العثور على الطلب.", reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
+        return
+    
+    uid = int(data["uid"])
+    email = data["email"]
     
     user_data = get_user(uid)
     account = user_data.get("pending_accounts", {}).get(email)
@@ -872,6 +963,10 @@ async def reject_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     del user_data["pending_accounts"][email]
     user_data["rejected_accounts"].append(account)
     save_user(uid, user_data)
+    
+    # حذف المفتاح من الذاكرة
+    if short_key in context.user_data.get("pending_keys", {}):
+        del context.user_data["pending_keys"][short_key]
     
     await query.edit_message_text(f"❌ تم رفض الحساب `{email}`.", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
 
@@ -1389,7 +1484,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await view_rejected(update, context)
     elif data == "view_lost_requests":
         await view_lost_requests(update, context)
-    elif data.startswith("pending_detail:"):
+    elif data.startswith("pending:"):
         await pending_detail(update, context)
     elif data.startswith("approve_tier1:"):
         await approve_tier1(update, context)
@@ -1397,7 +1492,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await approve_tier2(update, context)
     elif data.startswith("approve_tier3:"):
         await approve_tier3(update, context)
-    elif data.startswith("reject_request:"):
+    elif data.startswith("reject:"):
         await reject_request(update, context)
     elif data == "videos_section":
         await videos_section(update, context)
