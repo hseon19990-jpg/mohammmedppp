@@ -610,9 +610,12 @@ async def approval_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def view_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    if not query:
+        return
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
+    await query.answer()
     try:
         users = load_json(USERS_DB)
         if not isinstance(users, dict):
@@ -1378,8 +1381,6 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await set_tier(update, context)
     elif data == "approval_requests":
         await approval_requests(update, context)
-    elif data in {"view_pending", "view_pending_requests", "pending_requests"}:
-        await view_pending(update, context)
     elif data == "view_approved":
         await view_approved(update, context)
     elif data == "view_rejected":
@@ -1509,6 +1510,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(
+        CallbackQueryHandler(
+            view_pending,
+            pattern=r"^(view_pending|view_pending_requests|pending_requests)$",
+        )
+    )
     app.add_handler(CallbackQueryHandler(router))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_input))
     app.add_handler(MessageHandler(filters.VIDEO, handle_video_upload))
