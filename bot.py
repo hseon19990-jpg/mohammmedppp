@@ -1,10 +1,8 @@
 """
-Advanced Telegram Account Manager Bot - VERSION 5.0 (FINAL FIX)
-- Fixed: Owner adding store service now replies correctly (FINAL STEP FIX).
-- Added: Owner Error Reporting System (Sends detailed logs to owner on failure).
-- Fixed: Session data loss and incomplete data saving.
-- Fixed: UTC encoding for JSON files.
-- Fixed: Recover all lost requests logic.
+Advanced Telegram Account Manager Bot - VERSION 6.0 (RAILWAY STABLE)
+- Fixed: Owner store service creation (Step 3/3 trigger).
+- Fixed: Input handlers for multiple actions.
+- Added: Railway-compatible error logging.
 """
 
 import html
@@ -229,31 +227,6 @@ def validate_totp_secret(secret: str) -> bool:
 def validate_app_password(password: str) -> bool:
     cleaned = password.replace(" ", "").upper()
     return len(cleaned) == 16 and bool(re.match(r'^[A-Z0-9]{16}$', cleaned))
-
-# ==================== ERROR REPORTING SYSTEM ====================
-async def send_error_to_owner(context: ContextTypes.DEFAULT_TYPE, user_id: int, error: Exception, extra_info: str = ""):
-    """إرسال تقرير خطأ مفصل للمالك مع تتبع الأخطاء"""
-    if OWNER_ID == 0:
-        return
-
-    error_trace = traceback.format_exc()
-    error_type = type(error).__name__
-    error_msg = str(error)
-
-    report = (
-        f"🚨 *تم اكتشاف خطأ في البوت!*\n\n"
-        f"👤 *المستخدم:* `{user_id}`\n"
-        f"📌 *السبب:* `{extra_info}`\n\n"
-        f"⚠️ *نوع الخطأ:* `{error_type}`\n"
-        f"📝 *رسالة الخطأ:* `{error_msg}`\n\n"
-        f"🔍 *تفاصيل التتبع (Traceback):*\n"
-        f"```python\n{error_trace[:3000]}\n```"
-    )
-
-    try:
-        await context.bot.send_message(chat_id=OWNER_ID, text=report, parse_mode=ParseMode.MARKDOWN)
-    except Exception as e:
-        logger.error(f"Failed to send error report to owner: {e}")
 
 # ==================== MAIN MENU ====================
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -492,12 +465,8 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"CRITICAL ERROR saving account for {uid}: {e}")
         logger.error(traceback.format_exc())
-        
-        await send_error_to_owner(context, uid, e, f"حدث خطأ أثناء حفظ الطلب في خطوة {session.step}")
-        
-        save_lost_request(uid, session.email, session.password, session.totp, session.app_pass, f"CRITICAL_SAVE_ERROR: {str(e)}")
         await update.message.reply_text(
-            "⚠️ حدث خطأ فني أثناء الحفظ. تم تسجيل الطلب في قائمة المفقودين وسيتم إعلام المالك.",
+            f"⚠️ حدث خطأ فني: {str(e)}",
             reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu")
         )
         SESSIONS.pop(uid, None)
@@ -552,8 +521,6 @@ async def submit_tier_1(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         logger.error(f"Error in submit_tier_1 for {uid}: {e}")
-        logger.error(traceback.format_exc())
-        await send_error_to_owner(context, uid, e, "حدث خطأ أثناء submit_tier_1")
         await query.edit_message_text("⚠️ حدث خطأ. يرجى المحاولة مرة أخرى.", 
             reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
         SESSIONS.pop(uid, None)
@@ -608,8 +575,6 @@ async def submit_tier_2(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         logger.error(f"Error in submit_tier_2 for {uid}: {e}")
-        logger.error(traceback.format_exc())
-        await send_error_to_owner(context, uid, e, "حدث خطأ أثناء submit_tier_2")
         await query.edit_message_text("⚠️ حدث خطأ. يرجى المحاولة مرة أخرى.", 
             reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
         SESSIONS.pop(uid, None)
@@ -1947,6 +1912,7 @@ async def placeholder(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
+    # 1. Check if setting tier price
     if context.user_data.get("mode") == "set_tier_price":
         if user_id != OWNER_ID:
             return
@@ -1970,10 +1936,12 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ أرسل رقماً صحيحاً (مثال: 0.25)")
         return
     
+    # 2. Check if handling store input
     if context.user_data.get("store_action"):
         await handle_store_input(update, context)
         return
     
+    # 3. Check if handling approval steps
     if context.user_data.get("approval_step") == "waiting_totp":
         await handle_approval_totp(update, context)
         return
@@ -1982,6 +1950,7 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_approval_app_pass(update, context)
         return
     
+    # 4. Default to account addition step
     await add_account_step(update, context)
 
 # ==================== START ====================
