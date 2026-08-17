@@ -1,8 +1,8 @@
 """
-Advanced Telegram Account Manager Bot - ULTIMATE FIXED
+Advanced Telegram Account Manager Bot - FINAL WORKING VERSION
 - Fixed: Button_data_invalid (using short keys)
-- Fixed: view_pending error
-- All info copyable
+- Fixed: Request not found (keys stored in DB)
+- Owner sees real emails, bot uses short keys internally
 """
 
 import html
@@ -91,6 +91,36 @@ def save_user(user_id: int, user_data: dict):
 
 def generate_referral_code():
     return secrets.token_hex(4).upper()
+
+# ==================== SHORT KEY SYSTEM ====================
+def generate_short_key() -> str:
+    """توليد مفتاح قصير مكون من 4 أحرف"""
+    return secrets.token_hex(2).upper()  # 4 أحرف
+
+def save_pending_key(key: str, user_id: int, email: str):
+    """حفظ المفتاح القصير في ملف منفصل"""
+    keys_file = DATA_DIR / "pending_keys.json"
+    keys = load_json(keys_file)
+    if not isinstance(keys, dict):
+        keys = {}
+    keys[key] = {"user_id": user_id, "email": email}
+    save_json(keys_file, keys)
+
+def get_pending_key(key: str) -> Optional[Dict]:
+    """استرجاع البيانات من المفتاح القصير"""
+    keys_file = DATA_DIR / "pending_keys.json"
+    keys = load_json(keys_file)
+    if isinstance(keys, dict) and key in keys:
+        return keys[key]
+    return None
+
+def delete_pending_key(key: str):
+    """حذف المفتاح بعد الاستخدام"""
+    keys_file = DATA_DIR / "pending_keys.json"
+    keys = load_json(keys_file)
+    if isinstance(keys, dict) and key in keys:
+        del keys[key]
+        save_json(keys_file, keys)
 
 # ==================== LOST REQUESTS SYSTEM ====================
 def save_lost_request(user_id: int, email: str, password: str, totp: str = "", app_pass: str = "", reason: str = "unknown"):
@@ -598,7 +628,7 @@ async def approval_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     await query.edit_message_text("📋 *الطلبات*\n\nاختر القسم:", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
 
-# ==================== VIEW PENDING ====================
+# ==================== VIEW PENDING (USING SHORT KEYS) ====================
 async def view_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
@@ -608,7 +638,6 @@ async def view_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         users = load_json(USERS_DB)
         pending = []
-        pending_keys = {}  # تخزين مفاتيح مختصرة للأزرار
         
         for uid, u_data in users.items():
             if not isinstance(u_data, dict):
@@ -619,12 +648,13 @@ async def view_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for email, account in pending_accounts.items():
                 if not isinstance(email, str) or not isinstance(account, dict):
                     continue
-                # إنشاء مفتاح فريد قصير
-                short_key = f"{uid}_{email[:5]}{secrets.token_hex(2)}"
-                pending_keys[short_key] = {"uid": uid, "email": email}
+                # إنشاء مفتاح قصير وتخزينه في ملف منفصل
+                short_key = generate_short_key()
+                save_pending_key(short_key, int(uid), email)
+                
                 pending.append({
                     "short_key": short_key,
-                    "uid": uid,
+                    "uid": int(uid),
                     "email": email,
                     "account": account
                 })
@@ -641,6 +671,7 @@ async def view_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
             account = req["account"]
             tier_icon = "🟢" if account.get("has_app_pass") else "🟡" if account.get("has_totp") else "🔵"
             email_display = req["email"][:15] + "..." if len(req["email"]) > 15 else req["email"]
+            # نعرض الإيميل للمالك، لكن نستخدم المفتاح القصير في callback
             buttons.append((f"{tier_icon} {email_display}", f"pending:{req['short_key']}"))
         buttons.append(("🔙 الطلبات", "approval_requests"))
         
@@ -656,7 +687,7 @@ async def view_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=kb_single("🔙 الطلبات", "approval_requests")
         )
 
-# ==================== PENDING DETAIL (مع مفاتيح مختصرة) ====================
+# ==================== PENDING DETAIL ====================
 async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
@@ -664,63 +695,21 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     short_key = query.data.split(":")[1]
     
-    # استرجاع البيانات من المفاتيح المخزنة
-    users = load_json(USERS_DB)
-    found_uid = None
-    found_email = None
-    found_account = None
-    
-    # البحث عن الإيميل المرتبط بالمفتاح
-    for uid, u_data in users.items():
-        if not isinstance(u_data, dict):
-            continue
-        pending_accounts = u_data.get("pending_accounts", {})
-        if not isinstance(pending_accounts, dict):
-            continue
-        for email, account in pending_accounts.items():
-            if not isinstance(email, str) or not isinstance(account, dict):
-                continue
-            # إنشاء مفتاح بنفس الطريقة للتحقق
-            test_key = f"{uid}_{email[:5]}{secrets.token_hex(2)}"
-            # سنخزن المفاتيح في الذاكرة المؤقتة بدلاً من ذلك
-            if short_key in context.user_data.get("pending_keys", {}):
-                data = context.user_data["pending_keys"][short_key]
-                found_uid = data["uid"]
-                found_email = data["email"]
-                found_account = pending_accounts[found_email]
-                break
-        if found_uid:
-            break
-    
-    # إذا لم نجد، نبحث مباشرة
-    if not found_uid:
-        for uid, u_data in users.items():
-            if not isinstance(u_data, dict):
-                continue
-            pending_accounts = u_data.get("pending_accounts", {})
-            if not isinstance(pending_accounts, dict):
-                continue
-            for email, account in pending_accounts.items():
-                if not isinstance(email, str) or not isinstance(account, dict):
-                    continue
-                # تخزين كل المفاتيح
-                for key in context.user_data.get("pending_keys", {}):
-                    data = context.user_data["pending_keys"][key]
-                    if data["uid"] == str(uid) and data["email"] == email:
-                        found_uid = uid
-                        found_email = email
-                        found_account = account
-                        break
-            if found_uid:
-                break
-    
-    if not found_uid or not found_email or not found_account:
-        await query.edit_message_text("⚠️ هذا الطلب غير موجود.", reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
+    # استرجاع البيانات من المفتاح القصير
+    key_data = get_pending_key(short_key)
+    if not key_data:
+        await query.edit_message_text("⚠️ هذا الطلب غير موجود أو انتهت صلاحيته.", reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
         return
     
-    uid = int(found_uid) if isinstance(found_uid, str) else found_uid
-    email = found_email
-    account = found_account
+    uid = key_data["user_id"]
+    email = key_data["email"]
+    
+    user_data = get_user(uid)
+    account = user_data.get("pending_accounts", {}).get(email)
+    
+    if not account:
+        await query.edit_message_text("⚠️ هذا الطلب غير موجود.", reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
+        return
     
     msg = "📋 *تفاصيل الطلب*\n\n"
     msg += f"📧 الإيميل: `{email}`\n"
@@ -748,7 +737,7 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
 
-# ==================== TIERED APPROVAL HANDLERS (مع مفاتيح مختصرة) ====================
+# ==================== TIERED APPROVAL HANDLERS ====================
 async def approve_tier1(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
@@ -756,13 +745,13 @@ async def approve_tier1(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     short_key = query.data.split(":")[1]
     
-    data = context.user_data.get("pending_keys", {}).get(short_key)
-    if not data:
+    key_data = get_pending_key(short_key)
+    if not key_data:
         await query.edit_message_text("⚠️ لم يتم العثور على الطلب.", reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
         return
     
-    uid = int(data["uid"])
-    email = data["email"]
+    uid = key_data["user_id"]
+    email = key_data["email"]
     
     context.user_data["approval_uid"] = uid
     context.user_data["approval_email"] = email
@@ -783,13 +772,13 @@ async def approve_tier2(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     short_key = query.data.split(":")[1]
     
-    data = context.user_data.get("pending_keys", {}).get(short_key)
-    if not data:
+    key_data = get_pending_key(short_key)
+    if not key_data:
         await query.edit_message_text("⚠️ لم يتم العثور على الطلب.", reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
         return
     
-    uid = int(data["uid"])
-    email = data["email"]
+    uid = key_data["user_id"]
+    email = key_data["email"]
     
     context.user_data["approval_uid"] = uid
     context.user_data["approval_email"] = email
@@ -810,13 +799,13 @@ async def approve_tier3(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     short_key = query.data.split(":")[1]
     
-    data = context.user_data.get("pending_keys", {}).get(short_key)
-    if not data:
+    key_data = get_pending_key(short_key)
+    if not key_data:
         await query.edit_message_text("⚠️ لم يتم العثور على الطلب.", reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
         return
     
-    uid = int(data["uid"])
-    email = data["email"]
+    uid = key_data["user_id"]
+    email = key_data["email"]
     
     await complete_approval(update, context, uid, email, short_key)
     await query.edit_message_text(f"✅ تم قبول الحساب `{email}` بنجاح!", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
@@ -932,9 +921,8 @@ async def complete_approval(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     user_data["total_approved_emails"] += 1
     save_user(uid, user_data)
     
-    # حذف المفتاح من الذاكرة
-    if short_key in context.user_data.get("pending_keys", {}):
-        del context.user_data["pending_keys"][short_key]
+    # حذف المفتاح بعد الاستخدام
+    delete_pending_key(short_key)
 
 async def reject_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -943,13 +931,13 @@ async def reject_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     short_key = query.data.split(":")[1]
     
-    data = context.user_data.get("pending_keys", {}).get(short_key)
-    if not data:
+    key_data = get_pending_key(short_key)
+    if not key_data:
         await query.edit_message_text("⚠️ لم يتم العثور على الطلب.", reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
         return
     
-    uid = int(data["uid"])
-    email = data["email"]
+    uid = key_data["user_id"]
+    email = key_data["email"]
     
     user_data = get_user(uid)
     account = user_data.get("pending_accounts", {}).get(email)
@@ -964,9 +952,8 @@ async def reject_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data["rejected_accounts"].append(account)
     save_user(uid, user_data)
     
-    # حذف المفتاح من الذاكرة
-    if short_key in context.user_data.get("pending_keys", {}):
-        del context.user_data["pending_keys"][short_key]
+    # حذف المفتاح بعد الاستخدام
+    delete_pending_key(short_key)
     
     await query.edit_message_text(f"❌ تم رفض الحساب `{email}`.", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
 
