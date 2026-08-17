@@ -1,6 +1,7 @@
 """
-Advanced Telegram Account Manager Bot - VERSION 4.0 (ULTIMATE)
-- Added: Owner Error Reporting System (Sends detailed logs to owner on failure)
+Advanced Telegram Account Manager Bot - VERSION 5.0 (FINAL FIX)
+- Fixed: Owner adding store service now replies correctly (FINAL STEP FIX).
+- Added: Owner Error Reporting System (Sends detailed logs to owner on failure).
 - Fixed: Session data loss and incomplete data saving.
 - Fixed: UTC encoding for JSON files.
 - Fixed: Recover all lost requests logic.
@@ -233,7 +234,7 @@ def validate_app_password(password: str) -> bool:
 async def send_error_to_owner(context: ContextTypes.DEFAULT_TYPE, user_id: int, error: Exception, extra_info: str = ""):
     """إرسال تقرير خطأ مفصل للمالك مع تتبع الأخطاء"""
     if OWNER_ID == 0:
-        return  # لا يوجد مالك معرف
+        return
 
     error_trace = traceback.format_exc()
     error_type = type(error).__name__
@@ -246,7 +247,7 @@ async def send_error_to_owner(context: ContextTypes.DEFAULT_TYPE, user_id: int, 
         f"⚠️ *نوع الخطأ:* `{error_type}`\n"
         f"📝 *رسالة الخطأ:* `{error_msg}`\n\n"
         f"🔍 *تفاصيل التتبع (Traceback):*\n"
-        f"```python\n{error_trace[:3000]}\n```"  # تقطيع التتبع إذا كان طويلاً جداً
+        f"```python\n{error_trace[:3000]}\n```"
     )
 
     try:
@@ -318,10 +319,9 @@ def get_video_button(video_type: str, label: str) -> Optional[InlineKeyboardButt
         return InlineKeyboardButton(f"📺 شاهد شرح {label}", callback_data=f"play_video:{video_type}")
     return None
 
-# ==================== ADD ACCOUNT FLOW (REFACTORED) ====================
+# ==================== ADD ACCOUNT FLOW ====================
 async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    # Reset session completely to avoid ghost data
     SESSIONS[uid] = Session(step="email")
     prices = get_tier_prices()
     
@@ -346,7 +346,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     session = SESSIONS.get(uid)
     
-    # Security check: If session doesn't exist, block
     if not session or not session.step:
         await update.message.reply_text("⚠️ انتهت الجلسة. يرجى البدء من جديد.", reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
         return
@@ -452,7 +451,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user = update.effective_user
             final_price = calculate_account_price(session.has_totp, session.has_app_pass)
             
-            # Validate all required fields before saving
             if not session.email or not session.password:
                 await update.message.reply_text("⚠️ بيانات غير مكتملة. يرجى البدء من جديد.", reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
                 SESSIONS.pop(uid, None)
@@ -465,7 +463,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 SESSIONS.pop(uid, None)
                 return
             
-            # Build the account dictionary SAFELY
             account_dict = {
                 "email": session.email,
                 "password": session.password,
@@ -480,12 +477,10 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "verification_status": "pending",
             }
             
-            # SAVE
             user_data["pending_accounts"][session.email] = account_dict
             user_data["pending_balance"] += final_price
             save_user(uid, user_data)
             
-            # Clear session only AFTER successful save
             SESSIONS.pop(uid, None)
             
             await update.message.reply_text(
@@ -498,10 +493,8 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"CRITICAL ERROR saving account for {uid}: {e}")
         logger.error(traceback.format_exc())
         
-        # إرسال تقرير الخطأ للمالك
         await send_error_to_owner(context, uid, e, f"حدث خطأ أثناء حفظ الطلب في خطوة {session.step}")
         
-        # Save to lost requests
         save_lost_request(uid, session.email, session.password, session.totp, session.app_pass, f"CRITICAL_SAVE_ERROR: {str(e)}")
         await update.message.reply_text(
             "⚠️ حدث خطأ فني أثناء الحفظ. تم تسجيل الطلب في قائمة المفقودين وسيتم إعلام المالك.",
@@ -519,7 +512,6 @@ async def submit_tier_1(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     try:
-        # Check data integrity
         if not session.email or not session.password:
             await query.edit_message_text("⚠️ بيانات غير مكتملة. يرجى البدء من جديد.", 
                 reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
@@ -576,7 +568,6 @@ async def submit_tier_2(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     try:
-        # Check data integrity
         if not session.email or not session.password or not session.totp:
             await query.edit_message_text("⚠️ بيانات غير مكتملة. يرجى البدء من جديد.", 
                 reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
@@ -1441,7 +1432,6 @@ async def recover_all_lost(update: Update, context: ContextTypes.DEFAULT_TYPE):
         recovered += 1
         lost_emails_to_remove.append(email)
     
-    # Clean up lost DB to prevent duplicates
     if recovered > 0:
         current_lost = get_lost_requests()
         new_lost = []
@@ -1700,10 +1690,12 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         save_json(DATA_DIR / "config.json", config)
         
         await update.message.reply_text(
-            f"✅ تم إضافة المبيعة بنجاح!\n"
+            f"✅ *تم إضافة المبيعة بنجاح!*\n"
             f"📌 الاسم: {name}\n"
             f"💰 السعر: ${price:.2f}\n"
-            f"📝 الرسالة: {text}"
+            f"📝 الرسالة: {text}\n\n"
+            f"🛒 تم رفع المبيعة في قسم المتجر، يمكن للمستخدمين شراؤها الآن.",
+            parse_mode=ParseMode.MARKDOWN
         )
         context.user_data.pop("store_action", None)
         context.user_data.pop("store_service_name", None)
