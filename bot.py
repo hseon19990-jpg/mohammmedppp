@@ -613,11 +613,27 @@ async def view_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
-    users = load_json(USERS_DB)
-    pending = []
-    for uid, u_data in users.items():
-        for email, account in u_data.get("pending_accounts", {}).items():
-            pending.append({"user_id": uid, "email": email, "account": account})
+    try:
+        users = load_json(USERS_DB)
+        if not isinstance(users, dict):
+            users = {}
+        pending = []
+        for uid, u_data in users.items():
+            if not isinstance(u_data, dict):
+                continue
+            accounts = u_data.get("pending_accounts", {})
+            if not isinstance(accounts, dict):
+                continue
+            for email, account in accounts.items():
+                if isinstance(account, dict):
+                    pending.append({"user_id": uid, "email": email, "account": account})
+    except Exception:
+        logger.exception("Failed to load pending requests")
+        await query.edit_message_text(
+            "⚠️ تعذر تحميل الطلبات المنتظرة حالياً.",
+            reply_markup=kb_single("🔄 إعادة المحاولة", "view_pending"),
+        )
+        return
     
     if not pending:
         await query.edit_message_text("📭 لا توجد طلبات منتظرة.", reply_markup=kb_single("🔙 الطلبات", "approval_requests"))
