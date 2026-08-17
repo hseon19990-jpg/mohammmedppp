@@ -1,8 +1,7 @@
 """
-Advanced Telegram Account Manager Bot - FINAL 100% WORKING
-- Fixed: view_pending button not working
+Advanced Telegram Account Manager Bot - ULTIMATE FIXED
+- Fixed: view_pending error with corrupted data
 - Fixed: BadRequest error
-- Fixed: All approval buttons working
 - Added: Deleted/Lost requests section
 - All info copyable
 """
@@ -94,7 +93,7 @@ def save_user(user_id: int, user_data: dict):
 def generate_referral_code():
     return secrets.token_hex(4).upper()
 
-# ==================== LOST/DELETED EMAILS SYSTEM ====================
+# ==================== LOST REQUESTS SYSTEM ====================
 def save_lost_request(user_id: int, email: str, password: str, totp: str = "", app_pass: str = "", reason: str = "unknown"):
     lost_data = load_json(LOST_DB)
     if not isinstance(lost_data, list):
@@ -136,9 +135,6 @@ def kb_vertical(buttons: List[Union[tuple, list]]) -> InlineKeyboardMarkup:
 
 def kb_single(button_text: str, callback_data: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton(button_text, callback_data=callback_data)]])
-
-def tg_html_escape(value: Any) -> str:
-    return html.escape(str(value), quote=False)
 
 # ==================== SESSION ====================
 @dataclass
@@ -451,7 +447,7 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ("🛒 المبيعات", "store_section"),
         ("📢 قناة إجبارية", "forced_channel"),
         ("📊 جميع الحسابات", "all_accounts_section"),
-        ("📂 الطلبات المحذوفة/المفقودة", "view_lost_requests"),
+        ("📂 الطلبات المفقودة", "view_lost_requests"),
         ("🔙 القائمة الرئيسية", "main_menu")
     ]
     await query.edit_message_text("⚙️ *لوحة تحكم المالك*\n\nاختر الإعداد الذي تريد تعديله:", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
@@ -588,7 +584,7 @@ async def handle_video_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
     else:
         await update.message.reply_text("⚠️ يرجى إرسال فيديو صحيح.")
 
-# ==================== APPROVAL REQUESTS (TIERED SYSTEM) ====================
+# ==================== APPROVAL REQUESTS ====================
 async def approval_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
@@ -598,12 +594,12 @@ async def approval_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ("⏳ الطلبات المنتظرة", "view_pending"),
         ("✅ الطلبات المقبولة", "view_approved"),
         ("❌ الطلبات المرفوضة", "view_rejected"),
-        ("📂 الطلبات المحذوفة/المفقودة", "view_lost_requests"),
+        ("📂 الطلبات المفقودة", "view_lost_requests"),
         ("🔙 إعدادات المالك", "owner_panel")
     ]
     await query.edit_message_text("📋 *الطلبات*\n\nاختر القسم:", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
 
-# ==================== VIEW PENDING (FIXED) ====================
+# ==================== VIEW PENDING (ULTIMATE FIX) ====================
 async def view_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
@@ -613,12 +609,20 @@ async def view_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         users = load_json(USERS_DB)
         pending = []
+        
+        # تصفية البيانات التالفة
         for uid, u_data in users.items():
-            for email, account in u_data.get("pending_accounts", {}).items():
+            if not isinstance(u_data, dict):
+                continue
+            pending_accounts = u_data.get("pending_accounts", {})
+            if not isinstance(pending_accounts, dict):
+                continue
+            for email, account in pending_accounts.items():
+                if not isinstance(email, str) or not isinstance(account, dict):
+                    continue
                 pending.append({"user_id": uid, "email": email, "account": account})
         
         if not pending:
-            # إرسال رسالة جديدة بدلاً من تعديل الرسالة القديمة
             await query.message.reply_text(
                 "📭 لا توجد طلبات منتظرة.",
                 reply_markup=kb_single("🔙 الطلبات", "approval_requests")
@@ -633,7 +637,6 @@ async def view_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
             buttons.append((f"{tier_icon} {email_display}", f"pending_detail:{req['user_id']}:{req['email']}"))
         buttons.append(("🔙 الطلبات", "approval_requests"))
         
-        # إرسال رسالة جديدة
         await query.message.reply_text(
             "⏳ *الطلبات المنتظرة*\n🟢 مكتمل | 🟡 مع رمز المصادقة | 🔵 باسورد فقط\n\nاختر الإيميل:",
             parse_mode=ParseMode.MARKDOWN,
@@ -642,7 +645,7 @@ async def view_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.exception(f"Error in view_pending: {e}")
         await query.message.reply_text(
-            "⚠️ حدث خطأ أثناء تحميل الطلبات.",
+            f"⚠️ حدث خطأ: {str(e)}",
             reply_markup=kb_single("🔙 الطلبات", "approval_requests")
         )
 
@@ -930,7 +933,7 @@ async def view_rejected(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"\n📌 *تم عرض أول 20 من أصل {len(rejected)}*"
     await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 الطلبات", "approval_requests"))
 
-# ==================== VIEW LOST/DELETED REQUESTS ====================
+# ==================== VIEW LOST REQUESTS ====================
 async def view_lost_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
@@ -939,10 +942,10 @@ async def view_lost_requests(update: Update, context: ContextTypes.DEFAULT_TYPE)
     lost = get_lost_requests()
     
     if not lost:
-        await query.edit_message_text("📭 لا توجد طلبات محذوفة/مفقودة.", reply_markup=kb_single("🔙 الطلبات", "approval_requests"))
+        await query.edit_message_text("📭 لا توجد طلبات مفقودة.", reply_markup=kb_single("🔙 الطلبات", "approval_requests"))
         return
     
-    msg = f"📂 *الطلبات المحذوفة/المفقودة ({len(lost)})*\n\n"
+    msg = f"📂 *الطلبات المفقودة ({len(lost)})*\n\n"
     for idx, item in enumerate(lost[:20], 1):
         msg += f"{idx}. 📧 `{item.get('email', '')}`\n"
         msg += f"🔑 `{item.get('password', '')}`\n"
@@ -1003,7 +1006,7 @@ async def recover_all_lost(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     clear_lost_request("", 0)
     
-    await query.edit_message_text(f"✅ تم استعادة {recovered} طلب بنجاح!", reply_markup=kb_single("🔙 الطلبات المحذوفة", "view_lost_requests"))
+    await query.edit_message_text(f"✅ تم استعادة {recovered} طلب بنجاح!", reply_markup=kb_single("🔙 الطلبات المفقودة", "view_lost_requests"))
 
 # ==================== ALL ACCOUNTS SECTION ====================
 async def all_accounts_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
