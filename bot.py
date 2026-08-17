@@ -16,8 +16,7 @@ import secrets
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Dict, Optional, List, Any
-
+from typing import Dict, Optional, List, Any, Union
 import pyotp
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
