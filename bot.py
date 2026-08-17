@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import secrets
+import time
 import traceback
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -681,8 +682,11 @@ async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
     service_message = service.get("message", "شكراً لشرائك!")
     
     await query.edit_message_text(
-        f"✅ *تم الشراء بنجاح!*\n\n📌 تم خصم ${price:.2f} من رصيدك.\n\n📝 *تفاصيل طلبك:*\n\n{service_message}\n\n📊 رصيدك المتبقي: ${user_data.get('balance', 0.0):.2f}",
-        parse_mode=ParseMode.MARKDOWN,
+        f"✅ <b>تم الشراء بنجاح!</b>\n\n"
+        f"📌 تم خصم ${price:.2f} من رصيدك.\n\n"
+        f"📝 <b>تفاصيل طلبك:</b>\n\n{html.escape(str(service_message))}\n\n"
+        f"📊 رصيدك المتبقي: ${user_data.get('balance', 0.0):.2f}",
+        parse_mode=ParseMode.HTML,
         reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu")
     )
 
@@ -1647,20 +1651,34 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         price = context.user_data.get("store_service_price")
         cat_id = context.user_data.get("current_category_id")
         config = load_json(DATA_DIR / "config.json")
-        
-        for cat in config["store_categories"]:
-            if cat["id"] == cat_id:
-                cat["services"].append({"id": str(time.time_ns()), "name": name, "price": price, "message": text})
-                break
+
+        category = next(
+            (cat for cat in config.get("store_categories", []) if cat.get("id") == cat_id),
+            None,
+        )
+        if not category:
+            await update.message.reply_text(
+                "⚠️ تعذر العثور على الفئة. أعد فتح قسم المبيعات وحاول مرة أخرى."
+            )
+            context.user_data.pop("store_action", None)
+            return
+
+        category.setdefault("services", [])
+        category["services"].append({
+            "id": str(time.time_ns()),
+            "name": name,
+            "price": price,
+            "message": text,
+        })
         save_json(DATA_DIR / "config.json", config)
-        
+
         await update.message.reply_text(
-            f"✅ *تم إضافة المبيعة بنجاح!*\n"
-            f"📌 الاسم: {name}\n"
-            f"💰 السعر: ${price:.2f}\n"
-            f"📝 الرسالة: {text}\n\n"
+            f"✅ <b>تم إضافة المبيعة بنجاح!</b>\n"
+            f"📌 الاسم: {html.escape(str(name))}\n"
+            f"💰 السعر: ${float(price):.2f}\n"
+            f"📝 الرسالة: {html.escape(text)}\n\n"
             f"🛒 تم رفع المبيعة في قسم المتجر، يمكن للمستخدمين شراؤها الآن.",
-            parse_mode=ParseMode.MARKDOWN
+            parse_mode=ParseMode.HTML
         )
         context.user_data.pop("store_action", None)
         context.user_data.pop("store_service_name", None)
