@@ -1,5 +1,4 @@
 python-telegram-bot[job-queue]==20.7
 pyotp==2.9.0
 python-dotenv==1.0.1
-curl-cffi
 Pillow==10.4.0
