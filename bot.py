@@ -1,10 +1,9 @@
 """
-Advanced Telegram Account Manager Bot - FINAL VERSION (BUG FIXES)
-- Fixed: User session save errors during approval.
-- Fixed: UTF-8 encoding issues preventing non-ASCII emails from saving.
-- Fixed: Lost requests recovery logic.
-- Fixed: Store purchase flow for users.
-- All sensitive messages are auto-deleted.
+Advanced Telegram Account Manager Bot - VERSION 4.0 (ULTIMATE)
+- Added: Owner Error Reporting System (Sends detailed logs to owner on failure)
+- Fixed: Session data loss and incomplete data saving.
+- Fixed: UTC encoding for JSON files.
+- Fixed: Recover all lost requests logic.
 """
 
 import html
@@ -13,6 +12,7 @@ import logging
 import os
 import re
 import secrets
+import traceback
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,7 +44,7 @@ DATA_DIR = Path(os.environ.get("DATA_DIR", "/app/data")).resolve()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
@@ -55,13 +55,13 @@ PENDING_KEYS_DB = DATA_DIR / "pending_keys.json"
 VIDEOS_DIR = DATA_DIR / "videos"
 VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
 
-# ==================== DATA HELPERS (FIXED ENCODING) ====================
+# ==================== DATA HELPERS ====================
 def load_json(path: Path) -> dict:
     if not path.exists():
         return {}
     try:
-        # IMPORTANT: Ensures utf-8 encoding for non-ASCII emails/names
-        return json.loads(path.read_text(encoding="utf-8"))
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
     except Exception as e:
         logger.error(f"Error loading JSON {path}: {e}")
         return {}
@@ -69,8 +69,8 @@ def load_json(path: Path) -> dict:
 def save_json(path: Path, data: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        # IMPORTANT: Ensures utf-8 encoding to prevent corruption
-        path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
     except Exception as e:
         logger.error(f"Error saving JSON {path}: {e}")
 
@@ -229,17 +229,30 @@ def validate_app_password(password: str) -> bool:
     cleaned = password.replace(" ", "").upper()
     return len(cleaned) == 16 and bool(re.match(r'^[A-Z0-9]{16}$', cleaned))
 
-def format_app_password(password: str) -> str:
-    cleaned = password.replace(" ", "").upper()
-    if len(cleaned) != 16:
-        return password
-    return f"{cleaned[0:4]} {cleaned[4:8]} {cleaned[8:12]} {cleaned[12:16]}"
+# ==================== ERROR REPORTING SYSTEM ====================
+async def send_error_to_owner(context: ContextTypes.DEFAULT_TYPE, user_id: int, error: Exception, extra_info: str = ""):
+    """إرسال تقرير خطأ مفصل للمالك مع تتبع الأخطاء"""
+    if OWNER_ID == 0:
+        return  # لا يوجد مالك معرف
 
-def format_totp_secret(secret: str) -> str:
-    cleaned = secret.replace(" ", "").upper()
-    if len(cleaned) != 32:
-        return secret
-    return " ".join([cleaned[i:i+4] for i in range(0, 32, 4)])
+    error_trace = traceback.format_exc()
+    error_type = type(error).__name__
+    error_msg = str(error)
+
+    report = (
+        f"🚨 *تم اكتشاف خطأ في البوت!*\n\n"
+        f"👤 *المستخدم:* `{user_id}`\n"
+        f"📌 *السبب:* `{extra_info}`\n\n"
+        f"⚠️ *نوع الخطأ:* `{error_type}`\n"
+        f"📝 *رسالة الخطأ:* `{error_msg}`\n\n"
+        f"🔍 *تفاصيل التتبع (Traceback):*\n"
+        f"```python\n{error_trace[:3000]}\n```"  # تقطيع التتبع إذا كان طويلاً جداً
+    )
+
+    try:
+        await context.bot.send_message(chat_id=OWNER_ID, text=report, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        logger.error(f"Failed to send error report to owner: {e}")
 
 # ==================== MAIN MENU ====================
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -249,7 +262,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ("💰 أموالي", "my_wallet"),
         ("📋 حساباتي", "my_accounts"),
         ("📺 تعليم", "tutorials"),
-        ("🛒 المتجر", "user_store_menu"),  # تم التعديل هنا ليظهر للمستخدمين
+        ("🛒 المتجر", "user_store_menu"),
         ("🔗 الإحالة", "referral_menu"),
         ("✏️ تعديل حساباتي", "edit_my_accounts"),
     ]
@@ -305,9 +318,10 @@ def get_video_button(video_type: str, label: str) -> Optional[InlineKeyboardButt
         return InlineKeyboardButton(f"📺 شاهد شرح {label}", callback_data=f"play_video:{video_type}")
     return None
 
-# ==================== ADD ACCOUNT FLOW ====================
+# ==================== ADD ACCOUNT FLOW (REFACTORED) ====================
 async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
+    # Reset session completely to avoid ghost data
     SESSIONS[uid] = Session(step="email")
     prices = get_tier_prices()
     
@@ -331,110 +345,119 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     text = update.message.text.strip()
     session = SESSIONS.get(uid)
+    
+    # Security check: If session doesn't exist, block
     if not session or not session.step:
+        await update.message.reply_text("⚠️ انتهت الجلسة. يرجى البدء من جديد.", reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
         return
     
     prices = get_tier_prices()
     
-    if session.step == "email":
-        if not re.match(r"[^@]+@[^@]+\.[^@]+", text):
-            await update.message.reply_text("❌ إيميل غير صالح.")
-            return
-        
-        user_data = get_user(uid)
-        for acc in user_data.get("approved_accounts", []):
-            if acc.get("email") == text:
-                await update.message.reply_text("❌ هذا الإيميل مقبول مسبقاً!")
+    try:
+        if session.step == "email":
+            if not re.match(r"[^@]+@[^@]+\.[^@]+", text):
+                await update.message.reply_text("❌ إيميل غير صالح.")
                 return
-        for acc in user_data.get("pending_accounts", {}).values():
-            if acc.get("email") == text:
-                await update.message.reply_text("⏳ هذا الإيميل قيد الانتظار بالفعل!")
+            
+            user_data = get_user(uid)
+            for acc in user_data.get("approved_accounts", []):
+                if acc.get("email") == text:
+                    await update.message.reply_text("❌ هذا الإيميل مقبول مسبقاً!")
+                    return
+            for acc in user_data.get("pending_accounts", {}).values():
+                if acc.get("email") == text:
+                    await update.message.reply_text("⏳ هذا الإيميل قيد الانتظار بالفعل!")
+                    return
+            
+            session.email = text
+            session.step = "password"
+            
+            buttons = [("❌ إلغاء", "cancel")]
+            video_btn = get_video_button("password", "كلمة المرور")
+            if video_btn:
+                buttons.insert(0, (video_btn.text, video_btn.callback_data))
+                
+            await update.message.reply_text(
+                f"🔑 *الخطوة 2/4*: أرسل كلمة المرور الأساسية:\n\n💰 *السعر الحالي:* ${prices['tier_1']:.2f}",
+                parse_mode=ParseMode.MARKDOWN, 
+                reply_markup=kb_vertical(buttons)
+            )
+        
+        elif session.step == "password":
+            try:
+                await update.message.delete()
+            except:
+                pass
+                
+            session.password = text
+            session.has_password = True
+            session.step = "totp"
+            
+            buttons = [
+                ("✅ استلم $0.10 (باسورد فقط)", f"submit_tier_1:{uid}"),
+                ("❌ إلغاء", "cancel")
+            ]
+            video_btn = get_video_button("totp", "رمز المصادقة")
+            if video_btn:
+                buttons.insert(0, (video_btn.text, video_btn.callback_data))
+                
+            await update.message.reply_text(
+                f"🔐 *الخطوة 3/4*: أرسل مفتاح المصادقة (Secret Key):\n\n💰 *السعر مع رمز المصادقة:* ${prices['tier_2']:.2f}\n\n📌 *يمكنك استلام {prices['tier_1']:.2f}$ الآن وإكمال الباقي لاحقاً*",
+                parse_mode=ParseMode.MARKDOWN, 
+                reply_markup=kb_vertical(buttons)
+            )
+        
+        elif session.step == "totp":
+            try:
+                await update.message.delete()
+            except:
+                pass
+                
+            cleaned = text.replace(" ", "").upper()
+            if len(cleaned) != 32 or not re.match(r'^[A-Z2-7]{32}$', cleaned):
+                await update.message.reply_text("⚠️ مفتاح المصادقة غير صالح (32 حرفاً).")
                 return
-        
-        session.email = text
-        session.step = "password"
-        
-        buttons = [("❌ إلغاء", "cancel")]
-        video_btn = get_video_button("password", "كلمة المرور")
-        if video_btn:
-            buttons.insert(0, (video_btn.text, video_btn.callback_data))
+            session.totp = cleaned
+            session.has_totp = True
+            session.step = "app_pass"
             
-        await update.message.reply_text(
-            f"🔑 *الخطوة 2/4*: أرسل كلمة المرور الأساسية:\n\n💰 *السعر الحالي:* ${prices['tier_1']:.2f}",
-            parse_mode=ParseMode.MARKDOWN, 
-            reply_markup=kb_vertical(buttons)
-        )
-    
-    elif session.step == "password":
-        try:
-            await update.message.delete()
-        except:
-            pass
-            
-        session.password = text
-        session.has_password = True
-        session.step = "totp"
+            buttons = [
+                ("✅ استلم $0.15 (مع رمز المصادقة)", f"submit_tier_2:{uid}"),
+                ("❌ إلغاء", "cancel")
+            ]
+            video_btn = get_video_button("app_pass", "كلمة مرور التطبيق")
+            if video_btn:
+                buttons.insert(0, (video_btn.text, video_btn.callback_data))
+                
+            await update.message.reply_text(
+                f"🗝 *الخطوة 4/4*: أرسل كلمة مرور التطبيق (16 حرف):\n\n💰 *السعر الكامل:* ${prices['tier_3']:.2f}\n\n📌 *يمكنك استلام {prices['tier_2']:.2f}$ الآن وإكمال الباقي لاحقاً*",
+                parse_mode=ParseMode.MARKDOWN, 
+                reply_markup=kb_vertical(buttons)
+            )
         
-        buttons = [
-            ("✅ استلم $0.10 (باسورد فقط)", f"submit_tier_1:{uid}"),
-            ("❌ إلغاء", "cancel")
-        ]
-        video_btn = get_video_button("totp", "رمز المصادقة")
-        if video_btn:
-            buttons.insert(0, (video_btn.text, video_btn.callback_data))
+        elif session.step == "app_pass":
+            try:
+                await update.message.delete()
+            except:
+                pass
+                
+            cleaned = text.replace(" ", "").upper()
+            if len(cleaned) != 16 or not re.match(r'^[A-Z0-9]{16}$', cleaned):
+                await update.message.reply_text("⚠️ كلمة مرور التطبيق غير صالحة (16 حرفاً).")
+                return
             
-        await update.message.reply_text(
-            f"🔐 *الخطوة 3/4*: أرسل مفتاح المصادقة (Secret Key):\n\n💰 *السعر مع رمز المصادقة:* ${prices['tier_2']:.2f}\n\n📌 *يمكنك استلام {prices['tier_1']:.2f}$ الآن وإكمال الباقي لاحقاً*",
-            parse_mode=ParseMode.MARKDOWN, 
-            reply_markup=kb_vertical(buttons)
-        )
-    
-    elif session.step == "totp":
-        try:
-            await update.message.delete()
-        except:
-            pass
+            session.app_pass = cleaned
+            session.has_app_pass = True
             
-        cleaned = text.replace(" ", "").upper()
-        if len(cleaned) != 32 or not re.match(r'^[A-Z2-7]{32}$', cleaned):
-            await update.message.reply_text("⚠️ مفتاح المصادقة غير صالح (32 حرفاً).")
-            return
-        session.totp = cleaned
-        session.has_totp = True
-        session.step = "app_pass"
-        
-        buttons = [
-            ("✅ استلم $0.15 (مع رمز المصادقة)", f"submit_tier_2:{uid}"),
-            ("❌ إلغاء", "cancel")
-        ]
-        video_btn = get_video_button("app_pass", "كلمة مرور التطبيق")
-        if video_btn:
-            buttons.insert(0, (video_btn.text, video_btn.callback_data))
+            user = update.effective_user
+            final_price = calculate_account_price(session.has_totp, session.has_app_pass)
             
-        await update.message.reply_text(
-            f"🗝 *الخطوة 4/4*: أرسل كلمة مرور التطبيق (16 حرف):\n\n💰 *السعر الكامل:* ${prices['tier_3']:.2f}\n\n📌 *يمكنك استلام {prices['tier_2']:.2f}$ الآن وإكمال الباقي لاحقاً*",
-            parse_mode=ParseMode.MARKDOWN, 
-            reply_markup=kb_vertical(buttons)
-        )
-    
-    elif session.step == "app_pass":
-        try:
-            await update.message.delete()
-        except:
-            pass
+            # Validate all required fields before saving
+            if not session.email or not session.password:
+                await update.message.reply_text("⚠️ بيانات غير مكتملة. يرجى البدء من جديد.", reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+                SESSIONS.pop(uid, None)
+                return
             
-        cleaned = text.replace(" ", "").upper()
-        if len(cleaned) != 16 or not re.match(r'^[A-Z0-9]{16}$', cleaned):
-            await update.message.reply_text("⚠️ كلمة مرور التطبيق غير صالحة (16 حرفاً).")
-            return
-        
-        session.app_pass = cleaned
-        session.has_app_pass = True
-        
-        user = update.effective_user
-        final_price = calculate_account_price(session.has_totp, session.has_app_pass)
-        
-        try:
             user_data = get_user(uid)
             
             if session.email in user_data["pending_accounts"]:
@@ -442,7 +465,8 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 SESSIONS.pop(uid, None)
                 return
             
-            user_data["pending_accounts"][session.email] = {
+            # Build the account dictionary SAFELY
+            account_dict = {
                 "email": session.email,
                 "password": session.password,
                 "totp_secret": session.totp if session.has_totp else None,
@@ -455,8 +479,13 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "submitted_at": datetime.now(timezone.utc).isoformat(),
                 "verification_status": "pending",
             }
+            
+            # SAVE
+            user_data["pending_accounts"][session.email] = account_dict
             user_data["pending_balance"] += final_price
             save_user(uid, user_data)
+            
+            # Clear session only AFTER successful save
             SESSIONS.pop(uid, None)
             
             await update.message.reply_text(
@@ -464,35 +493,42 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode=ParseMode.MARKDOWN, 
                 reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu")
             )
-        except Exception as e:
-            logger.error(f"Error saving account: {e}")
-            # Ensure we don't save duplicates in lost requests
-            if session.email not in user_data.get("pending_accounts", {}):
-                save_lost_request(uid, session.email, session.password, session.totp, session.app_pass, f"error_saving: {str(e)}")
-            await update.message.reply_text(
-                "⚠️ حدث خطأ في حفظ الطلب. يرجى المحاولة مرة أخرى.",
-                reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu")
-            )
-            SESSIONS.pop(uid, None)
+            
+    except Exception as e:
+        logger.error(f"CRITICAL ERROR saving account for {uid}: {e}")
+        logger.error(traceback.format_exc())
+        
+        # إرسال تقرير الخطأ للمالك
+        await send_error_to_owner(context, uid, e, f"حدث خطأ أثناء حفظ الطلب في خطوة {session.step}")
+        
+        # Save to lost requests
+        save_lost_request(uid, session.email, session.password, session.totp, session.app_pass, f"CRITICAL_SAVE_ERROR: {str(e)}")
+        await update.message.reply_text(
+            "⚠️ حدث خطأ فني أثناء الحفظ. تم تسجيل الطلب في قائمة المفقودين وسيتم إعلام المالك.",
+            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu")
+        )
+        SESSIONS.pop(uid, None)
 
 async def submit_tier_1(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     uid = int(query.data.split(":")[1])
     session = SESSIONS.get(uid)
+    
     if not session:
         await query.answer("⚠️ الجلسة منتهية.", show_alert=True)
         return
-    user = update.effective_user
-    price = get_tier_prices()["tier_1"]
-    
-    # Basic validation of session data
-    if not session.email or not session.password:
-        await query.edit_message_text("⚠️ بيانات الجلسة غير مكتملة. يرجى البدء من جديد.", 
-            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
-        SESSIONS.pop(uid, None)
-        return
     
     try:
+        # Check data integrity
+        if not session.email or not session.password:
+            await query.edit_message_text("⚠️ بيانات غير مكتملة. يرجى البدء من جديد.", 
+                reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+            SESSIONS.pop(uid, None)
+            return
+        
+        user = update.effective_user
+        price = get_tier_prices()["tier_1"]
+        
         user_data = get_user(uid)
         
         if session.email in user_data["pending_accounts"]:
@@ -523,7 +559,9 @@ async def submit_tier_1(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu")
         )
     except Exception as e:
-        logger.error(f"Error in submit_tier_1: {e}")
+        logger.error(f"Error in submit_tier_1 for {uid}: {e}")
+        logger.error(traceback.format_exc())
+        await send_error_to_owner(context, uid, e, "حدث خطأ أثناء submit_tier_1")
         await query.edit_message_text("⚠️ حدث خطأ. يرجى المحاولة مرة أخرى.", 
             reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
         SESSIONS.pop(uid, None)
@@ -532,20 +570,22 @@ async def submit_tier_2(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     uid = int(query.data.split(":")[1])
     session = SESSIONS.get(uid)
+    
     if not session:
         await query.answer("⚠️ الجلسة منتهية.", show_alert=True)
         return
-    user = update.effective_user
-    price = get_tier_prices()["tier_2"]
-    
-    # Basic validation of session data
-    if not session.email or not session.password or not session.totp:
-        await query.edit_message_text("⚠️ بيانات الجلسة غير مكتملة. يرجى البدء من جديد.", 
-            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
-        SESSIONS.pop(uid, None)
-        return
     
     try:
+        # Check data integrity
+        if not session.email or not session.password or not session.totp:
+            await query.edit_message_text("⚠️ بيانات غير مكتملة. يرجى البدء من جديد.", 
+                reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+            SESSIONS.pop(uid, None)
+            return
+            
+        user = update.effective_user
+        price = get_tier_prices()["tier_2"]
+        
         user_data = get_user(uid)
         
         if session.email in user_data["pending_accounts"]:
@@ -576,7 +616,9 @@ async def submit_tier_2(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu")
         )
     except Exception as e:
-        logger.error(f"Error in submit_tier_2: {e}")
+        logger.error(f"Error in submit_tier_2 for {uid}: {e}")
+        logger.error(traceback.format_exc())
+        await send_error_to_owner(context, uid, e, "حدث خطأ أثناء submit_tier_2")
         await query.edit_message_text("⚠️ حدث خطأ. يرجى المحاولة مرة أخرى.", 
             reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
         SESSIONS.pop(uid, None)
@@ -591,9 +633,8 @@ async def my_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu")
     )
 
-# ==================== USER STORE SECTION (للمستخدمين) ====================
+# ==================== USER STORE SECTION ====================
 async def user_store_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """عرض المتجر للمستخدمين العاديين"""
     query = update.callback_query
     config = load_json(DATA_DIR / "config.json")
     categories = config.get("store_categories", [])
@@ -617,7 +658,6 @@ async def user_store_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def user_store_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """عرض مبيعات فئة معينة للمستخدم"""
     query = update.callback_query
     cat_id = query.data.split(":", 1)[1]
     config = load_json(DATA_DIR / "config.json")
@@ -646,7 +686,6 @@ async def user_store_category(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
 
 async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالجة شراء المستخدم لمبيعة"""
     query = update.callback_query
     user_id = update.effective_user.id
     parts = query.data.split(":")
@@ -713,14 +752,12 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=kb_vertical(buttons)
     )
 
-# ==================== WITHDRAW REQUESTS (للمالك) ====================
+# ==================== WITHDRAW REQUESTS ====================
 async def owner_withdraw_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """عرض طلبات السحب للمالك"""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
-    
     await query.edit_message_text(
         "💸 *طلبات السحب*\n\n📌 هذا القسم قيد التطوير.\n\n📊 حالياً يتم إرسال طلبات السحب مباشرة للمالك عبر الرسائل الخاصة.",
         parse_mode=ParseMode.MARKDOWN,
@@ -1123,15 +1160,6 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
 
-# ==================== AUTO-DELETE SENSITIVE MESSAGES ====================
-async def safe_reply_text(update: Update, text: str, parse_mode: str = ParseMode.MARKDOWN, reply_markup=None):
-    """إرسال رسالة مع حذف رسالة المستخدم تلقائياً"""
-    try:
-        await update.message.delete()
-    except:
-        pass
-    await update.message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
-
 # ==================== TIERED APPROVAL HANDLERS ====================
 async def approve_tier1(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1367,7 +1395,7 @@ async def reject_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN, 
         reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
 
-# ==================== RECOVER LOST (FIXED LOGIC) ====================
+# ==================== RECOVER LOST ====================
 async def recover_all_lost(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
@@ -1412,15 +1440,6 @@ async def recover_all_lost(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_user(user_id, user_data)
         recovered += 1
         lost_emails_to_remove.append(email)
-    
-    # Remove only the successfully recovered emails from lost database
-    for email in lost_emails_to_remove:
-        # We use a generic clear to remove all entries of this email, 
-        # though normally we'd want to match user_id too. 
-        # To be safe, let's just clear the whole list if we recovered everything successfully, 
-        # OR we can iterate properly. 
-        # Let's iterate over a copy of lost and remove matching.
-        pass 
     
     # Clean up lost DB to prevent duplicates
     if recovered > 0:
@@ -1562,9 +1581,8 @@ async def mark_all_extracted(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.edit_message_text(f"✅ تم وضع علامة مستخرجة على {marked} حساب.", 
         reply_markup=kb_single("🔙 جميع الحسابات", "all_accounts_section"))
 
-# ==================== STORE SECTION (للمالك) ====================
+# ==================== STORE SECTION ====================
 async def store_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """قسم المبيعات للمالك"""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
@@ -1886,7 +1904,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await delete_video(update, context)
     elif data.startswith("set_video:"):
         await set_video_callback(update, context)
-    elif data == "store_section":  # للمالك
+    elif data == "store_section":
         await store_section(update, context)
     elif data == "store_add_category":
         await store_add_category(update, context)
