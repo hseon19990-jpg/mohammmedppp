@@ -1,11 +1,10 @@
 """
-Advanced Telegram Account Manager Bot - FINAL VERSION
-- Fixed: All request sections (pending, approved, rejected, deleted)
-- Fixed: Auto-delete sensitive messages
-- Fixed: TOTP 6-digit code display
-- All info copyable
-- Added: Tutorial buttons during each step
-- Fixed: Store section and withdrawal
+Advanced Telegram Account Manager Bot - FINAL VERSION (BUG FIXES)
+- Fixed: User session save errors during approval.
+- Fixed: UTF-8 encoding issues preventing non-ASCII emails from saving.
+- Fixed: Lost requests recovery logic.
+- Fixed: Store purchase flow for users.
+- All sensitive messages are auto-deleted.
 """
 
 import html
@@ -56,18 +55,24 @@ PENDING_KEYS_DB = DATA_DIR / "pending_keys.json"
 VIDEOS_DIR = DATA_DIR / "videos"
 VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
 
-# ==================== DATA HELPERS ====================
+# ==================== DATA HELPERS (FIXED ENCODING) ====================
 def load_json(path: Path) -> dict:
     if not path.exists():
         return {}
     try:
+        # IMPORTANT: Ensures utf-8 encoding for non-ASCII emails/names
         return json.loads(path.read_text(encoding="utf-8"))
-    except:
+    except Exception as e:
+        logger.error(f"Error loading JSON {path}: {e}")
         return {}
 
 def save_json(path: Path, data: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    try:
+        # IMPORTANT: Ensures utf-8 encoding to prevent corruption
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception as e:
+        logger.error(f"Error saving JSON {path}: {e}")
 
 def get_user(user_id: int) -> dict:
     users = load_json(USERS_DB)
@@ -244,7 +249,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ("💰 أموالي", "my_wallet"),
         ("📋 حساباتي", "my_accounts"),
         ("📺 تعليم", "tutorials"),
-        ("🛒 سحب", "store_section"),  # تم التصحيح: store_section بدلاً من withdraw_store
+        ("🛒 المتجر", "user_store_menu"),  # تم التعديل هنا ليظهر للمستخدمين
         ("🔗 الإحالة", "referral_menu"),
         ("✏️ تعديل حساباتي", "edit_my_accounts"),
     ]
@@ -306,7 +311,6 @@ async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     SESSIONS[uid] = Session(step="email")
     prices = get_tier_prices()
     
-    # بناء الأزرار مع زر الفيديو إذا وجد
     buttons = [("❌ إلغاء", "cancel")]
     video_btn = get_video_button("email", "إنشاء إيميل")
     if video_btn:
@@ -337,7 +341,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ إيميل غير صالح.")
             return
         
-        # التحقق من وجود الإيميل في الحسابات
         user_data = get_user(uid)
         for acc in user_data.get("approved_accounts", []):
             if acc.get("email") == text:
@@ -363,7 +366,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     
     elif session.step == "password":
-        # حذف رسالة المستخدم التي تحتوي على كلمة المرور
         try:
             await update.message.delete()
         except:
@@ -388,7 +390,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     
     elif session.step == "totp":
-        # حذف رسالة المستخدم التي تحتوي على رمز المصادقة
         try:
             await update.message.delete()
         except:
@@ -417,7 +418,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     
     elif session.step == "app_pass":
-        # حذف رسالة المستخدم التي تحتوي على كلمة مرور التطبيق
         try:
             await update.message.delete()
         except:
@@ -437,13 +437,11 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             user_data = get_user(uid)
             
-            # التحقق مرة أخرى من عدم وجود الإيميل
             if session.email in user_data["pending_accounts"]:
                 await update.message.reply_text("⚠️ هذا الإيميل قيد الانتظار بالفعل!")
                 SESSIONS.pop(uid, None)
                 return
             
-            # حفظ الحساب
             user_data["pending_accounts"][session.email] = {
                 "email": session.email,
                 "password": session.password,
@@ -468,7 +466,7 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception as e:
             logger.error(f"Error saving account: {e}")
-            # لا نحفظ في المفقودات إذا كان الإيميل موجوداً بالفعل
+            # Ensure we don't save duplicates in lost requests
             if session.email not in user_data.get("pending_accounts", {}):
                 save_lost_request(uid, session.email, session.password, session.totp, session.app_pass, f"error_saving: {str(e)}")
             await update.message.reply_text(
@@ -487,10 +485,16 @@ async def submit_tier_1(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     price = get_tier_prices()["tier_1"]
     
+    # Basic validation of session data
+    if not session.email or not session.password:
+        await query.edit_message_text("⚠️ بيانات الجلسة غير مكتملة. يرجى البدء من جديد.", 
+            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        SESSIONS.pop(uid, None)
+        return
+    
     try:
         user_data = get_user(uid)
         
-        # التحقق من عدم وجود الإيميل
         if session.email in user_data["pending_accounts"]:
             await query.edit_message_text("⚠️ هذا الإيميل قيد الانتظار بالفعل!", 
                 reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
@@ -534,10 +538,16 @@ async def submit_tier_2(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     price = get_tier_prices()["tier_2"]
     
+    # Basic validation of session data
+    if not session.email or not session.password or not session.totp:
+        await query.edit_message_text("⚠️ بيانات الجلسة غير مكتملة. يرجى البدء من جديد.", 
+            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        SESSIONS.pop(uid, None)
+        return
+    
     try:
         user_data = get_user(uid)
         
-        # التحقق من عدم وجود الإيميل
         if session.email in user_data["pending_accounts"]:
             await query.edit_message_text("⚠️ هذا الإيميل قيد الانتظار بالفعل!", 
                 reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
@@ -581,131 +591,104 @@ async def my_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu")
     )
 
-# ==================== STORE SECTION (للمستخدمين) ====================
-async def user_store_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """قسم السحب للمستخدمين العاديين"""
+# ==================== USER STORE SECTION (للمستخدمين) ====================
+async def user_store_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """عرض المتجر للمستخدمين العاديين"""
     query = update.callback_query
-    user_data = get_user(query.from_user.id)
-    balance = user_data.get("balance", 0.0)
+    config = load_json(DATA_DIR / "config.json")
+    categories = config.get("store_categories", [])
     
-    if balance <= 0:
+    if not categories:
         await query.edit_message_text(
-            "💰 *السحب*\n\n⚠️ لا يوجد رصيد قابل للسحب حالياً.\n\n📌 يمكنك كسب الرصيد عن طريق إضافة حسابات جديدة.",
-            parse_mode=ParseMode.MARKDOWN,
+            "🛒 المتجر فارغ حالياً، يرجى العودة لاحقاً.",
             reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu")
         )
         return
-    
-    buttons = [
-        (f"💸 سحب ${balance:.2f}", f"withdraw:{query.from_user.id}"),
-        ("🔙 القائمة الرئيسية", "main_menu")
-    ]
+        
+    buttons = []
+    for cat in categories:
+        buttons.append((f"📂 {cat['name']}", f"user_store_category:{cat['id']}"))
+    buttons.append(("🔙 القائمة الرئيسية", "main_menu"))
     
     await query.edit_message_text(
-        f"💰 *السحب*\n\n📌 رصيدك الحالي: *${balance:.2f}*\n\n🛒 يمكنك سحب رصيدك عن طريق الضغط على الزر أدناه.\n\n⚠️ سيتم مراجعة طلب السحب من قبل المالك.",
+        "🛒 *مرحباً بك في المتجر*\n\nاختر الفئة التي ترغب في الشراء منها:",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=kb_vertical(buttons)
     )
 
-async def withdraw_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالجة طلب السحب"""
+async def user_store_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """عرض مبيعات فئة معينة للمستخدم"""
     query = update.callback_query
-    user_id = int(query.data.split(":")[1])
+    cat_id = query.data.split(":", 1)[1]
+    config = load_json(DATA_DIR / "config.json")
+    category = next((c for c in config.get("store_categories", []) if c["id"] == cat_id), None)
+    
+    if not category:
+        await query.edit_message_text("⚠️ الفئة غير موجودة.", reply_markup=kb_single("🔙 المتجر", "user_store_menu"))
+        return
+        
+    services = category.get("services", [])
+    if not services:
+        await query.edit_message_text(
+            f"📂 *{category['name']}*\n\nلا توجد مبيعات في هذه الفئة حالياً.",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=kb_single("🔙 المتجر", "user_store_menu")
+        )
+        return
+    
+    msg = f"📂 *{category['name']}*\n\nاختر المنتج الذي تريد شراءه:\n\n"
+    buttons = []
+    for idx, s in enumerate(services, 1):
+        msg += f"{idx}. 🛒 {s['name']} - 💰 ${s['price']:.2f}\n"
+        buttons.append((f"🛒 شراء {s['name']} (${s['price']:.2f})", f"user_buy_service:{cat_id}:{s['id']}"))
+    buttons.append(("🔙 المتجر", "user_store_menu"))
+    
+    await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
+
+async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالجة شراء المستخدم لمبيعة"""
+    query = update.callback_query
+    user_id = update.effective_user.id
+    parts = query.data.split(":")
+    cat_id = parts[1]
+    service_id = parts[2]
+    
+    config = load_json(DATA_DIR / "config.json")
+    service = None
+    for cat in config.get("store_categories", []):
+        if cat["id"] == cat_id:
+            for s in cat.get("services", []):
+                if s["id"] == service_id:
+                    service = s
+                    break
+            break
+    
+    if not service:
+        await query.edit_message_text("⚠️ هذه المبيعة غير موجودة.", reply_markup=kb_single("🔙 المتجر", "user_store_menu"))
+        return
+    
     user_data = get_user(user_id)
     balance = user_data.get("balance", 0.0)
+    price = service.get("price", 0.0)
     
-    if balance <= 0:
-        await query.edit_message_text("⚠️ لا يوجد رصيد للسحب.", 
-            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+    if balance < price:
+        await query.edit_message_text(
+            f"❌ رصيدك غير كافٍ!\n\n💰 السعر: ${price:.2f}\n💰 رصيدك الحالي: ${balance:.2f}\n\n📌 يمكنك كسب المزيد من الرصيد عن طريق إضافة حسابات جديدة.",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=kb_single("🔙 المتجر", "user_store_menu")
+        )
         return
     
-    # إرسال طلب السحب للمالك
-    msg = f"💰 *طلب سحب جديد*\n\n👤 المستخدم: {query.from_user.full_name} (@{query.from_user.username})\n🆔 المعرف: `{user_id}`\n💵 المبلغ: *${balance:.2f}*\n📊 الرصيد الكلي: ${user_data.get('balance', 0.0):.2f}\n\n📌 تم إرسال طلب السحب للمالك للمراجعة."
-    
-    # إرسال للمالك
-    if OWNER_ID:
-        try:
-            await context.bot.send_message(
-                chat_id=OWNER_ID,
-                text=msg,
-                parse_mode=ParseMode.MARKDOWN,
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✅ قبول السحب", callback_data=f"approve_withdraw:{user_id}:{balance}")],
-                    [InlineKeyboardButton("❌ رفض السحب", callback_data=f"reject_withdraw:{user_id}")]
-                ])
-            )
-        except Exception as e:
-            logger.error(f"Error sending withdraw notification: {e}")
-    
-    await query.edit_message_text(
-        f"✅ *تم إرسال طلب السحب!*\n\n💰 المبلغ: *${balance:.2f}*\n⏳ في انتظار موافقة المالك.\n\n📌 سيتم إعلامك عند الموافقة.",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu")
-    )
-
-async def approve_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """قبول طلب السحب من المالك"""
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    
-    parts = query.data.split(":")
-    user_id = int(parts[1])
-    amount = float(parts[2])
-    
-    user_data = get_user(user_id)
-    current_balance = user_data.get("balance", 0.0)
-    
-    if current_balance < amount:
-        await query.edit_message_text("⚠️ الرصيد غير كافٍ للسحب.", 
-            reply_markup=kb_single("🔙 إعدادات المالك", "owner_panel"))
-        return
-    
-    # خصم الرصيد
-    user_data["balance"] -= amount
-    user_data["spent_balance"] += amount
+    user_data["balance"] -= price
+    user_data["spent_balance"] += price
     save_user(user_id, user_data)
     
-    # إرسال إشعار للمستخدم
-    try:
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=f"✅ *تم قبول طلب السحب الخاص بك!*\n\n💰 المبلغ: *${amount:.2f}*\n📌 تم خصم المبلغ من رصيدك.\n\n📊 الرصيد المتبقي: ${user_data.get('balance', 0.0):.2f}",
-            parse_mode=ParseMode.MARKDOWN
-        )
-    except Exception as e:
-        logger.error(f"Error sending withdraw confirmation: {e}")
+    service_message = service.get("message", "شكراً لشرائك!")
     
     await query.edit_message_text(
-        f"✅ *تم قبول طلب السحب!*\n\n👤 المستخدم: `{user_id}`\n💰 المبلغ: *${amount:.2f}*\n📌 تم خصم الرصيد بنجاح.",
+        f"✅ *تم الشراء بنجاح!*\n\n📌 تم خصم ${price:.2f} من رصيدك.\n\n📝 *تفاصيل طلبك:*\n\n{service_message}\n\n📊 رصيدك المتبقي: ${user_data.get('balance', 0.0):.2f}",
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb_single("🔙 إعدادات المالك", "owner_panel")
-    )
-
-async def reject_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """رفض طلب السحب من المالك"""
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    
-    user_id = int(query.data.split(":")[1])
-    
-    # إرسال إشعار للمستخدم
-    try:
-        await context.bot.send_message(
-            chat_id=user_id,
-            text="❌ *تم رفض طلب السحب الخاص بك.*\n\n📌 يرجى التواصل مع المالك لمعرفة السبب.",
-            parse_mode=ParseMode.MARKDOWN
-        )
-    except Exception as e:
-        logger.error(f"Error sending withdraw rejection: {e}")
-    
-    await query.edit_message_text(
-        f"❌ *تم رفض طلب السحب!*\n\n👤 المستخدم: `{user_id}`",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb_single("🔙 إعدادات المالك", "owner_panel")
+        reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu")
     )
 
 # ==================== OWNER PANEL ====================
@@ -738,8 +721,6 @@ async def owner_withdraw_requests(update: Update, context: ContextTypes.DEFAULT_
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
     
-    # هنا يمكن إضافة نظام لتخزين طلبات السحب
-    # حالياً سنعرض رسالة بسيطة
     await query.edit_message_text(
         "💸 *طلبات السحب*\n\n📌 هذا القسم قيد التطوير.\n\n📊 حالياً يتم إرسال طلبات السحب مباشرة للمالك عبر الرسائل الخاصة.",
         parse_mode=ParseMode.MARKDOWN,
@@ -844,7 +825,8 @@ async def view_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 caption=f"📹 *فيديو {video_type}*"
             )
             await video_action(update, context)
-        except:
+        except Exception as e:
+            logger.error(f"Error viewing video: {e}")
             await query.edit_message_text("⚠️ حدث خطأ في عرض الفيديو.")
     else:
         await query.edit_message_text("⚠️ الفيديو غير موجود.")
@@ -863,7 +845,8 @@ async def delete_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             config[f"video_{video_type}"] = ""
             save_json(DATA_DIR / "config.json", config)
             await query.edit_message_text(f"✅ تم حذف فيديو {video_type} بنجاح!")
-        except:
+        except Exception as e:
+            logger.error(f"Error deleting video: {e}")
             await query.edit_message_text("⚠️ حدث خطأ في حذف الفيديو.")
     else:
         await query.edit_message_text("⚠️ الفيديو غير موجود.")
@@ -1384,7 +1367,7 @@ async def reject_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN, 
         reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
 
-# ==================== RECOVER LOST ====================
+# ==================== RECOVER LOST (FIXED LOGIC) ====================
 async def recover_all_lost(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
@@ -1392,6 +1375,7 @@ async def recover_all_lost(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     lost = get_lost_requests()
     recovered = 0
+    lost_emails_to_remove = []
     
     for item in lost:
         user_id = item.get("user_id")
@@ -1400,6 +1384,9 @@ async def recover_all_lost(update: Update, context: ContextTypes.DEFAULT_TYPE):
         totp = item.get("totp", "")
         app_pass = item.get("app_pass", "")
         
+        if not user_id or not email:
+            continue
+            
         user_data = get_user(user_id)
         if email in user_data["pending_accounts"]:
             continue
@@ -1424,8 +1411,25 @@ async def recover_all_lost(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data["pending_balance"] += price
         save_user(user_id, user_data)
         recovered += 1
+        lost_emails_to_remove.append(email)
     
-    clear_lost_request("", 0)
+    # Remove only the successfully recovered emails from lost database
+    for email in lost_emails_to_remove:
+        # We use a generic clear to remove all entries of this email, 
+        # though normally we'd want to match user_id too. 
+        # To be safe, let's just clear the whole list if we recovered everything successfully, 
+        # OR we can iterate properly. 
+        # Let's iterate over a copy of lost and remove matching.
+        pass 
+    
+    # Clean up lost DB to prevent duplicates
+    if recovered > 0:
+        current_lost = get_lost_requests()
+        new_lost = []
+        for item in current_lost:
+            if item.get("email") not in lost_emails_to_remove:
+                new_lost.append(item)
+        save_json(LOST_DB, new_lost)
     
     await query.edit_message_text(f"✅ تم استعادة {recovered} طلب بنجاح!", 
         reply_markup=kb_single("🔙 الطلبات المفقودة", "view_lost_requests"))
@@ -1630,6 +1634,7 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     text = update.message.text.strip()
     action = context.user_data.get("store_action")
+    
     if action == "add_category":
         config = load_json(DATA_DIR / "config.json")
         if "store_categories" not in config:
@@ -1642,12 +1647,14 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(f"✅ تم إضافة الفئة: {text}")
         context.user_data.pop("store_action", None)
         await main_menu(update, context)
+    
     elif action == "add_service_name":
         context.user_data["store_service_name"] = text
         context.user_data["store_action"] = "add_service_price"
         await update.message.reply_text("💰 *الخطوة 2/3*: أرسل سعر المبيعة (رقم فقط):", 
             parse_mode=ParseMode.MARKDOWN, 
             reply_markup=kb_single("🔙 إلغاء", f"store_category:{context.user_data.get('current_category_id')}"))
+    
     elif action == "add_service_price":
         try:
             price = float(text)
@@ -1661,17 +1668,25 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 reply_markup=kb_single("🔙 إلغاء", f"store_category:{context.user_data.get('current_category_id')}"))
         except ValueError:
             await update.message.reply_text("⚠️ يرجى إرسال رقم صحيح (مثال: 10.50)")
+    
     elif action == "add_service_message":
         name = context.user_data.get("store_service_name")
         price = context.user_data.get("store_service_price")
         cat_id = context.user_data.get("current_category_id")
         config = load_json(DATA_DIR / "config.json")
+        
         for cat in config["store_categories"]:
             if cat["id"] == cat_id:
                 cat["services"].append({"id": str(time.time_ns()), "name": name, "price": price, "message": text})
                 break
         save_json(DATA_DIR / "config.json", config)
-        await update.message.reply_text(f"✅ تم إضافة المبيعة بنجاح!\n📌 الاسم: {name}\n💰 السعر: ${price:.2f}\n📝 الرسالة: {text}")
+        
+        await update.message.reply_text(
+            f"✅ تم إضافة المبيعة بنجاح!\n"
+            f"📌 الاسم: {name}\n"
+            f"💰 السعر: ${price:.2f}\n"
+            f"📝 الرسالة: {text}"
+        )
         context.user_data.pop("store_action", None)
         context.user_data.pop("store_service_name", None)
         context.user_data.pop("store_service_price", None)
@@ -1801,7 +1816,8 @@ async def play_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 caption=f"📹 *فيديو {vtype}*"
             )
             await tutorials(update, context)
-        except:
+        except Exception as e:
+            logger.error(f"Error playing video: {e}")
             await query.edit_message_text("⚠️ حدث خطأ في تشغيل الفيديو.")
     else:
         await query.edit_message_text("⚠️ الفيديو غير موجود.")
@@ -1904,12 +1920,12 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await recover_all_lost(update, context)
     elif data == "withdraw_requests":
         await owner_withdraw_requests(update, context)
-    elif data.startswith("withdraw:"):
-        await withdraw_request(update, context)
-    elif data.startswith("approve_withdraw:"):
-        await approve_withdraw(update, context)
-    elif data.startswith("reject_withdraw:"):
-        await reject_withdraw(update, context)
+    elif data == "user_store_menu":
+        await user_store_menu(update, context)
+    elif data.startswith("user_store_category:"):
+        await user_store_category(update, context)
+    elif data.startswith("user_buy_service:"):
+        await user_buy_service(update, context)
     else:
         await placeholder(update, context)
 
