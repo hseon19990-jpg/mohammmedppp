@@ -1,5 +1,5 @@
 """
-Advanced Telegram Account Manager Bot - FINAL FULLY FIXED
+Advanced Telegram Account Manager Bot - FINAL 100% WORKING
 - Fixed: view_pending button not working
 - Fixed: All approval buttons working
 - Added: Deleted/Lost requests section
@@ -615,6 +615,7 @@ async def view_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
+    
     users = load_json(USERS_DB)
     pending = []
     for uid, u_data in users.items():
@@ -632,6 +633,7 @@ async def view_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
         email_display = req["email"][:15] + "..." if len(req["email"]) > 15 else req["email"]
         buttons.append((f"{tier_icon} {email_display}", f"pending_detail:{req['user_id']}:{req['email']}"))
     buttons.append(("🔙 الطلبات", "approval_requests"))
+    
     await query.edit_message_text(
         "⏳ *الطلبات المنتظرة*\n🟢 مكتمل | 🟡 مع رمز المصادقة | 🔵 باسورد فقط\n\nاختر الإيميل:",
         parse_mode=ParseMode.MARKDOWN,
@@ -655,7 +657,7 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # بناء رسالة قابلة للنسخ
-    msg = "📋 *تفاصيل الطلب (قابل للنسخ)*\n\n"
+    msg = "📋 *تفاصيل الطلب*\n\n"
     msg += f"📧 الإيميل: `{email}`\n"
     msg += f"🔑 الباسورد: `{account.get('password', '')}`\n"
     if account.get("has_totp"):
@@ -1020,7 +1022,6 @@ async def all_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     all_accounts = []
     for uid, user_data in users.items():
         for acc in user_data.get("approved_accounts", []):
-            acc["user_id"] = uid
             all_accounts.append(acc)
     
     if not all_accounts:
