@@ -626,7 +626,38 @@ async def view_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 continue
             for email, account in accounts.items():
                 if isinstance(account, dict):
-                    pending.append({"user_id": uid, "email": email, "account": account})
+                    pending.append({"user_id": uid, "email": str(email), "account": account})
+
+        if not pending:
+            await query.edit_message_text(
+                "📭 لا توجد طلبات منتظرة.",
+                reply_markup=kb_single("🔙 الطلبات", "approval_requests"),
+            )
+            return
+
+        buttons = []
+        for req in pending:
+            account = req["account"]
+            tier_icon = (
+                "🟢"
+                if account.get("has_app_pass")
+                else "🟡"
+                if account.get("has_totp")
+                else "🔵"
+            )
+            email = req["email"]
+            email_display = email[:15] + "..." if len(email) > 15 else email
+            buttons.append(
+                (f"{tier_icon} {email_display}", f"pending_detail:{req['user_id']}:{email}")
+            )
+        buttons.append(("🔙 الطلبات", "approval_requests"))
+        await query.edit_message_text(
+            "⏳ *الطلبات المنتظرة*\n"
+            "🟢 مكتمل | 🟡 مع رمز المصادقة | 🔵 باسورد فقط\n\n"
+            "اختر الإيميل:",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=kb_vertical(buttons),
+        )
     except Exception:
         logger.exception("Failed to load pending requests")
         await query.edit_message_text(
@@ -634,18 +665,6 @@ async def view_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=kb_single("🔄 إعادة المحاولة", "view_pending"),
         )
         return
-    
-    if not pending:
-        await query.edit_message_text("📭 لا توجد طلبات منتظرة.", reply_markup=kb_single("🔙 الطلبات", "approval_requests"))
-        return
-    
-    buttons = []
-    for req in pending:
-        tier_icon = "🟢" if req['account'].get("has_app_pass") else "🟡" if req['account'].get("has_totp") else "🔵"
-        email_display = req['email'][:15] + "..." if len(req['email']) > 15 else req['email']
-        buttons.append((f"{tier_icon} {email_display}", f"pending_detail:{req['user_id']}:{req['email']}"))
-    buttons.append(("🔙 الطلبات", "approval_requests"))
-    await query.edit_message_text("⏳ *الطلبات المنتظرة*\n🟢 مكتمل | 🟡 مع رمز المصادقة | 🔵 باسورد فقط\n\nاختر الإيميل:", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
 
 async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1359,7 +1378,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await set_tier(update, context)
     elif data == "approval_requests":
         await approval_requests(update, context)
-    elif data == "view_pending":
+    elif data in {"view_pending", "view_pending_requests", "pending_requests"}:
         await view_pending(update, context)
     elif data == "view_approved":
         await view_approved(update, context)
