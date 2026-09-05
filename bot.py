@@ -2794,7 +2794,7 @@ async def mark_extracted(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def build_accounts_export(title: str, accounts: list) -> bytes:
-    \"\"\"Build a plain-text export so account values cannot break Telegram formatting.\"\"\"
+    """Build a plain-text export so account values cannot break Telegram formatting."""
     lines = [title, "=" * 60, ""]
     for idx, acc in enumerate(accounts, 1):
         leave_status = ""
@@ -2817,7 +2817,7 @@ def build_accounts_export(title: str, accounts: list) -> bytes:
 
 
 async def send_accounts_export(context: ContextTypes.DEFAULT_TYPE, accounts: list, filename: str, caption: str):
-    \"\"\"Send exports as a file; this avoids Markdown and Telegram message-size failures.\"\"\"
+    """Send exports as a file; this avoids Markdown and Telegram message-size failures."""
     document = io.BytesIO(build_accounts_export(caption, accounts))
     await context.bot.send_document(
         chat_id=OWNER_ID,
