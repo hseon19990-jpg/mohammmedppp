@@ -7,6 +7,7 @@ Advanced Telegram Account Manager Bot - Full Version (COMPLETELY FIXED)
 
 import asyncio
 import html
+import io
 import json
 import logging
 import os
@@ -2792,41 +2793,55 @@ async def mark_extracted(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("⚠️ الحساب غير موجود.", reply_markup=kb_single("🔙 جميع الحسابات", "all_accounts_section"))
 
 
+def build_accounts_export(title: str, accounts: list) -> bytes:
+    \"\"\"Build a plain-text export so account values cannot break Telegram formatting.\"\"\"
+    lines = [title, "=" * 60, ""]
+    for idx, acc in enumerate(accounts, 1):
+        leave_status = ""
+        if acc.get("approved_with_leave", False) and not acc.get("leave_confirmed", False):
+            leave_status = " (معلق)"
+        tier_icon = "🟢" if acc.get("has_app_pass", False) else "🟡" if acc.get("has_totp", False) else "🔵"
+        lines.append(f"{tier_icon} {idx}. البريد: {acc.get('email', '')}{leave_status}")
+        lines.append(f"🔑 كلمة المرور: {acc.get('password', '')}")
+        if acc.get("has_totp", False):
+            lines.append(f"🔐 TOTP: {acc.get('totp', '')}")
+        if acc.get("has_app_pass", False):
+            lines.append(f"🗝 كلمة مرور التطبيق: {format_app_password(acc.get('app_pass', ''))}")
+        if "amount" in acc:
+            try:
+                lines.append(f"💰 المبلغ: ${float(acc.get('amount', 0) or 0):.2f}")
+            except (TypeError, ValueError):
+                lines.append(f"💰 المبلغ: {acc.get('amount', '')}")
+        lines.extend(["─" * 20, ""])
+    return "\n".join(lines).encode("utf-8")
+
+
+async def send_accounts_export(context: ContextTypes.DEFAULT_TYPE, accounts: list, filename: str, caption: str):
+    \"\"\"Send exports as a file; this avoids Markdown and Telegram message-size failures.\"\"\"
+    document = io.BytesIO(build_accounts_export(caption, accounts))
+    await context.bot.send_document(
+        chat_id=OWNER_ID,
+        document=document,
+        filename=filename,
+        caption="📥 تم تجهيز ملف الحسابات وإرساله لك.",
+    )
+
+
 async def export_all_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
     users = load_json(USERS_DB)
-    all_accounts = []
-    for uid, user_data in users.items():
-        for acc in user_data.get("approved_accounts", []):
-            all_accounts.append(acc)
+    all_accounts = [acc for user_data in users.values() for acc in user_data.get("approved_accounts", [])]
     if not all_accounts:
         await query.edit_message_text("📭 لا توجد حسابات للتصدير.")
         return
-    export_msg = "📊 *جميع الحسابات المقبولة*\n═" * 30 + "\n\n"
-    for idx, acc in enumerate(all_accounts, 1):
-        leave_status = ""
-        if acc.get("approved_with_leave", False) and not acc.get("leave_confirmed", False):
-            leave_status = " (معلق)"
-        tier_icon = "🟢" if acc.get("has_app_pass", False) else "🟡" if acc.get("has_totp", False) else "🔵"
-        export_msg += f"{tier_icon} {idx}. 📧 `{acc.get('email', '')}`{leave_status}\n"
-        export_msg += f"🔑 `{acc.get('password', '')}`\n"
-        if acc.get("has_totp", False):
-            export_msg += f"🔐 `{acc.get('totp', '')}`\n"
-        if acc.get("has_app_pass", False):
-            formatted_pass = format_app_password(acc.get("app_pass", ""))
-            export_msg += f"🗝 `{formatted_pass}`\n"
-        export_msg += f"💰 ${acc.get('amount', 0):.2f}\n"
-        export_msg += "─" * 20 + "\n"
-    if len(export_msg) > 4000:
-        parts = [export_msg[i:i + 4000] for i in range(0, len(export_msg), 4000)]
-        for part in parts:
-            await context.bot.send_message(chat_id=OWNER_ID, text=part, parse_mode=ParseMode.MARKDOWN)
-        await query.edit_message_text("✅ تم تصدير جميع الحسابات في رسائل متعددة.")
-    else:
-        await query.edit_message_text(export_msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 جميع الحسابات", "all_accounts_section"))
+    await send_accounts_export(context, all_accounts, "all_accounts.txt", "جميع الحسابات المقبولة")
+    await query.edit_message_text(
+        f"✅ تم إرسال جميع الحسابات في ملف TXT ({len(all_accounts)} حساب).",
+        reply_markup=kb_single("🔙 جميع الحسابات", "all_accounts_section"),
+    )
 
 
 async def export_unextracted(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2835,37 +2850,30 @@ async def export_unextracted(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
     users = load_json(USERS_DB)
-    unextracted = []
-    for uid, user_data in users.items():
-        for acc in user_data.get("approved_accounts", []):
-            if not acc.get("extracted", False):
-                unextracted.append(acc)
+    unextracted = [
+        acc
+        for user_data in users.values()
+        for acc in user_data.get("approved_accounts", [])
+        if not acc.get("extracted", False)
+    ]
     if not unextracted:
         await query.edit_message_text("✅ لا توجد حسابات غير مستخرجة.")
         return
-    export_msg = "🆕 *الحسابات غير المستخرجة*\n═" * 30 + "\n\n"
-    for idx, acc in enumerate(unextracted, 1):
-        tier_icon = "🟢" if acc.get("has_app_pass", False) else "🟡" if acc.get("has_totp", False) else "🔵"
-        export_msg += f"{tier_icon} {idx}. 📧 `{acc.get('email', '')}`\n"
-        export_msg += f"🔑 `{acc.get('password', '')}`\n"
-        if acc.get("has_totp", False):
-            export_msg += f"🔐 `{acc.get('totp', '')}`\n"
-        if acc.get("has_app_pass", False):
-            formatted_pass = format_app_password(acc.get("app_pass", ""))
-            export_msg += f"🗝 `{formatted_pass}`\n"
-        export_msg += "─" * 20 + "\n"
+
+    # Only mark accounts after Telegram confirms the document was sent.
+    await send_accounts_export(context, unextracted, "unextracted_accounts.txt", "الحسابات غير المستخرجة")
     for uid, user_data in users.items():
+        changed = False
         for acc in user_data.get("approved_accounts", []):
             if not acc.get("extracted", False):
                 acc["extracted"] = True
-        save_user(int(uid), user_data)
-    if len(export_msg) > 4000:
-        parts = [export_msg[i:i + 4000] for i in range(0, len(export_msg), 4000)]
-        for part in parts:
-            await context.bot.send_message(chat_id=OWNER_ID, text=part, parse_mode=ParseMode.MARKDOWN)
-        await query.edit_message_text("✅ تم تصدير جميع الحسابات غير المستخرجة ووضع علامة مستخرجة عليها.")
-    else:
-        await query.edit_message_text(export_msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 الحسابات غير المستخرجة", "unextracted_accounts"))
+                changed = True
+        if changed:
+            save_user(int(uid), user_data)
+    await query.edit_message_text(
+        f"✅ تم إرسال الحسابات غير المستخرجة ووضع علامة مستخرجة عليها ({len(unextracted)} حساب).",
+        reply_markup=kb_single("🔙 الحسابات غير المستخرجة", "unextracted_accounts"),
+    )
 
 
 # ==================== PURCHASE CHANNELS ====================
