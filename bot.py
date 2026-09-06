@@ -347,6 +347,22 @@ def has_active_app_password(password: str) -> bool:
     return False
 
 
+def has_active_account_password(password: str) -> bool:
+    """Reserve login passwords only while their account is approved or pending."""
+    candidate = str(password or "").strip()
+    if not candidate:
+        return False
+
+    users = load_json(USERS_DB)
+    for user_data in users.values():
+        for collection_name in ("approved_accounts", "pending_requests"):
+            for record in user_data.get(collection_name, []):
+                stored_password = str(record.get("password", "") or "").strip()
+                if stored_password and stored_password == candidate:
+                    return True
+    return False
+
+
 # ==================== FORCED CHANNEL CHECK ====================
 def normalize_forced_channel(value: str) -> str:
     value = value.strip()
@@ -683,6 +699,13 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔑 *الخطوة 2/4*: أرسل كلمة المرور الأساسية:\n\n💰 *السعر الحالي:* ${prices['tier_1']:.2f} (إيميل + باسورد)",
             parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
     elif session.step == "password":
+        if has_active_account_password(text):
+            await update.message.reply_text(
+                "⚠️ كلمة المرور مستخدمة مسبقاً في حساب مقبول أو قيد الانتظار. لا يمكن إعادة إرسالها.",
+                reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu")
+            )
+            SESSIONS.pop(uid, None)
+            return
         session.password = text
         session.has_password = True
         session.step = "totp"
@@ -745,6 +768,13 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if active_status:
             message = "❌ هذا الإيميل مقبول مسبقاً!" if active_status == "approved" else "⏳ هذا الإيميل قيد الانتظار بالفعل!"
             await update.message.reply_text(message, reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+            SESSIONS.pop(uid, None)
+            return
+        if has_active_account_password(session.password):
+            await update.message.reply_text(
+                "⚠️ كلمة المرور مستخدمة مسبقاً في حساب مقبول أو قيد الانتظار. لا يمكن إعادة إرسالها.",
+                reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu")
+            )
             SESSIONS.pop(uid, None)
             return
         if has_active_app_password(cleaned):
@@ -842,6 +872,13 @@ async def submit_tier_1(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("⏳ هذا الإيميل قيد الانتظار بالفعل!", reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
         SESSIONS.pop(uid, None)
         return
+    if has_active_account_password(session.password):
+        await query.edit_message_text(
+            "⚠️ كلمة المرور مستخدمة مسبقاً في حساب مقبول أو قيد الانتظار. لا يمكن إعادة إرسالها.",
+            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu")
+        )
+        SESSIONS.pop(uid, None)
+        return
     user = update.effective_user
     user_full_name = user.full_name or "غير معروف"
     user_username = user.username or "لا يوجد"
@@ -887,6 +924,13 @@ async def submit_tier_2(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if active_status == "pending":
         await query.edit_message_text("⏳ هذا الإيميل قيد الانتظار بالفعل!", reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        SESSIONS.pop(uid, None)
+        return
+    if has_active_account_password(session.password):
+        await query.edit_message_text(
+            "⚠️ كلمة المرور مستخدمة مسبقاً في حساب مقبول أو قيد الانتظار. لا يمكن إعادة إرسالها.",
+            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu")
+        )
         SESSIONS.pop(uid, None)
         return
     user = update.effective_user
