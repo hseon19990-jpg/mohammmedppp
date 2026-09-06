@@ -306,6 +306,47 @@ def format_totp_secret(secret: str) -> str:
     return " ".join([cleaned[i:i+4] for i in range(0, 32, 4)])
 
 
+def normalize_email(email: Any) -> str:
+    """Normalize email values so case and surrounding spaces cannot bypass deduplication."""
+    return str(email or "").strip().casefold()
+
+
+def get_active_account_status(email: str) -> Optional[str]:
+    """Return approved/pending for an email; rejected records never block resubmission."""
+    normalized_email = normalize_email(email)
+    if not normalized_email:
+        return None
+
+    users = load_json(USERS_DB)
+    for user_data in users.values():
+        for account in user_data.get("approved_accounts", []):
+            if normalize_email(account.get("email")) == normalized_email:
+                return "approved"
+
+    for user_data in users.values():
+        for request in user_data.get("pending_requests", []):
+            if normalize_email(request.get("email")) == normalized_email:
+                return "pending"
+
+    return None
+
+
+def has_active_app_password(password: str) -> bool:
+    """Only active approved/pending requests reserve an app password."""
+    cleaned_password = str(password or "").replace(" ", "").upper()
+    if not cleaned_password:
+        return False
+
+    users = load_json(USERS_DB)
+    for user_data in users.values():
+        for collection_name in ("approved_accounts", "pending_requests"):
+            for record in user_data.get(collection_name, []):
+                stored_password = str(record.get("app_pass", "") or "").replace(" ", "").upper()
+                if stored_password == cleaned_password:
+                    return True
+    return False
+
+
 # ==================== FORCED CHANNEL CHECK ====================
 def normalize_forced_channel(value: str) -> str:
     value = value.strip()
@@ -613,32 +654,25 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_json(DATA_DIR / "config.json")
     prices = get_tier_prices()
     if session.step == "email":
-        if not re.match(r"[^@]+@[^@]+\.[^@]+", text):
+        email = normalize_email(text)
+        if not re.match(r"[^@]+@[^@]+\.[^@]+", email):
             await update.message.reply_text("❌ إيميل غير صالح.")
             return
-        user_data = get_user(uid)
-        for acc in user_data.get("approved_accounts", []):
-            if acc.get("email") == text:
-                await update.message.reply_text("❌ هذا الإيميل مقبول مسبقاً! لا يمكنك إعادة إرساله.",
-                                                reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
-                return
-        for req in user_data.get("pending_requests", []):
-            if req.get("email") == text:
-                await update.message.reply_text("⏳ هذا الإيميل قيد الانتظار بالفعل! انتظر موافقة المالك.",
-                                                reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
-                return
-        rejected_emails = user_data.get("rejected_emails", [])
-        if text in rejected_emails:
-            rejection_count = sum(1 for email in rejected_emails if email == text)
-            if rejection_count >= 3:
-                await update.message.reply_text("🚫 تم رفض هذا الإيميل 3 مرات! لا يمكنك إعادة إرساله مرة أخرى.",
-                                                reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
-                return
-            else:
-                rejected_emails.remove(text)
-                user_data["rejected_emails"] = rejected_emails
-                save_user(uid, user_data)
-        session.email = text
+
+        active_status = get_active_account_status(email)
+        if active_status == "approved":
+            await update.message.reply_text("❌ هذا الإيميل مقبول مسبقاً! لا يمكنك إعادة إرساله.",
+                                            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+            SESSIONS.pop(uid, None)
+            return
+        if active_status == "pending":
+            await update.message.reply_text("⏳ هذا الإيميل قيد الانتظار بالفعل! انتظر موافقة المالك.",
+                                            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+            SESSIONS.pop(uid, None)
+            return
+
+        # Rejected records are intentionally not checked: they may be resubmitted.
+        session.email = email
         session.step = "password"
         has_password_video = config.get("video_password") and Path(config.get("video_password", "")).exists()
         buttons = []
@@ -707,8 +741,13 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         user_data = get_user(uid)
-        used_passwords = user_data.get("used_app_passwords", [])
-        if cleaned in used_passwords:
+        active_status = get_active_account_status(session.email)
+        if active_status:
+            message = "❌ هذا الإيميل مقبول مسبقاً!" if active_status == "approved" else "⏳ هذا الإيميل قيد الانتظار بالفعل!"
+            await update.message.reply_text(message, reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+            SESSIONS.pop(uid, None)
+            return
+        if has_active_app_password(cleaned):
             config = load_json(DATA_DIR / "config.json")
             video_path = config.get("video_app_pass")
             msg = "⚠️ *كلمة المرور هذه مستخدمة مسبقاً!*\n\nيرجى تغيير كلمة المرور وإرسال كلمة جديدة.\n\n📌 الصيغة: XXXX XXXX XXXX XXXX"
@@ -738,9 +777,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_full_name = user.full_name or "غير معروف"
         user_username = user.username or "لا يوجد"
         final_price = calculate_account_price(session.has_totp, session.has_app_pass)
-
-        used_passwords.append(cleaned)
-        user_data["used_app_passwords"] = used_passwords
 
         user_data["pending_requests"].append({
             "email": session.email,
@@ -797,14 +833,15 @@ async def submit_tier_1(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data = get_user(uid)
     prices = get_tier_prices()
     price = prices["tier_1"]
-    for acc in user_data.get("approved_accounts", []):
-        if acc.get("email") == session.email:
-            await query.edit_message_text("❌ هذا الإيميل مقبول مسبقاً!", reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
-            return
-    for req in user_data.get("pending_requests", []):
-        if req.get("email") == session.email:
-            await query.edit_message_text("⏳ هذا الإيميل قيد الانتظار بالفعل!", reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
-            return
+    active_status = get_active_account_status(session.email)
+    if active_status == "approved":
+        await query.edit_message_text("❌ هذا الإيميل مقبول مسبقاً!", reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        SESSIONS.pop(uid, None)
+        return
+    if active_status == "pending":
+        await query.edit_message_text("⏳ هذا الإيميل قيد الانتظار بالفعل!", reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        SESSIONS.pop(uid, None)
+        return
     user = update.effective_user
     user_full_name = user.full_name or "غير معروف"
     user_username = user.username or "لا يوجد"
@@ -843,14 +880,15 @@ async def submit_tier_2(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data = get_user(uid)
     prices = get_tier_prices()
     price = prices["tier_2"]
-    for acc in user_data.get("approved_accounts", []):
-        if acc.get("email") == session.email:
-            await query.edit_message_text("❌ هذا الإيميل مقبول مسبقاً!", reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
-            return
-    for req in user_data.get("pending_requests", []):
-        if req.get("email") == session.email:
-            await query.edit_message_text("⏳ هذا الإيميل قيد الانتظار بالفعل!", reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
-            return
+    active_status = get_active_account_status(session.email)
+    if active_status == "approved":
+        await query.edit_message_text("❌ هذا الإيميل مقبول مسبقاً!", reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        SESSIONS.pop(uid, None)
+        return
+    if active_status == "pending":
+        await query.edit_message_text("⏳ هذا الإيميل قيد الانتظار بالفعل!", reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        SESSIONS.pop(uid, None)
+        return
     user = update.effective_user
     user_full_name = user.full_name or "غير معروف"
     user_username = user.username or "لا يوجد"
@@ -2079,9 +2117,8 @@ async def handle_approval_app_pass(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text("⚠️ كلمة مرور التطبيق تحتوي على أحرف غير صالحة.")
         return
 
-    # Check for duplicate app password
-    used_passwords = user_data.get("used_app_passwords", [])
-    if cleaned in used_passwords:
+    # Only approved/pending records reserve an app password; rejected records do not.
+    if has_active_app_password(cleaned):
         config = load_json(DATA_DIR / "config.json")
         video_path = config.get("video_app_pass")
         msg = "⚠️ *كلمة المرور هذه مستخدمة مسبقاً!*\n\nيرجى تغيير كلمة المرور وإرسال كلمة جديدة.\n\n📌 الصيغة: XXXX XXXX XXXX XXXX"
@@ -2102,11 +2139,6 @@ async def handle_approval_app_pass(update: Update, context: ContextTypes.DEFAULT
 
     approved_request["app_pass"] = cleaned
     approved_request["has_app_pass"] = True
-
-    # Save used app password
-    used_passwords.append(cleaned)
-    user_data["used_app_passwords"] = used_passwords
-    save_user(uid, user_data)
 
     # Recalculate price
     context.user_data["approval_data"] = approved_request
