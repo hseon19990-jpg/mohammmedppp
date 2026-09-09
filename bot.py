@@ -6,6 +6,7 @@ Advanced Telegram Account Manager Bot - Full Version (COMPLETELY FIXED)
 """
 
 import asyncio
+import hashlib
 import html
 import io
 import json
@@ -309,6 +310,30 @@ def format_totp_secret(secret: str) -> str:
 def normalize_email(email: Any) -> str:
     """Normalize email values so case and surrounding spaces cannot bypass deduplication."""
     return str(email or "").strip().casefold()
+
+
+def account_callback_token(email: Any) -> str:
+    """Return a short stable token for account callback buttons."""
+    return hashlib.sha256(normalize_email(email).encode("utf-8")).hexdigest()[:12]
+
+
+def find_approved_account(user_data: dict, token: str) -> tuple[int, dict] | None:
+    """Find an approved account by stable email token or legacy list index."""
+    accounts = user_data.get("approved_accounts", [])
+    if not isinstance(accounts, list):
+        return None
+
+    for index, account in enumerate(accounts):
+        if account_callback_token(account.get("email", "")) == token:
+            return index, account
+
+    # Older messages used the list index in callback data. Keep those buttons
+    # working while new buttons use the stable token above.
+    if token.isdigit():
+        index = int(token)
+        if 0 <= index < len(accounts):
+            return index, accounts[index]
+    return None
 
 
 def get_active_account_status(email: str) -> Optional[str]:
@@ -2220,7 +2245,7 @@ async def view_approved_requests(update: Update, context: ContextTypes.DEFAULT_T
         display_name = f"{user_name} (@{user_username})" if user_username != "لا يوجد" else user_name
         email_display = acc.get('email', '')[:15] + "..." if len(acc.get('email', '')) > 15 else acc.get('email', '')
         buttons.append((f"{tier_icon} {email_display} - {display_name[:12]} (${acc.get('amount', 0):.2f})",
-                        f"approved_detail:{acc['user_id']}:{acc.get('index', 0)}"))
+                        f"approved_detail:{acc['user_id']}:{account_callback_token(acc.get('email', ''))}"))
     buttons.append(("🔙 الطلبات", "approval_requests"))
     await query.edit_message_text(f"✅ *الطلبات المقبولة* ({len(approved)})\n\n🟢 مكتمل | 🟡 مع رمز المصادقة | 🔵 باسورد فقط\n\nاختر الإيميل لعرض التفاصيل:",
                                   parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
@@ -2234,15 +2259,16 @@ async def approved_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     parts = query.data.split(":")
     uid = int(parts[1])
-    index = int(parts[2])
+    token = parts[2]
     
     user_data = get_user(uid)
-    accounts = user_data.get("approved_accounts", [])
-    if index >= len(accounts):
+    account_match = find_approved_account(user_data, token)
+    if account_match is None:
         await query.edit_message_text("⚠️ هذا الحساب غير موجود.", reply_markup=kb_single("🔙 الطلبات المقبولة", "view_approved"))
         return
     
-    account = accounts[index]
+    index, account = account_match
+    account_token = account_callback_token(account.get("email", ""))
     tier_icon = "🟢" if account.get("has_app_pass", False) else "🟡" if account.get("has_totp", False) else "🔵"
     tier_text = "مكتمل" if account.get("has_app_pass", False) else "مع رمز المصادقة" if account.get("has_totp", False) else "باسورد فقط"
     user_name = account.get("user_name", "غير معروف")
@@ -2289,13 +2315,13 @@ async def approved_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if account.get("has_totp", False) and account.get("totp", ""):
         msg += f"\n📌 *هل تريد الحصول على كود جديد لرمز المصادقة؟*"
         buttons = [
-            ("🔄 كود جديد", f"new_totp_code:{uid}:{index}"),
-            ("💰 خصم نقاط", f"deduct_points:{uid}:{index}"),
+            ("🔄 كود جديد", f"new_totp_code:{uid}:{account_token}"),
+            ("💰 خصم نقاط", f"deduct_points:{uid}:{account_token}"),
             ("🔙 الطلبات المقبولة", "view_approved")
         ]
     else:
         buttons = [
-            ("💰 خصم نقاط", f"deduct_points:{uid}:{index}"),
+            ("💰 خصم نقاط", f"deduct_points:{uid}:{account_token}"),
             ("🔙 الطلبات المقبولة", "view_approved")
         ]
     await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
@@ -2309,15 +2335,17 @@ async def new_totp_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     parts = query.data.split(":")
     uid = int(parts[1])
-    index = int(parts[2])
+    token = parts[2]
 
     user_data = get_user(uid)
-    accounts = user_data.get("approved_accounts", [])
-    if index >= len(accounts):
+    account_match = find_approved_account(user_data, token)
+    if account_match is None:
         await query.edit_message_text("⚠️ الحساب غير موجود.", reply_markup=kb_single("🔙 الطلبات المقبولة", "view_approved"))
         return
 
-    account = accounts[index]
+    index, account = account_match
+    account_token = account_callback_token(account.get("email", ""))
+    accounts = user_data.get("approved_accounts", [])
     if not account.get("has_totp", False) or not account.get("totp", ""):
         await query.edit_message_text("⚠️ هذا الحساب لا يحتوي على رمز مصادقة.", reply_markup=kb_single("🔙 الطلبات المقبولة", "view_approved"))
         return
@@ -2334,7 +2362,7 @@ async def new_totp_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔄 *كود المصادقة الجديد*\n\n📧 الإيميل: `{account.get('email', '')}`\n🔢 *الكود الحالي:* `{new_code}`\n⏰ *الوقت:* {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n_الكود يتغير كل 30 ثانية_",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=kb_vertical([
-                ("🔄 تحديث الكود مرة أخرى", f"new_totp_code:{uid}:{index}"),
+                ("🔄 تحديث الكود مرة أخرى", f"new_totp_code:{uid}:{account_token}"),
                 ("🔙 الطلبات المقبولة", "view_approved")
             ])
         )
@@ -2350,20 +2378,21 @@ async def deduct_points(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     parts = query.data.split(":")
     uid = int(parts[1])
-    index = int(parts[2])
+    token = parts[2]
     
     user_data = get_user(uid)
-    accounts = user_data.get("approved_accounts", [])
-    if index >= len(accounts):
+    account_match = find_approved_account(user_data, token)
+    if account_match is None:
         await query.edit_message_text("⚠️ الحساب غير موجود.", reply_markup=kb_single("🔙 الطلبات المقبولة", "view_approved"))
         return
     
-    email = accounts[index].get("email", "")
+    index, account = account_match
+    email = account.get("email", "")
     context.user_data["deduct_uid"] = uid
-    context.user_data["deduct_index"] = index
+    context.user_data["deduct_token"] = account_callback_token(email)
     await query.edit_message_text(
         f"💰 *خصم نقاط*\n\n📧 الإيميل: `{email}`\n👤 المستخدم: `{uid}`\n\n📌 أرسل المبلغ المراد خصمه من رصيد المستخدم:\n_مثال: 5.00_\n\n_أو أرسل 'إلغاء' للإلغاء_",
-        parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 إلغاء", f"approved_detail:{uid}:{index}"))
+        parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 إلغاء", f"approved_detail:{uid}:{account_callback_token(email)}"))
     context.user_data["step"] = "deduct_points_input"
 
 
@@ -2371,7 +2400,7 @@ async def handle_deduct_points_input(update: Update, context: ContextTypes.DEFAU
     text = update.message.text.strip()
     if text.lower() == "الغاء":
         context.user_data.pop("deduct_uid", None)
-        context.user_data.pop("deduct_index", None)
+        context.user_data.pop("deduct_token", None)
         context.user_data.pop("step", None)
         await update.message.reply_text("❌ تم إلغاء عملية الخصم.", reply_markup=kb_single("🔙 الطلبات المقبولة", "view_approved"))
         return
@@ -2381,15 +2410,16 @@ async def handle_deduct_points_input(update: Update, context: ContextTypes.DEFAU
             await update.message.reply_text("⚠️ المبلغ يجب أن يكون أكبر من 0!")
             return
         uid = context.user_data.get("deduct_uid")
-        index = context.user_data.get("deduct_index")
-        if not uid or index is None:
+        token = context.user_data.get("deduct_token")
+        if not uid or not token:
             await update.message.reply_text("⚠️ حدث خطأ، حاول مرة أخرى.")
             return
         user_data = get_user(uid)
-        accounts = user_data.get("approved_accounts", [])
-        if index >= len(accounts):
+        account_match = find_approved_account(user_data, token)
+        if account_match is None:
             await update.message.reply_text("⚠️ الحساب غير موجود.")
             return
+        _, account = account_match
         current_balance = float(user_data.get("balance", 0.0))
         if current_balance < amount:
             await update.message.reply_text(f"⚠️ رصيد المستخدم غير كافٍ!\n💰 الرصيد الحالي: ${current_balance:.2f}\n💰 المبلغ المطلوب خصمه: ${amount:.2f}")
@@ -2398,15 +2428,15 @@ async def handle_deduct_points_input(update: Update, context: ContextTypes.DEFAU
         save_user(uid, user_data)
         try:
             await context.bot.send_message(chat_id=uid,
-                                           text=f"💰 *تم خصم نقاط من رصيدك!*\n\n📧 الإيميل: `{accounts[index].get('email', '')}`\n💰 المبلغ المخصوم: *${amount:.2f}*\n💰 الرصيد المتبقي: *${user_data['balance']:.2f}*\n\n_لمزيد من المعلومات، تواصل مع المالك_",
+                                           text=f"💰 *تم خصم نقاط من رصيدك!*\n\n📧 الإيميل: `{account.get('email', '')}`\n💰 المبلغ المخصوم: *${amount:.2f}*\n💰 الرصيد المتبقي: *${user_data['balance']:.2f}*\n\n_لمزيد من المعلومات، تواصل مع المالك_",
                                            parse_mode=ParseMode.MARKDOWN)
         except:
             pass
         context.user_data.pop("deduct_uid", None)
-        context.user_data.pop("deduct_index", None)
+        context.user_data.pop("deduct_token", None)
         context.user_data.pop("step", None)
         await update.message.reply_text(
-            f"✅ تم خصم ${amount:.2f} من رصيد المستخدم `{uid}` بنجاح!\n📧 الإيميل: `{accounts[index].get('email', '')}`\n💰 الرصيد المتبقي: ${user_data['balance']:.2f}",
+            f"✅ تم خصم ${amount:.2f} من رصيد المستخدم `{uid}` بنجاح!\n📧 الإيميل: `{account.get('email', '')}`\n💰 الرصيد المتبقي: ${user_data['balance']:.2f}",
             parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 الطلبات المقبولة", "view_approved"))
     except ValueError:
         await update.message.reply_text("⚠️ أرسل رقماً صحيحاً (مثال: 5.00)")
