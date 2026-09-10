@@ -231,6 +231,18 @@ def kb_single(button_text: str, callback_data: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton(button_text, callback_data=callback_data)]])
 
 
+def clear_edit_state(context: ContextTypes.DEFAULT_TYPE):
+    """Clear transient edit-mode values before starting another flow."""
+    for key in (
+        "step",
+        "editing_email",
+        "editing_field",
+        "editing_uid",
+        "editing_index",
+    ):
+        context.user_data.pop(key, None)
+
+
 def tg_html_escape(value: Any) -> str:
     """Escape dynamic values before inserting them into Telegram HTML text."""
     return html.escape(str(value), quote=False)
@@ -467,6 +479,11 @@ async def check_forced_channel_callback(update: Update, context: ContextTypes.DE
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
+    # Returning to the menu must end any partially completed input flow.
+    # Otherwise the next free-text message can be routed to an old edit
+    # session instead of the flow the member just selected.
+    clear_edit_state(context)
+    SESSIONS.pop(update.effective_user.id, None)
     user = update.effective_user
     buttons = [
         ("➕ إضافة حساب", "add_account"),
@@ -530,6 +547,7 @@ async def my_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def edit_my_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
+    clear_edit_state(context)
     query = update.callback_query
     user_data = get_user(query.from_user.id)
     pending = user_data.get("pending_requests", [])
@@ -546,6 +564,7 @@ async def edit_my_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def edit_pending_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
+    clear_edit_state(context)
     query = update.callback_query
     parts = query.data.split(":")
     uid = int(parts[1])
@@ -572,6 +591,7 @@ async def edit_pending_account(update: Update, context: ContextTypes.DEFAULT_TYP
 async def edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
+    clear_edit_state(context)
     query = update.callback_query
     parts = query.data.split(":")
     field = parts[1]
@@ -594,6 +614,7 @@ async def edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def delete_pending_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
+    clear_edit_state(context)
     query = update.callback_query
     parts = query.data.split(":")
     uid = int(parts[1])
@@ -623,7 +644,10 @@ async def handle_edit_field_input(update: Update, context: ContextTypes.DEFAULT_
     user_data = get_user(editing_uid)
     pending = user_data.get("pending_requests", [])
     if index >= len(pending):
-        await update.message.reply_text("⚠️ الحساب غير موجود.")
+        clear_edit_state(context)
+        await update.message.reply_text(
+            "⚠️ انتهت جلسة تعديل الحساب. اضغط «إضافة حساب» لبدء طلب جديد."
+        )
         return
     pending[index][field] = text
     user_data["pending_requests"] = pending
@@ -644,6 +668,8 @@ async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
     uid = update.effective_user.id
+    # Do not let a previous edit/check flow intercept the new email.
+    clear_edit_state(context)
     SESSIONS[uid] = Session(step="email")
     config = load_json(DATA_DIR / "config.json")
     prices = get_tier_prices()
@@ -680,6 +706,7 @@ async def show_video_in_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def add_account_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     SESSIONS.pop(uid, None)
+    clear_edit_state(context)
     await update.callback_query.edit_message_text("❌ تم الإلغاء.", reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
 
 
@@ -3702,6 +3729,8 @@ async def handle_referral(update: Update, context: ContextTypes.DEFAULT_TYPE, re
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    clear_edit_state(context)
+    SESSIONS.pop(update.effective_user.id, None)
     args = context.args
     if args and args[0]:
         referral_code = args[0]
