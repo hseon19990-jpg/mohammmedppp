@@ -695,7 +695,9 @@ async def show_video_in_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_video(chat_id=query.from_user.id, video=open(path, "rb"),
                                          caption="📹 *فيديو تعليمي*\nشاهد الفيديو لمعرفة الطريقة الصحيحة.",
                                          parse_mode=ParseMode.MARKDOWN, supports_streaming=True)
-            await add_account_start(update, context)
+            # Keep the active add-account session and its current step.
+            # Restarting add_account_start here resets users back to email,
+            # even when they opened the video while entering the 2FA secret.
         except Exception as e:
             logger.error(f"Error sending video: {e}")
             await query.edit_message_text("⚠️ حدث خطأ في تشغيل الفيديو.", reply_markup=kb_single("🔙 العودة", "add_account"))
