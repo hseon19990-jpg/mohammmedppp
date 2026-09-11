@@ -17,6 +17,7 @@ import shutil
 import secrets
 import time
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Optional, List, Any, Union
@@ -47,6 +48,22 @@ configured_data_dir = os.environ.get("DATA_DIR", "").strip()
 railway_volume_dir = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
 DATA_DIR = Path(configured_data_dir or railway_volume_dir or "/app/data").resolve()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+MONEY_QUANTUM = Decimal("0.01")
+
+
+def money_to_cents(value: Any) -> int:
+    """Convert a money value to integer cents without binary-float errors."""
+    try:
+        amount = Decimal(str(value if value is not None else 0))
+    except (InvalidOperation, TypeError, ValueError):
+        return 0
+    return int(amount.quantize(MONEY_QUANTUM, rounding=ROUND_HALF_UP) * 100)
+
+
+def cents_to_money(cents: int) -> float:
+    return round(cents / 100, 2)
+
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -3235,12 +3252,15 @@ async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("⚠️ الخدمة غير موجودة.", reply_markup=kb_single("🔙 قسم السحب", "withdraw_store"))
         return
     user_data = get_user(user_id)
-    if user_data["balance"] < service["price"]:
+    price_cents = money_to_cents(service.get("price", 0))
+    price = cents_to_money(price_cents)
+    balance_cents = money_to_cents(user_data.get("balance", 0))
+    if balance_cents < price_cents:
         await query.edit_message_text(
-            f"❌ رصيدك غير كافٍ. الرصيد: ${user_data['balance']:.2f}, السعر: ${service['price']:.2f}")
+            f"❌ رصيدك غير كافٍ. الرصيد: ${cents_to_money(balance_cents):.2f}, السعر: ${price:.2f}")
         return
     PENDING_PURCHASES[user_id] = {"service_id": service_id, "service_name": service_name,
-                                  "service_price": service["price"], "service_message": service_message,
+                                  "service_price": price, "service_message": service_message,
                                   "purchased_at": datetime.now().isoformat()}
     user = update.effective_user
     user_name = user.full_name or "غير معروف"
@@ -3295,17 +3315,18 @@ async def handle_purchase_message(update: Update, context: ContextTypes.DEFAULT_
         return
     purchase = PENDING_PURCHASES[user_id]
     user_data = get_user(user_id)
-    price = purchase["service_price"]
-    if user_data["balance"] < price:
+    price_cents = money_to_cents(purchase.get("service_price", 0))
+    price = cents_to_money(price_cents)
+    balance_cents = money_to_cents(user_data.get("balance", 0))
+    if balance_cents < price_cents:
         await update.message.reply_text(
-            f"❌ رصيدك غير كافٍ. الرصيد: ${user_data['balance']:.2f}, السعر: ${price:.2f}\nيرجى إعادة المحاولة.",
+            f"❌ رصيدك غير كافٍ. الرصيد: ${cents_to_money(balance_cents):.2f}, السعر: ${price:.2f}\nيرجى إعادة المحاولة.",
             reply_markup=kb_single("🔙 قسم السحب", "withdraw_store"))
         PENDING_PURCHASES.pop(user_id, None)
         return
-    user_data["balance"] -= price
-    user_data["spent_balance"] = round(
-        float(user_data.get("spent_balance", 0.0) or 0.0) + price,
-        2,
+    user_data["balance"] = cents_to_money(balance_cents - price_cents)
+    user_data["spent_balance"] = cents_to_money(
+        money_to_cents(user_data.get("spent_balance", 0)) + price_cents
     )
     save_user(user_id, user_data)
     user = update.effective_user
