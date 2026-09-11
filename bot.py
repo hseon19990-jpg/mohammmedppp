@@ -324,6 +324,42 @@ def normalize_email(email: Any) -> str:
     return str(email or "").strip().casefold()
 
 
+def clear_rejected_email_records(user_data: dict, email: str):
+    """Remove prior rejected copies when a member resubmits the same email."""
+    normalized_email = normalize_email(email)
+    if not normalized_email:
+        return
+
+    user_data["rejected_requests"] = [
+        request for request in user_data.get("rejected_requests", [])
+        if normalize_email(request.get("email", "")) != normalized_email
+    ]
+    user_data["rejected_emails"] = [
+        stored_email for stored_email in user_data.get("rejected_emails", [])
+        if normalize_email(stored_email) != normalized_email
+    ]
+
+
+def move_request_to_rejected(user_data: dict, request: dict, reason: str, reason_text: str = ""):
+    """Move a processed request into the member's rejected history."""
+    rejected_request = dict(request)
+    rejected_request["reject_reason"] = reason
+    if reason_text:
+        rejected_request["reject_reason_text"] = reason_text
+    user_data.setdefault("rejected_requests", []).append(rejected_request)
+
+    email = request.get("email", "")
+    rejected_emails = user_data.get("rejected_emails", [])
+    if not isinstance(rejected_emails, list):
+        rejected_emails = []
+    rejected_emails.append(email)
+    user_data["rejected_emails"] = rejected_emails
+    user_data["pending_balance"] = max(
+        0.0,
+        float(user_data.get("pending_balance", 0.0)) - float(request.get("amount", 0.0)),
+    )
+
+
 def account_callback_token(email: Any) -> str:
     """Return a short stable token for account callback buttons."""
     return hashlib.sha256(normalize_email(email).encode("utf-8")).hexdigest()[:12]
@@ -576,10 +612,24 @@ async def view_member_rejected_emails(update: Update, context: ContextTypes.DEFA
     lines = ["❌ <b>الإيميلات المرفوضة</b>", ""]
     for index, request in enumerate(rejected, 1):
         email = tg_html_escape(str(request.get("email", "غير معروف")))
+        password = tg_html_escape(str(request.get("password", "") or "")) or "❌ غير مرسل"
+        totp = tg_html_escape(str(request.get("totp", "") or "")) or "❌ غير مرسل"
+        app_pass = tg_html_escape(str(request.get("app_pass", "") or "")) or "❌ غير مرسل"
         reason = request.get("reject_reason", "unknown")
-        reason_text = reason_map.get(reason, str(reason))
+        reason_text = request.get("reject_reason_text") or reason_map.get(reason, str(reason))
+        if request.get("has_app_pass", False):
+            tier_text = "إيميل + باسورد + TOTP + كلمة مرور تطبيق"
+        elif request.get("has_totp", False):
+            tier_text = "إيميل + باسورد + TOTP"
+        else:
+            tier_text = "إيميل + باسورد"
+
         lines.append(f"{index}. 📧 <code>{email}</code>")
-        lines.append(f"   السبب: {tg_html_escape(reason_text)}")
+        lines.append(f"   🔑 الباسورد: <code>{password}</code>")
+        lines.append(f"   🔐 رمز المصادقة: <code>{totp}</code>")
+        lines.append(f"   🗝 كلمة مرور التطبيق: <code>{app_pass}</code>")
+        lines.append(f"   📦 المستوى: {tg_html_escape(tier_text)}")
+        lines.append(f"   السبب: {tg_html_escape(str(reason_text))}")
         if index < len(rejected):
             lines.append("")
 
@@ -909,6 +959,7 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_username = user.username or "لا يوجد"
         final_price = calculate_account_price(session.has_totp, session.has_app_pass)
 
+        clear_rejected_email_records(user_data, session.email)
         user_data["pending_requests"].append({
             "email": session.email,
             "password": session.password,
@@ -983,6 +1034,7 @@ async def submit_tier_1(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_full_name = user.full_name or "غير معروف"
     user_username = user.username or "لا يوجد"
+    clear_rejected_email_records(user_data, session.email)
     user_data["pending_requests"].append({
         "email": session.email,
         "password": session.password,
@@ -1037,6 +1089,7 @@ async def submit_tier_2(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_full_name = user.full_name or "غير معروف"
     user_username = user.username or "لا يوجد"
+    clear_rejected_email_records(user_data, session.email)
     user_data["pending_requests"].append({
         "email": session.email,
         "password": session.password,
@@ -2062,12 +2115,7 @@ async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TY
     email = request.get("email", "")
     display_email = tg_html_escape(email)
     pending.pop(index)
-    request["reject_reason"] = reason_type
-    user_data.setdefault("rejected_requests", []).append(request)
-    rejected_emails = user_data.get("rejected_emails", [])
-    rejected_emails.append(email)
-    user_data["rejected_emails"] = rejected_emails
-    user_data["pending_balance"] = max(0.0, float(user_data.get("pending_balance", 0.0)) - float(request.get("amount", 0.0)))
+    move_request_to_rejected(user_data, request, reason_type)
     user_data["pending_requests"] = pending
     save_user(uid, user_data)
     
@@ -2131,6 +2179,10 @@ async def handle_reject_reason_text(update: Update, context: ContextTypes.DEFAUL
     
     request = pending[index]
     email = request.get("email", "")
+    pending.pop(index)
+    move_request_to_rejected(user_data, request, "other", text)
+    user_data["pending_requests"] = pending
+    save_user(uid, user_data)
     
     try:
         await context.bot.send_message(chat_id=uid,
