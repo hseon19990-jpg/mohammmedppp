@@ -489,6 +489,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ("➕ إضافة حساب", "add_account"),
         ("💰 أموالي", "my_wallet"),
         ("📋 حساباتي", "my_accounts"),
+        ("📧 الإيميلات المرفوضة", "rejected_emails"),
         ("📺 تعليم", "tutorials"),
         ("🛒 سحب", "withdraw_store"),
         ("🔗 الإحالة", "referral_menu"),
@@ -541,6 +542,52 @@ async def my_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg += f"  {idx}. 📧 `{rej.get('email', '')}` ❌ - {reason_text}\n"
         msg += "\n"
     await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+
+
+# ==================== MEMBER REJECTED EMAILS ====================
+async def view_member_rejected_emails(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_forced_channel(update, context):
+        return
+    query = update.callback_query
+    user_data = get_user(query.from_user.id)
+    rejected = user_data.get("rejected_requests", [])
+
+    # Keep compatibility with older records that only stored the email string.
+    if not rejected:
+        rejected = [{"email": email, "reject_reason": "unknown"}
+                    for email in user_data.get("rejected_emails", [])]
+
+    if not rejected:
+        await query.edit_message_text(
+            "📭 لا توجد لديك إيميلات مرفوضة حاليًا.",
+            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"),
+        )
+        return
+
+    reason_map = {
+        "email": "الإيميل غير صحيح أو غير مقبول",
+        "password": "كلمة المرور غير صحيحة",
+        "totp": "رمز المصادقة غير صحيح",
+        "app_pass": "كلمة مرور التطبيق غير صحيحة",
+        "other": "سبب آخر",
+        "custom": "سبب مخصص",
+        "unknown": "غير معروف",
+    }
+    lines = ["❌ <b>الإيميلات المرفوضة</b>", ""]
+    for index, request in enumerate(rejected, 1):
+        email = tg_html_escape(str(request.get("email", "غير معروف")))
+        reason = request.get("reject_reason", "unknown")
+        reason_text = reason_map.get(reason, str(reason))
+        lines.append(f"{index}. 📧 <code>{email}</code>")
+        lines.append(f"   السبب: {tg_html_escape(reason_text)}")
+        if index < len(rejected):
+            lines.append("")
+
+    await query.edit_message_text(
+        "\n".join(lines),
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"),
+    )
 
 
 # ==================== EDIT MY ACCOUNTS ====================
@@ -3767,6 +3814,8 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await my_wallet(update, context)
     elif data == "my_accounts":
         await my_accounts(update, context)
+    elif data == "rejected_emails":
+        await view_member_rejected_emails(update, context)
     elif data == "tutorials":
         await tutorials(update, context)
     elif data.startswith("play_video:"):
