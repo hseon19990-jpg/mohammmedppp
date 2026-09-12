@@ -2293,7 +2293,10 @@ async def auto_verify_account(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif result["level"] == "partial":
         title = "🟡 <b>تحقق جزئي</b>"
     elif result["level"] == "unknown":
-        title = "⚪ <b>تعذّر التحقق (خطأ شبكة)</b>"
+        if category in {"2fa", "auth_or_policy"}:
+            title = "⚪ <b>تعذّر التحقق (رد Gmail عام)</b>"
+        else:
+            title = "⚪ <b>تعذّر التحقق (خطأ شبكة)</b>"
     else:
         title = "🔴 <b>فشل التحقق التلقائي</b>"
 
