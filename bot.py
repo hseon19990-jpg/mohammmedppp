@@ -732,7 +732,7 @@ def classify_imap_error(message: str) -> str:
     if any(m in low for m in TWO_FA_ERROR_MARKERS):
         return "2fa"
     if any(m in low for m in AUTH_ERROR_MARKERS):
-        return "auth"
+        return "auth_or_policy"
     if any(m in low for m in NETWORK_ERROR_MARKERS):
         return "network"
     return "unknown"
@@ -2291,8 +2291,11 @@ async def auto_verify_account(update: Update, context: ContextTypes.DEFAULT_TYPE
     category = result.get("category", "unknown")
     if category == "2fa":
         category_hint = "🔐 الحساب محمي بـ 2FA — الباسورد الأساسي لا يكفي، اطلب مفتاح TOTP."
-    elif category == "auth":
-        category_hint = "❌ بيانات الدخول خاطئة — الإيميل وهمي أو الباسورد خطأ."
+    elif category in {"auth", "auth_or_policy"}:
+        category_hint = (
+            "⚠️ رفض Gmail مصادقة IMAP. هذا لا يثبت خطأ كلمة المرور؛ "
+            "قد يتطلب App Password أو OAuth، أو تكون IMAP/المصادقة الأساسية محظورة بسياسة الحساب."
+        )
     elif category == "network":
         category_hint = "🌐 تعذّر الوصول لخادم البريد — قد يكون حجب من IP السيرفر."
     elif category == "ok":
