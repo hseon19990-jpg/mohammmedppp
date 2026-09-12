@@ -1,17 +1,5 @@
-# ===== Telegram Bot =====
 python-telegram-bot[job-queue]==20.7
-
-# ===== 2FA / TOTP =====
 pyotp==2.9.0
-
-# ===== Environment Variables =====
 python-dotenv==1.0.1
-
-# ===== Encryption (تشفير البيانات الحساسة) =====
 cryptography==42.0.5
-
-# ===== Image Processing (رسم الإحصائيات) =====
 Pillow==10.4.0
-
-# ===== HTTP Client (اختياري — كان موجود سابقاً) =====
-curl-cffi==0.7.1
