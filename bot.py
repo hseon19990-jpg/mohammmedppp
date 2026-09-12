@@ -1,10 +1,12 @@
 """
-Advanced Telegram Account Manager Bot - v3
+Advanced Telegram Account Manager Bot - v4
+- Owner-triggered IMAP verification only (no auto verification on submit)
+- Works for tier 1 (email+password), tier 2 (+2FA), tier 3 (+app password)
 - Encryption at rest (Fernet)
 - Session & pending-purchase persistence
 - Config cache with TTL
 - Transaction history
-- IMAP rate limiting
+- IMAP rate limiting (60s per email)
 - Daily auto backup
 """
 
@@ -22,7 +24,7 @@ import shutil
 import socket
 import ssl
 import time
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -91,7 +93,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
 # ==================== ENCRYPTION ====================
 ENCRYPTION_KEY_FILE = DATA_DIR / ".encryption_key"
 SECRET_FIELDS = {"password", "totp", "app_pass"}
@@ -103,7 +104,7 @@ def _init_fernet() -> Optional["Fernet"]:
     if _FERNET is not None:
         return _FERNET
     if not CRYPTO_AVAILABLE:
-        logger.warning("cryptography غير مثبت — سيتم تخزين البيانات بدون تشفير.")
+        logger.warning("cryptography غير مثبت — تخزين بدون تشفير.")
         return None
     env_key = os.environ.get("ENCRYPTION_KEY", "").strip()
     key_bytes = env_key.encode() if env_key else None
@@ -118,7 +119,7 @@ def _init_fernet() -> Optional["Fernet"]:
             try:
                 ENCRYPTION_KEY_FILE.write_bytes(key_bytes)
                 os.chmod(ENCRYPTION_KEY_FILE, 0o600)
-                logger.info("تم توليد مفتاح تشفير جديد في %s", ENCRYPTION_KEY_FILE)
+                logger.info("تم توليد مفتاح تشفير جديد.")
             except OSError:
                 logger.exception("فشل حفظ مفتاح التشفير.")
     try:
@@ -150,8 +151,7 @@ def dec(value: Any) -> str:
         return str(value)
     try:
         return f.decrypt(str(value).encode("ascii")).decode("utf-8")
-    except (InvalidToken, ValueError, Exception):
-        # قد تكون البيانات قديمة (نص صريح) — نرجع كما هي
+    except Exception:
         return str(value)
 
 
@@ -162,7 +162,6 @@ def encrypt_record(record: dict) -> dict:
     for field_name in SECRET_FIELDS:
         if field_name in result and result[field_name]:
             raw = str(result[field_name])
-            # تجنّب التشفير المزدوج
             if not raw.startswith("gAAAAA"):
                 result[field_name] = enc(raw)
     return result
@@ -209,7 +208,6 @@ def migrate_legacy_data():
         Path(__file__).resolve().parent / "data",
     }
     legacy_dirs.discard(DATA_DIR)
-
     for legacy_dir in legacy_dirs:
         if not legacy_dir.exists():
             continue
@@ -219,10 +217,9 @@ def migrate_legacy_data():
             if source.is_file() and not destination.exists():
                 try:
                     shutil.copy2(source, destination)
-                    logger.info("Migrated %s to persistent storage.", filename)
+                    logger.info("Migrated %s.", filename)
                 except OSError:
-                    logger.exception("Migration failed for %s", filename)
-
+                    logger.exception("Migration failed.")
         source_videos = legacy_dir / "videos"
         destination_videos = DATA_DIR / "videos"
         if source_videos.is_dir():
@@ -232,9 +229,8 @@ def migrate_legacy_data():
                     destination_videos.mkdir(parents=True, exist_ok=True)
                     try:
                         shutil.copy2(source_video, destination_video)
-                        logger.info("Migrated video %s.", source_video.name)
                     except OSError:
-                        logger.exception("Video migration failed.")
+                        pass
 
 
 migrate_legacy_data()
@@ -263,7 +259,7 @@ def load_json(path: Path) -> dict:
             if isinstance(value, dict):
                 return value
         except (OSError, json.JSONDecodeError):
-            logger.exception("Could not read JSON data from %s.", candidate)
+            logger.exception("Could not read %s.", candidate)
     return {}
 
 
@@ -286,7 +282,7 @@ def save_json(path: Path, data: dict):
 
 # ==================== CONFIG CACHE ====================
 _CONFIG_CACHE: Dict[str, Any] = {"data": None, "mtime": 0.0, "loaded_at": 0.0}
-_CONFIG_TTL = 30  # ثواني
+_CONFIG_TTL = 30
 
 
 def invalidate_config_cache():
@@ -357,12 +353,10 @@ def get_user(user_id: int) -> dict:
 
 def save_user(user_id: int, user_data: dict):
     users = load_json(USERS_DB)
-    # clamp الأرصدة
     for field_name in ("balance", "pending_balance", "hold_balance",
                        "total_credited_balance", "spent_balance", "referral_earnings"):
         if field_name in user_data:
             user_data[field_name] = clamp_money(user_data[field_name])
-    # حد أقصى لعدد المعاملات المحفوظة
     if isinstance(user_data.get("transactions"), list) and len(user_data["transactions"]) > 200:
         user_data["transactions"] = user_data["transactions"][-200:]
     users[str(user_id)] = encrypt_user_data(user_data)
@@ -370,7 +364,6 @@ def save_user(user_id: int, user_data: dict):
 
 
 def add_transaction(user_data: dict, kind: str, amount: float, note: str = "", email: str = ""):
-    """kind: credit | debit | hold | release | referral | purchase"""
     user_data.setdefault("transactions", []).append({
         "kind": kind,
         "amount": round(float(amount), 2),
@@ -641,7 +634,7 @@ def get_imap_host(email: str) -> Tuple[str, int]:
 def _imap_login_sync(email: str, password: str, timeout: int = 15) -> Tuple[bool, str]:
     host, port = get_imap_host(email)
     if not host:
-        return False, "⚠️ مزود الإيميل غير معروف، تعذّر تحديد خادم IMAP."
+        return False, "⚠️ مزود الإيميل غير معروف."
     try:
         ctx = ssl.create_default_context()
         with imaplib.IMAP4_SSL(host, port, ssl_context=ctx, timeout=timeout) as imap:
@@ -650,14 +643,14 @@ def _imap_login_sync(email: str, password: str, timeout: int = 15) -> Tuple[bool
                 imap.logout()
             except Exception:
                 pass
-            return True, "تم تسجيل الدخول عبر IMAP بنجاح."
+            return True, "تم تسجيل الدخول بنجاح."
     except imaplib.IMAP4.error as exc:
         err = str(exc)
         low = err.lower()
         if "application-specific password required" in low:
             return False, "يتطلب كلمة مرور تطبيق (App Password) وليس كلمة المرور العادية."
         if "invalid credentials" in low or "authenticationfailed" in low or ("auth" in low and "fail" in low):
-            return False, "بيانات الدخول غير صحيحة (الإيميل أو كلمة مرور التطبيق)."
+            return False, "بيانات الدخول غير صحيحة (الإيميل أو كلمة المرور)."
         if "account is disabled" in low or "disabled" in low:
             return False, "الحساب معطّل من قبل المزود."
         if "too many" in low or "rate" in low or "limit" in low:
@@ -668,12 +661,40 @@ def _imap_login_sync(email: str, password: str, timeout: int = 15) -> Tuple[bool
     except socket.gaierror:
         return False, "تعذّر الوصول إلى خادم البريد (DNS)."
     except ssl.SSLError as exc:
-        return False, f"خطأ في اتصال SSL: {exc}"
+        return False, f"خطأ SSL: {exc}"
     except OSError as exc:
         return False, f"تعذّر الاتصال بالخادم: {exc}"
     except Exception:
         logger.exception("IMAP verification error for %s", email)
         return False, "خطأ غير متوقع أثناء التحقق."
+
+
+NETWORK_ERROR_MARKERS = (
+    "timeout", "dns", "ssl", "connect", "unreachable", "refused",
+    "تعذّر الاتصال", "انتهت مهلة",
+)
+AUTH_ERROR_MARKERS = (
+    "invalid credentials", "authenticationfailed",
+    "username and password not accepted",
+    "بيانات الدخول غير صحيحة",
+    "بيانات الدخول غير صحيحة",
+)
+TWO_FA_ERROR_MARKERS = (
+    "application-specific password", "app password",
+    "two-factor", "2fa", "2-step", "app-specific",
+    "يتطلب كلمة مرور تطبيق",
+)
+
+
+def classify_imap_error(message: str) -> str:
+    low = (message or "").lower()
+    if any(m in low for m in TWO_FA_ERROR_MARKERS):
+        return "2fa"
+    if any(m in low for m in AUTH_ERROR_MARKERS):
+        return "auth"
+    if any(m in low for m in NETWORK_ERROR_MARKERS):
+        return "network"
+    return "unknown"
 
 
 async def verify_account_credentials(
@@ -688,6 +709,7 @@ async def verify_account_credentials(
         "message": "",
         "imap_ok": False,
         "totp_ok": False,
+        "category": "unknown",
     }
     if totp_secret:
         cleaned_totp = totp_secret.replace(" ", "").upper()
@@ -708,27 +730,40 @@ async def verify_account_credentials(
         ok, msg = await asyncio.to_thread(_imap_login_sync, email, imap_pass)
         result["imap_ok"] = ok
         result["message"] = msg
+        if not ok:
+            result["category"] = classify_imap_error(msg)
+        else:
+            result["category"] = "ok"
     else:
         result["message"] = "لا توجد بيانات دخول للتحقق منها."
+        result["category"] = "no_credentials"
 
     if result["imap_ok"]:
         result["level"] = "verified"
         result["badge"] = "🟢"
         result["message"] = ("🟢 تم التحقق الكامل عبر IMAP باستخدام كلمة مرور التطبيق."
                              if app_pass else "🟢 تم تسجيل الدخول عبر IMAP بنجاح.")
-    elif app_pass and not result["imap_ok"]:
-        result["level"] = "failed"
-        result["badge"] = "🔴"
+    elif result["category"] == "2fa":
+        result["level"] = "partial"
+        result["badge"] = "🟡"
+        if result["totp_ok"]:
+            result["message"] = "🟡 الحساب محمي بـ 2FA، ومفتاح المصادقة المرفق صالح."
+        else:
+            result["message"] = "🟡 الحساب محمي بـ 2FA — لم يُرفق مفتاح مصادقة صالح."
+    elif result["category"] == "network":
+        result["level"] = "unknown"
+        result["badge"] = "⚪"
     elif result["totp_ok"]:
         result["level"] = "partial"
         result["badge"] = "🟡"
         if not result["message"]:
-            result["message"] = "🟡 مفتاح 2FA صالح، لكن لا يمكن التحقق الكامل بدون كلمة مرور تطبيق."
+            result["message"] = "🟡 مفتاح 2FA صالح، لكن لا يمكن التحقق الكامل."
     else:
         result["level"] = "failed"
         result["badge"] = "🔴"
         if not result["message"]:
             result["message"] = "❌ فشل التحقق التلقائي."
+
     return result
 
 
@@ -859,15 +894,11 @@ async def my_transactions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data = get_user(query.from_user.id)
     transactions = user_data.get("transactions", [])
     if not transactions:
-        await query.edit_message_text(
-            "📭 لا توجد معاملات بعد.",
-            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"),
-        )
+        await query.edit_message_text("📭 لا توجد معاملات بعد.",
+                                      reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
         return
-    kind_icons = {
-        "credit": "➕", "debit": "➖", "hold": "🔒", "release": "🔓",
-        "referral": "🎁", "purchase": "🛒",
-    }
+    kind_icons = {"credit": "➕", "debit": "➖", "hold": "🔒", "release": "🔓",
+                  "referral": "🎁", "purchase": "🛒"}
     lines = ["📜 <b>آخر 20 معاملة:</b>", ""]
     for tx in transactions[-20:][::-1]:
         icon = kind_icons.get(tx.get("kind", ""), "•")
@@ -878,11 +909,8 @@ async def my_transactions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         detail = f" — {note}" if note else ""
         email_part = f"\n   📧 <code>{email}</code>" if email else ""
         lines.append(f"{icon} <b>${amount:.2f}</b>{detail}{email_part}\n   🕐 <code>{when}</code>")
-    await query.edit_message_text(
-        "\n".join(lines),
-        parse_mode=ParseMode.HTML,
-        reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"),
-    )
+    await query.edit_message_text("\n".join(lines), parse_mode=ParseMode.HTML,
+                                  reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
 
 
 # ==================== MY ACCOUNTS ====================
@@ -938,18 +966,14 @@ async def view_member_rejected_emails(update: Update, context: ContextTypes.DEFA
         rejected = [{"email": email, "reject_reason": "unknown"}
                     for email in user_data.get("rejected_emails", [])]
     if not rejected:
-        await query.edit_message_text(
-            "📭 لا توجد لديك إيميلات مرفوضة حاليًا.",
-            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"),
-        )
+        await query.edit_message_text("📭 لا توجد لديك إيميلات مرفوضة حاليًا.",
+                                      reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
         return
-    reason_map = {
-        "email": "الإيميل غير صحيح أو غير مقبول",
-        "password": "كلمة المرور غير صحيحة",
-        "totp": "رمز المصادقة غير صحيح",
-        "app_pass": "كلمة مرور التطبيق غير صحيحة",
-        "other": "سبب آخر", "custom": "سبب مخصص", "unknown": "غير معروف",
-    }
+    reason_map = {"email": "الإيميل غير صحيح أو غير مقبول",
+                  "password": "كلمة المرور غير صحيحة",
+                  "totp": "رمز المصادقة غير صحيح",
+                  "app_pass": "كلمة مرور التطبيق غير صحيحة",
+                  "other": "سبب آخر", "custom": "سبب مخصص", "unknown": "غير معروف"}
     lines = ["❌ <b>الإيميلات المرفوضة</b>", ""]
     for index, request in enumerate(rejected, 1):
         email = tg_html_escape(str(request.get("email", "غير معروف")))
@@ -972,11 +996,8 @@ async def view_member_rejected_emails(update: Update, context: ContextTypes.DEFA
         lines.append(f"   السبب: {tg_html_escape(str(reason_text))}")
         if index < len(rejected):
             lines.append("")
-    await query.edit_message_text(
-        "\n".join(lines),
-        parse_mode=ParseMode.HTML,
-        reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"),
-    )
+    await query.edit_message_text("\n".join(lines), parse_mode=ParseMode.HTML,
+                                  reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
 
 
 # ==================== EDIT MY ACCOUNTS ====================
@@ -1282,9 +1303,8 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             SESSIONS.pop(uid, None); save_sessions()
             return
         if has_active_account_password(session.password):
-            await update.message.reply_text(
-                "⚠️ كلمة المرور مستخدمة مسبقاً في حساب مقبول أو قيد الانتظار.",
-                reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+            await update.message.reply_text("⚠️ كلمة المرور مستخدمة مسبقاً.",
+                                            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
             SESSIONS.pop(uid, None); save_sessions()
             return
         if has_active_app_password(cleaned):
@@ -1293,7 +1313,8 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if config_video and Path(config_video).exists():
                 try:
                     await context.bot.send_video(chat_id=uid, video=open(config_video, "rb"),
-                                                 caption=msg, parse_mode=ParseMode.MARKDOWN, supports_streaming=True)
+                                                 caption=msg, parse_mode=ParseMode.MARKDOWN,
+                                                 supports_streaming=True)
                 except Exception:
                     await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
             else:
@@ -1309,7 +1330,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_full_name = user.full_name or "غير معروف"
         user_username = user.username or "لا يوجد"
         final_price = calculate_account_price(session.has_totp, session.has_app_pass)
-
         clear_rejected_email_records(user_data, session.email)
         user_data["pending_requests"].append({
             "email": session.email,
@@ -1332,26 +1352,22 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_user(uid, user_data)
         SESSIONS.pop(uid, None)
         save_sessions()
-
         referred_by = user_data.get("referred_by")
         if referred_by:
             try:
                 await context.bot.send_message(
                     chat_id=referred_by,
-                    text=f"📢 *إشعار إحالة*\n\nالمستخدم `{uid}` أضاف إيميل `{session.email}` وهو قيد الانتظار.\nستحصل على مكافأة عند قبول الإيميل.",
+                    text=f"📢 *إشعار إحالة*\n\nالمستخدم `{uid}` أضاف إيميل `{session.email}` وهو قيد الانتظار.",
                     parse_mode=ParseMode.MARKDOWN)
             except Exception:
                 pass
-
         await send_leave_video_to_user(context, uid, session.email)
-
         if session.has_app_pass and session.has_totp:
             tier_text = "📦 *مكتمل (كامل المعلومات)*"
         elif session.has_totp:
             tier_text = "📦 *ناقص كلمة مرور التطبيق*"
         else:
             tier_text = "📦 *ناقص رمز المصادقة وكلمة مرور التطبيق*"
-
         await update.message.reply_text(
             f"✅ *تم إرسال الطلب للمالك للموافقة!*\n\n{tier_text}\n"
             f"💰 تمت إضافة *${final_price:.2f}* إلى الأموال قيد الانتظار.\n\n"
@@ -1386,9 +1402,8 @@ async def submit_tier_1(update: Update, context: ContextTypes.DEFAULT_TYPE):
         SESSIONS.pop(uid, None); save_sessions()
         return
     if has_active_account_password(session.password):
-        await query.edit_message_text(
-            "⚠️ كلمة المرور مستخدمة مسبقاً في حساب مقبول أو قيد الانتظار.",
-            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        await query.edit_message_text("⚠️ كلمة المرور مستخدمة مسبقاً.",
+                                      reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
         SESSIONS.pop(uid, None); save_sessions()
         return
     user = update.effective_user
@@ -1438,9 +1453,8 @@ async def submit_tier_2(update: Update, context: ContextTypes.DEFAULT_TYPE):
         SESSIONS.pop(uid, None); save_sessions()
         return
     if has_active_account_password(session.password):
-        await query.edit_message_text(
-            "⚠️ كلمة المرور مستخدمة مسبقاً في حساب مقبول أو قيد الانتظار.",
-            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        await query.edit_message_text("⚠️ كلمة المرور مستخدمة مسبقاً.",
+                                      reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
         SESSIONS.pop(uid, None); save_sessions()
         return
     user = update.effective_user
@@ -1505,12 +1519,8 @@ def parse_iso_datetime(value: Any) -> Optional[datetime]:
     return parsed
 
 
-async def schedule_leave_check(
-    context: ContextTypes.DEFAULT_TYPE,
-    user_id: int,
-    email: str,
-    release_at: Optional[str] = None,
-):
+async def schedule_leave_check(context: ContextTypes.DEFAULT_TYPE, user_id: int,
+                                email: str, release_at: Optional[str] = None):
     job_name = f"leave_check_{user_id}_{email}"
     for job in context.job_queue.get_jobs_by_name(job_name):
         job.schedule_removal()
@@ -1554,7 +1564,6 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
             chat_id=user_id,
             text=f"✅ *تم إضافة المبلغ إلى رصيدك تلقائياً!*\n\n"
                  f"📧 الإيميل: `{email}`\n💰 تم إضافة *${price:.2f}* إلى رصيدك.\n\n"
-                 f"🕐 *ملاحظة:* تم التحويل تلقائياً بعد 24 ساعة من موافقة المالك.\n\n"
                  f"_شكراً لاستخدامك البوت 🤖_",
             parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
@@ -1605,7 +1614,6 @@ async def daily_backup_job(context: ContextTypes.DEFAULT_TYPE):
             source = DATA_DIR / source_name
             if source.exists():
                 shutil.copy2(source, BACKUP_DIR / f"{source.stem}_{stamp}.json")
-        # حذف النسخ الأقدم من 7 أيام
         cutoff = time.time() - 7 * 86400
         for backup in BACKUP_DIR.iterdir():
             try:
@@ -1623,15 +1631,13 @@ def create_owner_stats_chart(path: Path, password_only: int, extra_sections: int
     try:
         from PIL import Image, ImageDraw, ImageFont
     except ImportError:
-        logger.exception("Pillow is required to create the owner statistics chart.")
+        logger.exception("Pillow is required.")
         return False
     width, height = 1000, 620
     image = Image.new("RGB", (width, height), "#101827")
     draw = ImageDraw.Draw(image)
-    font_paths = (
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
-    )
+    font_paths = ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                  "/usr/share/fonts/dejavu/DejaVuSans.ttf")
     font_path = next((c for c in font_paths if Path(c).exists()), None)
     if font_path:
         title_font = ImageFont.truetype(font_path, 34)
@@ -1694,26 +1700,22 @@ async def owner_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_accepted += len(approved_accounts)
         password_only += user_password_only
         extra_sections += user_extra_sections
-        rows.append({
-            "user_id": str(user_id),
-            "points": round(float(user_data.get("balance", 0.0) or 0.0), 2),
-            "accepted": len(approved_accounts),
-        })
+        rows.append({"user_id": str(user_id),
+                     "points": round(float(user_data.get("balance", 0.0) or 0.0), 2),
+                     "accepted": len(approved_accounts)})
     top_users = sorted(rows, key=lambda r: (r["points"], r["accepted"]), reverse=True)[:10]
-    message = (
-        "📊 <b>إحصائيات المستخدمين</b>\n\n"
-        f"👥 عدد المستخدمين: <b>{len(rows)}</b>\n"
-        f"📧 الإيميلات المقبولة: <b>{total_accepted}</b>\n"
-        f"🔵 إيميل + باسورد فقط: <b>{password_only}</b>\n"
-        f"🟣 أقسام إضافية: <b>{extra_sections}</b>\n\n"
-        "🏆 <b>أكثر المستخدمين نقاطاً:</b>\n"
-    )
+    message = ("📊 <b>إحصائيات المستخدمين</b>\n\n"
+               f"👥 عدد المستخدمين: <b>{len(rows)}</b>\n"
+               f"📧 الإيميلات المقبولة: <b>{total_accepted}</b>\n"
+               f"🔵 إيميل + باسورد فقط: <b>{password_only}</b>\n"
+               f"🟣 أقسام إضافية: <b>{extra_sections}</b>\n\n"
+               "🏆 <b>أكثر المستخدمين نقاطاً:</b>\n")
     if top_users:
         for index, row in enumerate(top_users, 1):
             message += (f"{index}. المستخدم <code>{row['user_id']}</code> — "
                         f"💰 {row['points']:.2f} نقطة — 📧 {row['accepted']} إيميل\n")
     else:
-        message += "لا توجد بيانات مستخدمين حتى الآن.\n"
+        message += "لا توجد بيانات.\n"
     chart_path = DATA_DIR / "owner_stats_chart.png"
     if create_owner_stats_chart(chart_path, password_only, extra_sections):
         with chart_path.open("rb") as chart_file:
@@ -1763,11 +1765,9 @@ def member_balance_stats(user_data: dict) -> dict:
     else:
         spent = max(0.0, float(recorded_spent or 0.0))
     total_balance = max(total_credited, current + spent + hold)
-    return {
-        "current": current, "spent": round(spent, 2), "hold": hold,
-        "pending": clamp_money(user_data.get("pending_balance", 0.0)),
-        "total": round(total_balance, 2),
-    }
+    return {"current": current, "spent": round(spent, 2), "hold": hold,
+            "pending": clamp_money(user_data.get("pending_balance", 0.0)),
+            "total": round(total_balance, 2)}
 
 
 async def check_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1797,9 +1797,8 @@ async def handle_member_check_input(update: Update, context: ContextTypes.DEFAUL
         return
     member_id = resolve_member_id(text)
     if member_id is None:
-        await update.message.reply_text(
-            "⚠️ لم يتم العثور على هذا العضو.",
-            reply_markup=kb_single("🔙 لوحة المالك", "owner_panel"))
+        await update.message.reply_text("⚠️ لم يتم العثور على هذا العضو.",
+                                        reply_markup=kb_single("🔙 لوحة المالك", "owner_panel"))
         return
     user_data = get_user(member_id)
     approved = user_data.get("approved_accounts", [])
@@ -1841,10 +1840,8 @@ async def handle_member_check_input(update: Update, context: ContextTypes.DEFAUL
     )
     context.user_data.pop("step", None)
     await update.message.reply_text(message, parse_mode=ParseMode.HTML,
-                                    reply_markup=kb_vertical([
-                                        ("🔎 فحص عضو آخر", "check_member"),
-                                        ("🔙 لوحة المالك", "owner_panel"),
-                                    ]))
+                                    reply_markup=kb_vertical([("🔎 فحص عضو آخر", "check_member"),
+                                                              ("🔙 لوحة المالك", "owner_panel")]))
 
 
 # ==================== OWNER PANEL ====================
@@ -1879,12 +1876,10 @@ async def set_tier_prices(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
     prices = get_tier_prices()
-    buttons = [
-        ("💲 المستوى 1 (باسورد فقط)", "set_tier:1"),
-        ("💲 المستوى 2 (مع رمز المصادقة)", "set_tier:2"),
-        ("💲 المستوى 3 (كامل)", "set_tier:3"),
-        ("🔙 إعدادات المالك", "owner_panel")
-    ]
+    buttons = [("💲 المستوى 1 (باسورد فقط)", "set_tier:1"),
+               ("💲 المستوى 2 (مع رمز المصادقة)", "set_tier:2"),
+               ("💲 المستوى 3 (كامل)", "set_tier:3"),
+               ("🔙 إعدادات المالك", "owner_panel")]
     await query.edit_message_text(
         f"💰 *إعدادات أسعار المستويات*\n\n"
         f"📌 *المستوى 1:* `${prices['tier_1']:.2f}`\n"
@@ -1902,7 +1897,7 @@ async def set_tier(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tier = query.data.split(":")[1]
     context.user_data["setting_tier"] = tier
     tier_names = {"1": "المستوى 1", "2": "المستوى 2", "3": "المستوى 3"}
-    await query.edit_message_text(f"💰 *تعديل سعر {tier_names[tier]}*\n\nأرسل السعر الجديد (رقم فقط):\n📌 مثال: 0.25",
+    await query.edit_message_text(f"💰 *تعديل سعر {tier_names[tier]}*\n\nأرسل السعر الجديد:",
                                   parse_mode=ParseMode.MARKDOWN,
                                   reply_markup=kb_single("🔙 إلغاء", "set_tier_prices"))
     context.user_data["mode"] = "set_tier_price"
@@ -1922,11 +1917,10 @@ async def videos_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for key, name in video_types.items():
         video_path = config.get(f"video_{key}")
         exists = video_path and Path(video_path).exists()
-        status = "✅" if exists else "❌"
-        buttons.append((f"{status} {name}", f"video_action:{key}"))
+        buttons.append((f"{'✅' if exists else '❌'} {name}", f"video_action:{key}"))
     buttons.append(("🔙 إعدادات المالك", "owner_panel"))
-    await query.edit_message_text("📹 *قسم الفيديوهات*\n\nاختر الفيديو لإدارته:",
-                                  parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
+    await query.edit_message_text("📹 *قسم الفيديوهات*", parse_mode=ParseMode.MARKDOWN,
+                                  reply_markup=kb_vertical(buttons))
 
 
 async def video_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1938,8 +1932,6 @@ async def video_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_config()
     video_path = config.get(f"video_{video_type}")
     exists = video_path and Path(video_path).exists()
-    video_names = {"general": "شرح عام", "email": "إنشاء إيميل", "password": "تغيير باسورد",
-                   "totp": "إضافة 2FA", "app_pass": "كلمة مرور التطبيق", "leave": "المغادرة"}
     buttons = []
     if exists:
         buttons.append(("📹 عرض الفيديو", f"view_video:{video_type}"))
@@ -1947,7 +1939,7 @@ async def video_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons.append(("📤 رفع فيديو جديد", f"set_video:{video_type}"))
     buttons.append(("🔙 قسم الفيديوهات", "videos_section"))
     status = "✅ موجود" if exists else "❌ غير موجود"
-    await query.edit_message_text(f"📹 *فيديو {video_names.get(video_type, video_type)}*\n\nالحالة: {status}",
+    await query.edit_message_text(f"📹 *فيديو {video_type}*\n\nالحالة: {status}",
                                   parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
 
 
@@ -1966,8 +1958,8 @@ async def view_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                          supports_streaming=True)
             await video_action(update, context)
         except Exception as e:
-            logger.error(f"Error sending video: {e}")
-            await query.edit_message_text("⚠️ حدث خطأ.",
+            logger.error(f"Error: {e}")
+            await query.edit_message_text("⚠️ خطأ.",
                                           reply_markup=kb_single("🔙 قسم الفيديوهات", "videos_section"))
     else:
         await query.edit_message_text("⚠️ الفيديو غير موجود.",
@@ -1989,7 +1981,7 @@ async def delete_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         config[f"video_{video_type}"] = ""
         save_config(config)
-        await query.edit_message_text(f"✅ تم حذف الفيديو!", 
+        await query.edit_message_text("✅ تم حذف الفيديو!",
                                       reply_markup=kb_single("🔙 قسم الفيديوهات", "videos_section"))
     else:
         await query.edit_message_text("⚠️ الفيديو غير موجود.",
@@ -2035,12 +2027,10 @@ async def approval_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
-    buttons = [
-        ("⏳ منتظرة", "view_pending:0"),
-        ("✅ مقبولة", "view_approved:0"),
-        ("❌ مرفوضة", "view_rejected:0"),
-        ("🔙 إعدادات المالك", "owner_panel")
-    ]
+    buttons = [("⏳ منتظرة", "view_pending:0"),
+               ("✅ مقبولة", "view_approved:0"),
+               ("❌ مرفوضة", "view_rejected:0"),
+               ("🔙 إعدادات المالك", "owner_panel")]
     await query.edit_message_text("📋 *الطلبات*\n\nاختر القسم:", parse_mode=ParseMode.MARKDOWN,
                                   reply_markup=kb_vertical(buttons))
 
@@ -2067,7 +2057,6 @@ def paginate_buttons(items: list, page: int, prefix: str, labeler) -> List[tuple
     buttons = []
     for item in items[start:end]:
         buttons.append(labeler(item))
-    # أزرار التنقل
     nav = []
     if page > 0:
         nav.append(("⬅️ السابق", f"{prefix}:{page-1}"))
@@ -2084,7 +2073,6 @@ async def view_pending_requests(update: Update, context: ContextTypes.DEFAULT_TY
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
-    page = 0
     try:
         page = int(query.data.split(":")[1])
     except (IndexError, ValueError):
@@ -2153,6 +2141,7 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg += f"📦 <b>المستوى:</b> {tier_icon} {tier_text}\n"
     msg += f"👤 <b>المستخدم:</b> <code>{uid}</code>\n"
     msg += f"💰 <b>السعر:</b> ${request.get('amount', 0):.2f}\n"
+
     verification = request.get("verification") or {}
     if verification:
         v_badge = verification.get("badge", "⚪")
@@ -2160,7 +2149,7 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         v_msg = tg_html_escape(verification.get("message", ""))
         v_time = verification.get("verified_at", "")
         level_text = {"verified": "🟢 تحقق كامل", "partial": "🟡 تحقق جزئي",
-                      "failed": "🔴 فشل التحقق"}.get(v_level, "⚪ غير محدد")
+                      "failed": "🔴 فشل التحقق", "unknown": "⚪ غير معروف"}.get(v_level, "⚪ غير محدد")
         msg += f"\n🔍 <b>آخر تحقق تلقائي:</b>\n   {v_badge} {level_text}\n"
         if v_msg:
             msg += f"   <i>{v_msg}</i>\n"
@@ -2170,20 +2159,29 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 msg += f"   🕐 {dt.strftime('%Y-%m-%d %H:%M:%S')}\n"
             except Exception:
                 pass
+
     config = load_config()
     has_leave_video = config.get("video_leave") and Path(config.get("video_leave", "")).exists()
     buttons = [("✅ قبول فوري", f"approve_request:{uid}:{index}")]
     if has_leave_video:
         buttons.append(("📹 قبول مع فيديو المغادرة", f"approve_with_leave:{uid}:{index}"))
-    if request.get("has_app_pass", False) and request.get("app_pass", ""):
-        buttons.append(("🔍 تحقق تلقائي (App Password)", f"auto_verify:{uid}:{index}"))
+    # 🔍 زر التحقق التلقائي — يظهر لأي طلب فيه إيميل + باسورد
+    if request.get("password") or request.get("app_pass"):
+        if request.get("has_app_pass", False):
+            verify_label = "🔍 تحقق تلقائي (App Password)"
+        elif request.get("has_totp", False):
+            verify_label = "🔍 تحقق تلقائي (IMAP + 2FA)"
+        else:
+            verify_label = "🔍 تحقق تلقائي (IMAP)"
+        buttons.append((verify_label, f"auto_verify:{uid}:{index}"))
     buttons.append(("❌ رفض", f"reject_request:{uid}:{index}"))
     buttons.append(("🔙 الطلبات المنتظرة", "view_pending:0"))
     await query.edit_message_text(msg, parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
 
 
-# ==================== AUTO VERIFY ====================
+# ==================== AUTO VERIFY (OWNER-TRIGGERED) ====================
 async def auto_verify_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تحقق يدوي من الطلب — يعرض النتيجة فقط، لا يقبل ولا يرفض."""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
@@ -2202,47 +2200,74 @@ async def auto_verify_account(update: Update, context: ContextTypes.DEFAULT_TYPE
     password = request.get("password", "")
     app_pass = request.get("app_pass", "")
     totp_secret = request.get("totp", "")
-    if not request.get("has_app_pass", False) or not app_pass:
-        await query.answer("⚠️ هذا الطلب بدون كلمة مرور تطبيق.", show_alert=True)
+
+    if not password and not app_pass:
+        await query.answer("⚠️ لا توجد بيانات دخول للتحقق منها.", show_alert=True)
         return
-    # rate limiting
+
+    # 🚦 Rate limit
     allowed, wait = imap_rate_ok(email)
     if not allowed:
-        await query.answer(f"⏳ الرجاء الانتظار {wait} ثانية قبل إعادة المحاولة.", show_alert=True)
+        await query.answer(f"⏳ انتظر {wait} ثانية قبل إعادة المحاولة لنفس الإيميل.", show_alert=True)
         return
     imap_rate_mark(email)
+
     await query.answer("🔍 جاري التحقق…", show_alert=False)
     loading_text = (f"🔍 <b>جاري التحقق التلقائي…</b>\n\n"
                     f"📧 <code>{tg_html_escape(email)}</code>\n\n"
-                    f"<i>يتم الاتصال بخادم البريد…</i>")
+                    f"<i>يتم الاتصال بخادم البريد والتحقق من البيانات…</i>")
     try:
         await query.edit_message_text(loading_text, parse_mode=ParseMode.HTML,
-                                      reply_markup=kb_single("⏳ يرجى الانتظار", f"pending_detail:{uid}:{index}"))
+                                      reply_markup=kb_single("⏳ يرجى الانتظار",
+                                                             f"pending_detail:{uid}:{index}"))
     except Exception:
         pass
+
     result = await verify_account_credentials(email=email, password=password,
                                               app_pass=app_pass, totp_secret=totp_secret)
+
     request["verification"] = {
         "level": result["level"], "badge": result["badge"], "message": result["message"],
         "imap_ok": result["imap_ok"], "totp_ok": result["totp_ok"],
+        "category": result.get("category", "unknown"),
         "verified_at": datetime.now(timezone.utc).isoformat(),
         "verified_by": "owner_manual",
     }
     pending[index] = request
     user_data["pending_requests"] = pending
     save_user(uid, user_data)
+
     if result["level"] == "verified":
         title = "🟢 <b>نجح التحقق التلقائي</b>"
     elif result["level"] == "partial":
         title = "🟡 <b>تحقق جزئي</b>"
+    elif result["level"] == "unknown":
+        title = "⚪ <b>تعذّر التحقق (خطأ شبكة)</b>"
     else:
         title = "🔴 <b>فشل التحقق التلقائي</b>"
+
+    # شرح نوع الحساب
+    category = result.get("category", "unknown")
+    if category == "2fa":
+        category_hint = "🔐 الحساب محمي بـ 2FA — الباسورد الأساسي لا يكفي، اطلب مفتاح TOTP."
+    elif category == "auth":
+        category_hint = "❌ بيانات الدخول خاطئة — الإيميل وهمي أو الباسورد خطأ."
+    elif category == "network":
+        category_hint = "🌐 تعذّر الوصول لخادم البريد — قد يكون حجب من IP السيرفر."
+    elif category == "ok":
+        category_hint = "✅ البيانات صحيحة، الحساب موجود."
+    else:
+        category_hint = ""
+
     result_msg = f"{title}\n\n📧 <b>الإيميل:</b> <code>{tg_html_escape(email)}</code>\n\n"
     result_msg += f"📬 <b>IMAP:</b> {'✅ نجح' if result['imap_ok'] else '❌ فشل'}\n"
     if totp_secret:
         result_msg += f"🔐 <b>مفتاح 2FA:</b> {'✅ صالح' if result['totp_ok'] else '❌ غير صالح'}\n"
     result_msg += f"\n📝 <b>النتيجة:</b> {tg_html_escape(result['message'])}\n"
-    result_msg += f"\n<i>📌 هذا مجرد تقرير — القرار يبقى لك.</i>"
+    if category_hint:
+        result_msg += f"\n💡 {category_hint}\n"
+    result_msg += f"\n<i>📌 هذا مجرد تقرير — لم يتم قبول أو رفض الطلب. القرار يبقى لك.</i>"
+
     buttons = [("🔍 تحقق مرة أخرى", f"auto_verify:{uid}:{index}"),
                ("✅ قبول فوري", f"approve_request:{uid}:{index}")]
     config = load_config()
@@ -2252,7 +2277,9 @@ async def auto_verify_account(update: Update, context: ContextTypes.DEFAULT_TYPE
     buttons.append(("❌ رفض", f"reject_request:{uid}:{index}"))
     buttons.append(("🔙 تفاصيل الطلب", f"pending_detail:{uid}:{index}"))
     buttons.append(("🔙 الطلبات المنتظرة", "view_pending:0"))
-    await query.edit_message_text(result_msg, parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
+
+    await query.edit_message_text(result_msg, parse_mode=ParseMode.HTML,
+                                  reply_markup=kb_vertical(buttons))
 
 
 # ==================== COMPLETE APPROVAL ====================
@@ -2285,7 +2312,7 @@ async def complete_approval(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     user_data["pending_balance"] = clamp_money(float(user_data.get("pending_balance", 0.0)) - price)
     if with_leave:
         user_data["hold_balance"] = clamp_money(float(user_data.get("hold_balance", 0.0)) + price)
-        add_transaction(user_data, "hold", price, "معلق 24 ساعة (انتظار مغادرة)", approved_request.get("email", ""))
+        add_transaction(user_data, "hold", price, "معلق 24 ساعة", approved_request.get("email", ""))
     else:
         user_data["balance"] = clamp_money(float(user_data.get("balance", 0.0)) + price)
         add_transaction(user_data, "credit", price, "قبول حساب", approved_request.get("email", ""))
@@ -2315,7 +2342,7 @@ async def complete_approval(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             try:
                 await context.bot.send_message(
                     chat_id=referred_by,
-                    text=f"🎉 *مبروك!*\nحصلت على مكافأة إحالة بقيمة ${referral_bonus:.2f}\nبسبب إحالة المستخدم {uid}.",
+                    text=f"🎉 *مبروك!*\nحصلت على مكافأة إحالة بقيمة ${referral_bonus:.2f}",
                     parse_mode=ParseMode.MARKDOWN)
             except Exception:
                 pass
@@ -2325,8 +2352,7 @@ async def complete_approval(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         user_message += f"🔢 <b>كود المصادقة:</b> <code>{tg_html_escape(totp_code)}</code>\n"
     if with_leave:
         user_message += (f"💰 المبلغ المعلق: <b>${price:.2f}</b>\n\n"
-                         f"⏰ <b>سيتم إضافة المبلغ إلى رصيدك تلقائياً بعد 24 ساعة.</b>\n\n"
-                         f"⚠️ قم بمغادرة الحساب لتجنب أي تأخير.")
+                         f"⏰ <b>سيتم إضافة المبلغ إلى رصيدك تلقائياً بعد 24 ساعة.</b>")
     else:
         user_message += f"💰 تم إضافة <b>${price:.2f}</b> إلى رصيدك."
     try:
@@ -2341,7 +2367,7 @@ async def complete_approval(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         context.user_data.pop(key, None)
 
 
-# ==================== APPROVE REQUEST ====================
+# ==================== APPROVE / REJECT ====================
 async def approve_request_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
@@ -2353,7 +2379,7 @@ async def approve_request_owner(update: Update, context: ContextTypes.DEFAULT_TY
     user_data = get_user(uid)
     pending = user_data.get("pending_requests", [])
     if index >= len(pending):
-        await query.edit_message_text("⚠️ هذا الطلب غير موجود.",
+        await query.edit_message_text("⚠️ الطلب غير موجود.",
                                       reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending:0"))
         return
     approved_request = pending[index]
@@ -2366,8 +2392,7 @@ async def approve_request_owner(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data["approval_with_leave"] = False
         await query.edit_message_text(
             f"🔐 <b>طلب رمز المصادقة</b>\n\n📧 <code>{display_email}</code>\n\n"
-            f"📌 أرسل رمز المصادقة (32 حرفاً):\n\n"
-            f"<i>يمكنك كتابة 'تخطي' لتخطي هذه الخطوة</i>",
+            f"📌 أرسل رمز المصادقة (32 حرفاً):\n\n<i>أو 'تخطي'</i>",
             parse_mode=ParseMode.HTML,
             reply_markup=kb_single("🔙 إلغاء", f"pending_detail:{uid}:{index}"))
         return
@@ -2379,8 +2404,7 @@ async def approve_request_owner(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data["approval_with_leave"] = False
         await query.edit_message_text(
             f"🗝 <b>طلب كلمة مرور التطبيق</b>\n\n📧 <code>{display_email}</code>\n\n"
-            f"📌 أرسل كلمة مرور التطبيق (16 حرفاً):\n\n"
-            f"<i>يمكنك كتابة 'تخطي' لتخطي هذه الخطوة</i>",
+            f"📌 أرسل كلمة مرور التطبيق (16 حرفاً):\n\n<i>أو 'تخطي'</i>",
             parse_mode=ParseMode.HTML,
             reply_markup=kb_single("🔙 إلغاء", f"pending_detail:{uid}:{index}"))
         return
@@ -2439,7 +2463,6 @@ async def approve_with_leave(update: Update, context: ContextTypes.DEFAULT_TYPE)
         reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending:0"))
 
 
-# ==================== REJECT REQUEST ====================
 async def reject_request_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
@@ -2458,14 +2481,12 @@ async def reject_request_reason(update: Update, context: ContextTypes.DEFAULT_TY
     display_email = tg_html_escape(email)
     context.user_data["reject_uid"] = uid
     context.user_data["reject_index"] = index
-    buttons = [
-        ("📧 إيميل خطأ", f"reject_reason:email:{uid}:{index}"),
-        ("🔑 باسورد خطأ", f"reject_reason:password:{uid}:{index}"),
-        ("🔐 رمز مصادقة خطأ", f"reject_reason:totp:{uid}:{index}"),
-        ("🗝 كلمة مرور تطبيق خطأ", f"reject_reason:app_pass:{uid}:{index}"),
-        ("📝 خطأ آخر (اكتب السبب)", f"reject_reason:other:{uid}:{index}"),
-        ("🔙 التفاصيل", f"pending_detail:{uid}:{index}")
-    ]
+    buttons = [("📧 إيميل خطأ", f"reject_reason:email:{uid}:{index}"),
+               ("🔑 باسورد خطأ", f"reject_reason:password:{uid}:{index}"),
+               ("🔐 رمز مصادقة خطأ", f"reject_reason:totp:{uid}:{index}"),
+               ("🗝 كلمة مرور تطبيق خطأ", f"reject_reason:app_pass:{uid}:{index}"),
+               ("📝 خطأ آخر (اكتب السبب)", f"reject_reason:other:{uid}:{index}"),
+               ("🔙 التفاصيل", f"pending_detail:{uid}:{index}")]
     await query.edit_message_text(
         f"❌ <b>رفض الطلب</b>\n\n📧 <code>{display_email}</code>\n\nاختر سبب الرفض:",
         parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
@@ -2524,7 +2545,7 @@ async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TY
     try:
         await context.bot.send_message(
             chat_id=uid,
-            text=f"{reason}\n\n📧 الإيميل: `{email}`\nيمكنك إعادة المحاولة بإرسال إيميل جديد.",
+            text=f"{reason}\n\n📧 الإيميل: `{email}`\nيمكنك إعادة المحاولة.",
             parse_mode=ParseMode.MARKDOWN)
     except Exception:
         pass
@@ -2565,7 +2586,6 @@ async def handle_reject_reason_text(update: Update, context: ContextTypes.DEFAUL
                                     reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending:0"))
 
 
-# ==================== HANDLE APPROVAL INPUTS ====================
 async def handle_approval_totp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     uid = context.user_data.get("approval_uid")
@@ -2587,7 +2607,7 @@ async def handle_approval_totp(update: Update, context: ContextTypes.DEFAULT_TYP
         if not approved_request.get("has_app_pass", False):
             context.user_data["approval_step"] = "waiting_app_pass"
             await update.message.reply_text(
-                f"✅ تم تخطي رمز المصادقة.\n\n🗝 *الآن أرسل كلمة مرور التطبيق (16 حرفاً):*\n\n_أو 'تخطي'_",
+                "✅ تم تخطي رمز المصادقة.\n\n🗝 *أرسل كلمة مرور التطبيق (16 حرفاً):*\n\n_أو 'تخطي'_",
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=kb_single("🔙 إلغاء", f"pending_detail:{uid}:{index}"))
         else:
@@ -2608,14 +2628,13 @@ async def handle_approval_totp(update: Update, context: ContextTypes.DEFAULT_TYP
             context.user_data["approval_step"] = "waiting_app_pass"
             await update.message.reply_text(
                 f"✅ رمز المصادقة صالح!\n🔐 *المفتاح:* `{formatted_secret}`\n🔢 *الكود:* `{code}`\n\n"
-                f"🗝 *الآن أرسل كلمة مرور التطبيق (16 حرفاً):*\n\n_أو 'تخطي'_",
+                f"🗝 *أرسل كلمة مرور التطبيق (16 حرفاً):*\n\n_أو 'تخطي'_",
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=kb_single("🔙 إلغاء", f"pending_detail:{uid}:{index}"))
         else:
             await complete_approval(update, context, uid, index, approved_request, with_leave)
     except Exception as e:
-        await update.message.reply_text(f"⚠️ مفتاح 2FA غير صالح: {str(e)}",
-                                        parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(f"⚠️ مفتاح 2FA غير صالح: {str(e)}")
 
 
 async def handle_approval_app_pass(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2632,12 +2651,11 @@ async def handle_approval_app_pass(update: Update, context: ContextTypes.DEFAULT
     if index >= len(pending):
         await update.message.reply_text("⚠️ الطلب غير موجود.")
         return
-    email = pending[index].get("email", "")
     if text.lower() == "تخطي":
         approved_request["app_pass"] = ""
         approved_request["has_app_pass"] = False
         context.user_data["approval_data"] = approved_request
-        await update.message.reply_text(f"✅ تم تخطي كلمة مرور التطبيق.")
+        await update.message.reply_text("✅ تم تخطي كلمة مرور التطبيق.")
         await complete_approval(update, context, uid, index, approved_request, with_leave)
         return
     cleaned = text.replace(" ", "")
@@ -2735,16 +2753,12 @@ async def approved_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif account.get("approved_with_leave", False) and account.get("leave_confirmed", False):
         msg += "📌 *حالة المغادرة:* ✅ تم التحويل\n"
     if account.get("has_totp", False) and account.get("totp", ""):
-        buttons = [
-            ("🔄 كود جديد", f"new_totp_code:{uid}:{account_token}"),
-            ("💰 خصم نقاط", f"deduct_points:{uid}:{account_token}"),
-            ("🔙 الطلبات المقبولة", "view_approved:0")
-        ]
+        buttons = [("🔄 كود جديد", f"new_totp_code:{uid}:{account_token}"),
+                   ("💰 خصم نقاط", f"deduct_points:{uid}:{account_token}"),
+                   ("🔙 الطلبات المقبولة", "view_approved:0")]
     else:
-        buttons = [
-            ("💰 خصم نقاط", f"deduct_points:{uid}:{account_token}"),
-            ("🔙 الطلبات المقبولة", "view_approved:0")
-        ]
+        buttons = [("💰 خصم نقاط", f"deduct_points:{uid}:{account_token}"),
+                   ("🔙 الطلبات المقبولة", "view_approved:0")]
     await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
 
 
@@ -2779,9 +2793,8 @@ async def new_totp_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔄 *كود المصادقة الجديد*\n\n📧 `{account.get('email', '')}`\n"
             f"🔢 *الكود:* `{new_code}`\n⏰ *الوقت:* {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             parse_mode=ParseMode.MARKDOWN,
-            reply_markup=kb_vertical([
-                ("🔄 تحديث", f"new_totp_code:{uid}:{account_token}"),
-                ("🔙 الطلبات المقبولة", "view_approved:0")]))
+            reply_markup=kb_vertical([("🔄 تحديث", f"new_totp_code:{uid}:{account_token}"),
+                                      ("🔙 الطلبات المقبولة", "view_approved:0")]))
     except Exception as e:
         await query.edit_message_text(f"⚠️ خطأ: {str(e)}",
                                       reply_markup=kb_single("🔙 الطلبات المقبولة", "view_approved:0"))
@@ -2931,10 +2944,8 @@ async def rejected_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg += f"💰 *السعر:* ${request.get('amount', 0):.2f}\n"
     msg += f"📝 *سبب الرفض:* {tg_html_escape(str(reason_text))}\n\n"
     msg += f"📌 *هل تريد إعطاء نقاط للمستخدم رغم الرفض؟*"
-    buttons = [
-        ("💰 إعطاء نقاط", f"give_points:{uid}:{index}"),
-        ("🔙 الطلبات المرفوضة", "view_rejected:0")
-    ]
+    buttons = [("💰 إعطاء نقاط", f"give_points:{uid}:{index}"),
+               ("🔙 الطلبات المرفوضة", "view_rejected:0")]
     await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
 
 
@@ -3006,17 +3017,14 @@ async def handle_give_points_input(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text("⚠️ أرسل رقماً صحيحاً.")
 
 
-# ==================== POINTS MANAGEMENT ====================
 async def points_management(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
-    buttons = [
-        ("➕ منح نقاط", "give_points_by_id"),
-        ("➖ خصم نقاط", "deduct_points_by_id"),
-        ("🔙 إعدادات المالك", "owner_panel")
-    ]
+    buttons = [("➕ منح نقاط", "give_points_by_id"),
+               ("➖ خصم نقاط", "deduct_points_by_id"),
+               ("🔙 إعدادات المالك", "owner_panel")]
     await query.edit_message_text("💰 *إدارة النقاط*\n\nاختر الإجراء:", parse_mode=ParseMode.MARKDOWN,
                                   reply_markup=kb_vertical(buttons))
 
@@ -3077,7 +3085,7 @@ async def handle_points_by_id_input(update: Update, context: ContextTypes.DEFAUL
                 target_user_id = int(uid)
                 break
     if not target_user_id:
-        await update.message.reply_text(f"⚠️ لم يتم العثور على مستخدم.")
+        await update.message.reply_text("⚠️ لم يتم العثور على مستخدم.")
         return
     step = context.user_data.get("step")
     if step == "give_points_by_id_input":
@@ -3122,18 +3130,15 @@ async def handle_points_by_id_input(update: Update, context: ContextTypes.DEFAUL
     context.user_data.pop("step", None)
 
 
-# ==================== ALL ACCOUNTS ====================
 async def all_accounts_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
-    buttons = [
-        ("📋 جميع الحسابات", "all_accounts"),
-        ("🆕 آخر الحسابات (غير المستخرجة)", "unextracted_accounts"),
-        ("⏳ الحسابات المعلقة (24 ساعة)", "hold_accounts"),
-        ("🔙 إعدادات المالك", "owner_panel")
-    ]
+    buttons = [("📋 جميع الحسابات", "all_accounts"),
+               ("🆕 آخر الحسابات (غير المستخرجة)", "unextracted_accounts"),
+               ("⏳ الحسابات المعلقة (24 ساعة)", "hold_accounts"),
+               ("🔙 إعدادات المالك", "owner_panel")]
     await query.edit_message_text("📊 *جميع الحسابات المقبولة*", parse_mode=ParseMode.MARKDOWN,
                                   reply_markup=kb_vertical(buttons))
 
@@ -3172,8 +3177,7 @@ async def hold_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         tier_icon = "🟢" if acc.get("has_app_pass") else "🟡" if acc.get("has_totp") else "🔵"
         msg += f"{idx}. {tier_icon} 📧 `{acc.get('email', '')}`\n"
-        msg += f"   👤 {acc.get('user_id', '')}\n"
-        msg += f"   💰 ${acc.get('amount', 0):.2f}\n"
+        msg += f"   👤 {acc.get('user_id', '')} | 💰 ${acc.get('amount', 0):.2f}\n"
         msg += f"   ⏳ {time_display}\n   ─────────────\n"
     if total > 10:
         msg += f"\n📌 أول 10 من {total}"
@@ -3214,12 +3218,10 @@ async def all_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"   👤 {acc.get('user_id', '')} | 💰 ${acc.get('amount', 0):.2f}\n   ─────────────\n"
     if total > 10:
         msg += f"\n📌 أول 10 من {total}"
-    buttons = [
-        ("📥 تصدير جميع الحسابات", "export_all_accounts"),
-        ("🆕 الحسابات غير المستخرجة", "unextracted_accounts"),
-        ("⏳ المعلقة", "hold_accounts"),
-        ("🔙 جميع الحسابات", "all_accounts_section")
-    ]
+    buttons = [("📥 تصدير جميع الحسابات", "export_all_accounts"),
+               ("🆕 الحسابات غير المستخرجة", "unextracted_accounts"),
+               ("⏳ المعلقة", "hold_accounts"),
+               ("🔙 جميع الحسابات", "all_accounts_section")]
     await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
 
 
@@ -3255,11 +3257,9 @@ async def unextracted_accounts(update: Update, context: ContextTypes.DEFAULT_TYP
         msg += f"   👤 {acc.get('user_id', '')}\n   ─────────────\n"
     if total > 10:
         msg += f"\n📌 أول 10 من {total}"
-    buttons = [
-        ("📥 تصدير", "export_unextracted"),
-        ("✅ وضع علامة مستخرجة", "mark_extracted_menu"),
-        ("🔙 جميع الحسابات", "all_accounts_section")
-    ]
+    buttons = [("📥 تصدير", "export_unextracted"),
+               ("✅ وضع علامة مستخرجة", "mark_extracted_menu"),
+               ("🔙 جميع الحسابات", "all_accounts_section")]
     await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
 
 
@@ -3274,8 +3274,7 @@ async def mark_extracted_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
         data = decrypt_user_data(encrypted_data)
         for idx, acc in enumerate(data.get("approved_accounts", [])):
             if not acc.get("extracted", False):
-                unextracted.append({"user_id": uid, "index": idx,
-                                    "email": acc.get("email", "")})
+                unextracted.append({"user_id": uid, "index": idx, "email": acc.get("email", "")})
     if not unextracted:
         await query.edit_message_text("✅ لا توجد.",
                                       reply_markup=kb_single("🔙 جميع الحسابات", "all_accounts_section"))
@@ -3302,7 +3301,7 @@ async def mark_extracted(update: Update, context: ContextTypes.DEFAULT_TYPE):
         accounts[index]["extracted"] = True
         user_data["approved_accounts"] = accounts
         save_user(uid, user_data)
-        await query.edit_message_text(f"✅ تم وضع علامة مستخرجة.",
+        await query.edit_message_text("✅ تم وضع علامة مستخرجة.",
                                       reply_markup=kb_single("🔙 الحسابات غير المستخرجة", "unextracted_accounts"))
     else:
         await query.edit_message_text("⚠️ الحساب غير موجود.",
@@ -3335,8 +3334,7 @@ async def send_accounts_export(context: ContextTypes.DEFAULT_TYPE, accounts: lis
                                 filename: str, caption: str):
     document = io.BytesIO(build_accounts_export(caption, accounts))
     await context.bot.send_document(chat_id=OWNER_ID, document=document,
-                                    filename=filename,
-                                    caption="📥 تم تجهيز ملف الحسابات.")
+                                    filename=filename, caption="📥 تم تجهيز ملف الحسابات.")
 
 
 async def export_all_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3388,11 +3386,9 @@ async def export_unextracted(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # ==================== PURCHASE CHANNELS ====================
 def purchase_channels_keyboard():
-    return kb_vertical([
-        ("1️⃣ ضبط الأول", "set_purchase_channel_1"),
-        ("2️⃣ ضبط الثاني", "set_purchase_channel_2"),
-        ("🔙 إعدادات المالك", "owner_panel"),
-    ])
+    return kb_vertical([("1️⃣ ضبط الأول", "set_purchase_channel_1"),
+                        ("2️⃣ ضبط الثاني", "set_purchase_channel_2"),
+                        ("🔙 إعدادات المالك", "owner_panel")])
 
 
 async def purchase_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3417,7 +3413,6 @@ async def set_purchase_channel(update: Update, context: ContextTypes.DEFAULT_TYP
                                   reply_markup=purchase_channels_keyboard())
 
 
-# ==================== FORCED CHANNEL ====================
 async def forced_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
@@ -3425,10 +3420,7 @@ async def forced_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     config = load_config()
     current_channel = config.get("forced_channel", "")
-    buttons = [
-        ("🗑️ إلغاء القناة", "remove_channel"),
-        ("🔙 إعدادات المالك", "owner_panel")
-    ]
+    buttons = [("🗑️ إلغاء القناة", "remove_channel"), ("🔙 إعدادات المالك", "owner_panel")]
     await query.edit_message_text(
         f"📢 *القناة الإجبارية*\n\n📌 الحالية: `{current_channel or 'لا توجد'}`\n\n"
         f"✏️ أرسل معرف القناة الجديدة:",
@@ -3516,13 +3508,11 @@ async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             f"❌ رصيدك غير كافٍ. الرصيد: ${cents_to_money(balance_cents):.2f}, السعر: ${price:.2f}")
         return
-    PENDING_PURCHASES[user_id] = {
-        "service_id": service_id,
-        "service_name": service.get("name", ""),
-        "service_price": price,
-        "service_message": service.get("message", "شكراً!"),
-        "purchased_at": datetime.now().isoformat(),
-    }
+    PENDING_PURCHASES[user_id] = {"service_id": service_id,
+                                   "service_name": service.get("name", ""),
+                                   "service_price": price,
+                                   "service_message": service.get("message", "شكراً!"),
+                                   "purchased_at": datetime.now().isoformat()}
     save_pending_purchases()
     bot_username = (await context.bot.get_me()).username
     total_emails = user_data.get("total_approved_emails", 0)
@@ -3579,17 +3569,15 @@ async def handle_purchase_message(update: Update, context: ContextTypes.DEFAULT_
     price = cents_to_money(price_cents)
     balance_cents = money_to_cents(user_data.get("balance", 0))
     if balance_cents < price_cents:
-        await update.message.reply_text(
-            f"❌ رصيدك غير كافٍ.",
-            reply_markup=kb_single("🔙 قسم السحب", "withdraw_store"))
+        await update.message.reply_text("❌ رصيدك غير كافٍ.",
+                                        reply_markup=kb_single("🔙 قسم السحب", "withdraw_store"))
         PENDING_PURCHASES.pop(user_id, None)
         save_pending_purchases()
         return
     user_data["balance"] = cents_to_money(balance_cents - price_cents)
     user_data["spent_balance"] = cents_to_money(
         money_to_cents(user_data.get("spent_balance", 0)) + price_cents)
-    add_transaction(user_data, "purchase", price,
-                    f"شراء: {purchase.get('service_name', '')}")
+    add_transaction(user_data, "purchase", price, f"شراء: {purchase.get('service_name', '')}")
     save_user(user_id, user_data)
     user = update.effective_user
     user_name = user.full_name or "غير معروف"
@@ -3630,7 +3618,6 @@ async def handle_purchase_message(update: Update, context: ContextTypes.DEFAULT_
     save_pending_purchases()
 
 
-# ==================== WALLET ====================
 async def my_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
@@ -3644,7 +3631,6 @@ async def my_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
 
 
-# ==================== TUTORIALS ====================
 async def tutorials(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
@@ -3685,7 +3671,10 @@ async def play_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                       reply_markup=kb_single("🔙 التعليم", "tutorials"))
 
 
-# ==================== REFERRAL ====================
+def generate_referral_code():
+    return secrets.token_hex(4).upper()
+
+
 async def referral_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
@@ -3703,15 +3692,9 @@ async def referral_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
            f"📊 *إحصائياتك:*\n💰 المكافآت: ${float(user_data.get('referral_earnings', 0.0)):.2f}\n"
            f"👥 عدد الإحالات: {user_data.get('total_referrals', 0)}\n\n"
            f"📝 *كيف يعمل؟*\n1️⃣ شارك الرابط\n2️⃣ عند قبول حساب صديقك\n3️⃣ ستحصل على مكافأة")
-    buttons = [
-        ("📋 نسخ الرابط", f"copy_referral:{referral_code}"),
-        ("🔙 القائمة الرئيسية", "main_menu")
-    ]
+    buttons = [("📋 نسخ الرابط", f"copy_referral:{referral_code}"),
+               ("🔙 القائمة الرئيسية", "main_menu")]
     await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
-
-
-def generate_referral_code():
-    return secrets.token_hex(4).upper()
 
 
 async def copy_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3721,10 +3704,8 @@ async def copy_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
     code = query.data.split(":")[1]
     bot_username = (await context.bot.get_me()).username
     link = f"https://t.me/{bot_username}?start={code}"
-    buttons = [
-        ("🔗 عرض رابط الإحالة", "referral_menu"),
-        ("🔙 القائمة الرئيسية", "main_menu")
-    ]
+    buttons = [("🔗 عرض رابط الإحالة", "referral_menu"),
+               ("🔙 القائمة الرئيسية", "main_menu")]
     await query.edit_message_text(f"📋 *رابطك:*\n\n`{link}`", parse_mode=ParseMode.MARKDOWN,
                                   reply_markup=kb_vertical(buttons))
 
@@ -3736,11 +3717,9 @@ async def referral_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     config = load_config()
     referral_bonus = config.get("referral_bonus", 0.0)
-    buttons = [
-        ("💲 تغيير المكافأة", "set_referral_bonus"),
-        ("📊 إحصائيات", "referral_stats"),
-        ("🔙 إعدادات المالك", "owner_panel")
-    ]
+    buttons = [("💲 تغيير المكافأة", "set_referral_bonus"),
+               ("📊 إحصائيات", "referral_stats"),
+               ("🔙 إعدادات المالك", "owner_panel")]
     await query.edit_message_text(
         f"🔗 *إعدادات الإحالة*\n\n💰 المكافأة الحالية: ${referral_bonus:.2f}",
         parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
@@ -3900,10 +3879,11 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     elif action == "add_service_name":
         context.user_data["store_service_name"] = text
         context.user_data["store_action"] = "add_service_price"
-        await update.message.reply_text("💰 *الخطوة 2/3*: أرسل السعر:",
-                                        parse_mode=ParseMode.MARKDOWN,
-                                        reply_markup=kb_single("🔙 إلغاء",
-                                                               f"store_category:{context.user_data.get('current_category_id')}"))
+        await update.message.reply_text(
+            "💰 *الخطوة 2/3*: أرسل السعر:",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=kb_single("🔙 إلغاء",
+                                   f"store_category:{context.user_data.get('current_category_id')}"))
     elif action == "add_service_price":
         try:
             price = float(text)
@@ -3912,10 +3892,11 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 return
             context.user_data["store_service_price"] = price
             context.user_data["store_action"] = "add_service_message"
-            await update.message.reply_text("📝 *الخطوة 3/3*: أرسل الرسالة للعميل:",
-                                            parse_mode=ParseMode.MARKDOWN,
-                                            reply_markup=kb_single("🔙 إلغاء",
-                                                                   f"store_category:{context.user_data.get('current_category_id')}"))
+            await update.message.reply_text(
+                "📝 *الخطوة 3/3*: أرسل الرسالة للعميل:",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=kb_single("🔙 إلغاء",
+                                       f"store_category:{context.user_data.get('current_category_id')}"))
         except ValueError:
             await update.message.reply_text("⚠️ رقم صحيح!")
     elif action == "add_service_message":
@@ -3929,7 +3910,7 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
                                         "price": price, "message": text})
                 break
         save_config(config)
-        await update.message.reply_text(f"✅ تم إضافة المبيعة!")
+        await update.message.reply_text("✅ تم إضافة المبيعة!")
         for key in ("store_action", "store_service_name", "store_service_price", "current_category_id"):
             context.user_data.pop(key, None)
         await main_menu(update, context)
@@ -3979,11 +3960,9 @@ async def store_category_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
             msg += f"{idx}. 🛒 {s['name']} - 💰 ${s['price']:.2f}\n"
     else:
         msg += "📭 لا توجد مبيعات.\n"
-    buttons = [
-        ("➕ إضافة", f"store_add_service:{cat_id}"),
-        ("🗑️ حذف", f"store_delete_service:{cat_id}"),
-        ("🔙 المبيعات", "store_section")
-    ]
+    buttons = [("➕ إضافة", f"store_add_service:{cat_id}"),
+               ("🗑️ حذف", f"store_delete_service:{cat_id}"),
+               ("🔙 المبيعات", "store_section")]
     await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
 
 
@@ -4259,7 +4238,7 @@ async def placeholder(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
 
-# ==================== DEBUG & OWNER COMMANDS ====================
+# ==================== COMMANDS ====================
 async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     await update.message.reply_text(
@@ -4274,19 +4253,17 @@ async def owner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
         await update.message.reply_text("🚫 هذا الأمر للمالك فقط.")
         return
-    buttons = [
-        ("💰 أسعار المستويات", "set_tier_prices"),
-        ("📋 الطلبات", "approval_requests"),
-        ("📹 قسم الفيديوهات", "videos_section"),
-        ("🛒 المبيعات", "store_section"),
-        ("📢 قناة إجبارية", "forced_channel"),
-        ("📊 جميع الحسابات المقبولة", "all_accounts_section"),
-        ("📈 إحصائيات المستخدمين", "owner_stats"),
-        ("🔎 فحص عضو", "check_member"),
-        ("🔗 نظام الإحالة", "referral_settings"),
-        ("💰 خصم/منح نقاط", "points_management"),
-        ("🔙 القائمة الرئيسية", "main_menu")
-    ]
+    buttons = [("💰 أسعار المستويات", "set_tier_prices"),
+               ("📋 الطلبات", "approval_requests"),
+               ("📹 قسم الفيديوهات", "videos_section"),
+               ("🛒 المبيعات", "store_section"),
+               ("📢 قناة إجبارية", "forced_channel"),
+               ("📊 جميع الحسابات المقبولة", "all_accounts_section"),
+               ("📈 إحصائيات المستخدمين", "owner_stats"),
+               ("🔎 فحص عضو", "check_member"),
+               ("🔗 نظام الإحالة", "referral_settings"),
+               ("💰 خصم/منح نقاط", "points_management"),
+               ("🔙 القائمة الرئيسية", "main_menu")]
     await update.message.reply_text("⚙️ *لوحة تحكم المالك*", parse_mode=ParseMode.MARKDOWN,
                                     reply_markup=kb_vertical(buttons))
 
@@ -4301,15 +4278,13 @@ async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==================== MAIN ====================
 def main():
     if not BOT_TOKEN:
-        raise SystemExit("❌ BOT_TOKEN غير مضبوط في متغيرات البيئة.")
+        raise SystemExit("❌ BOT_TOKEN غير مضبوط.")
     if not OWNER_ID:
-        logger.warning("⚠️ OWNER_TELEGRAM_ID = 0 — لن يظهر لك زر المالك.")
-    app = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .post_init(restore_leave_checks)
-        .build()
-    )
+        logger.warning("⚠️ OWNER_TELEGRAM_ID = 0")
+    app = (Application.builder()
+           .token(BOT_TOKEN)
+           .post_init(restore_leave_checks)
+           .build())
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("debug", debug_command))
     app.add_handler(CommandHandler("owner", owner_command))
