@@ -787,12 +787,20 @@ async def verify_account_credentials(
         result["message"] = ("🟢 تم التحقق الكامل عبر IMAP باستخدام كلمة مرور التطبيق."
                              if app_pass else "🟢 تم تسجيل الدخول عبر IMAP بنجاح.")
     elif result["category"] == "2fa":
-        result["level"] = "partial"
-        result["badge"] = "🟡"
+        # Gmail's IMAP response is only a provider/policy hint; it does not prove
+        # that this account has 2FA or that the supplied credentials are correct.
+        result["level"] = "partial" if result["totp_ok"] else "unknown"
+        result["badge"] = "🟡" if result["totp_ok"] else "⚪"
         if result["totp_ok"]:
-            result["message"] = "🟡 الحساب محمي بـ 2FA، ومفتاح المصادقة المرفق صالح."
+            result["message"] = (
+                "🟡 رفض Gmail مصادقة IMAP بطريقة تشير إلى App Password/2FA؛ "
+                "مفتاح TOTP صالح محليًا، لكن لم يتم إثبات ارتباطه بهذا الحساب."
+            )
         else:
-            result["message"] = "🟡 الحساب محمي بـ 2FA — لم يُرفق مفتاح مصادقة صالح."
+            result["message"] = (
+                "⚪ رفض Gmail مصادقة IMAP بطريقة تشير إلى App Password/2FA؛ "
+                "لا يمكن إثبات حالة 2FA أو صحة بيانات الحساب من هذا الرد."
+            )
     elif result["category"] == "network":
         result["level"] = "unknown"
         result["badge"] = "⚪"
@@ -2292,7 +2300,10 @@ async def auto_verify_account(update: Update, context: ContextTypes.DEFAULT_TYPE
     # شرح نوع الحساب
     category = result.get("category", "unknown")
     if category == "2fa":
-        category_hint = "🔐 الحساب محمي بـ 2FA — الباسورد الأساسي لا يكفي، اطلب مفتاح TOTP."
+        category_hint = (
+            "⚠️ رد Gmail يشير إلى App Password/2FA، لكنه لا يثبت أن الحساب محمي بـ2FA "
+            "ولا يثبت صحة الإيميل أو كلمة المرور. صلاحية TOTP إن ظهرت هي فحص محلي للمفتاح فقط."
+        )
     elif category in {"auth", "auth_or_policy"}:
         category_hint = (
             "⚠️ Gmail أعاد رفضاً عاماً للمصادقة. الشبكة سليمة، لكن IMAP لا يكشف السبب الداخلي؛ "
