@@ -1,13 +1,14 @@
 """
-Advanced Telegram Account Manager Bot - Full Version (COMPLETELY FIXED)
-- Fixed: Email in buttons replaced with index to avoid 64-byte limit
-- Fixed: approval_step vs step mismatch for TOTP and App Pass
-- All features working perfectly
+Advanced Telegram Account Manager Bot - Full Version with Auto Verification
+- Added: Auto-verify button in pending request details (owner-triggered)
+- Verifies App Password via IMAP only, no browser, no proxy, no spoofing
+- Reports result only — does NOT auto-accept or auto-reject
 """
 
 import asyncio
 import hashlib
 import html
+import imaplib
 import io
 import json
 import logging
@@ -15,6 +16,8 @@ import os
 import re
 import shutil
 import secrets
+import socket
+import ssl
 import time
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -175,7 +178,6 @@ def generate_referral_code():
 
 
 def resolve_member_id(user_input: str) -> Optional[int]:
-    """Resolve a Telegram ID or username from the persisted users database."""
     users = load_json(USERS_DB)
     cleaned_input = user_input.strip()
     if cleaned_input.lstrip("-").isdigit():
@@ -200,13 +202,6 @@ def resolve_member_id(user_input: str) -> Optional[int]:
 
 
 def member_balance_stats(user_data: dict) -> dict:
-    """Return current, consumed, and total credited balance for a member.
-
-    Older data files do not have a balance ledger, so the consumed amount is
-    reconstructed from approved account values and the available balances.
-    Newer records use the explicit fields maintained by the approval/payment
-    flows.
-    """
     current = round(float(user_data.get("balance", 0.0) or 0.0), 2)
     hold = round(float(user_data.get("hold_balance", 0.0) or 0.0), 2)
     approved_total = sum(
@@ -249,7 +244,6 @@ def kb_single(button_text: str, callback_data: str) -> InlineKeyboardMarkup:
 
 
 def clear_edit_state(context: ContextTypes.DEFAULT_TYPE):
-    """Clear transient edit-mode values before starting another flow."""
     for key in (
         "step",
         "editing_email",
@@ -261,7 +255,6 @@ def clear_edit_state(context: ContextTypes.DEFAULT_TYPE):
 
 
 def tg_html_escape(value: Any) -> str:
-    """Escape dynamic values before inserting them into Telegram HTML text."""
     return html.escape(str(value), quote=False)
 
 
@@ -337,12 +330,10 @@ def format_totp_secret(secret: str) -> str:
 
 
 def normalize_email(email: Any) -> str:
-    """Normalize email values so case and surrounding spaces cannot bypass deduplication."""
     return str(email or "").strip().casefold()
 
 
 def clear_rejected_email_records(user_data: dict, email: str):
-    """Remove prior rejected copies when a member resubmits the same email."""
     normalized_email = normalize_email(email)
     if not normalized_email:
         return
@@ -358,7 +349,6 @@ def clear_rejected_email_records(user_data: dict, email: str):
 
 
 def move_request_to_rejected(user_data: dict, request: dict, reason: str, reason_text: str = ""):
-    """Move a processed request into the member's rejected history."""
     rejected_request = dict(request)
     rejected_request["reject_reason"] = reason
     if reason_text:
@@ -378,12 +368,10 @@ def move_request_to_rejected(user_data: dict, request: dict, reason: str, reason
 
 
 def account_callback_token(email: Any) -> str:
-    """Return a short stable token for account callback buttons."""
     return hashlib.sha256(normalize_email(email).encode("utf-8")).hexdigest()[:12]
 
 
 def find_approved_account(user_data: dict, token: str) -> tuple[int, dict] | None:
-    """Find an approved account by stable email token or legacy list index."""
     accounts = user_data.get("approved_accounts", [])
     if not isinstance(accounts, list):
         return None
@@ -392,8 +380,6 @@ def find_approved_account(user_data: dict, token: str) -> tuple[int, dict] | Non
         if account_callback_token(account.get("email", "")) == token:
             return index, account
 
-    # Older messages used the list index in callback data. Keep those buttons
-    # working while new buttons use the stable token above.
     if token.isdigit():
         index = int(token)
         if 0 <= index < len(accounts):
@@ -402,7 +388,6 @@ def find_approved_account(user_data: dict, token: str) -> tuple[int, dict] | Non
 
 
 def get_active_account_status(email: str) -> Optional[str]:
-    """Return approved/pending for an email; rejected records never block resubmission."""
     normalized_email = normalize_email(email)
     if not normalized_email:
         return None
@@ -422,7 +407,6 @@ def get_active_account_status(email: str) -> Optional[str]:
 
 
 def has_active_app_password(password: str) -> bool:
-    """Only active approved/pending requests reserve an app password."""
     cleaned_password = str(password or "").replace(" ", "").upper()
     if not cleaned_password:
         return False
@@ -438,7 +422,6 @@ def has_active_app_password(password: str) -> bool:
 
 
 def has_active_account_password(password: str) -> bool:
-    """Reserve login passwords only while their account is approved or pending."""
     candidate = str(password or "").strip()
     if not candidate:
         return False
@@ -451,6 +434,160 @@ def has_active_account_password(password: str) -> bool:
                 if stored_password and stored_password == candidate:
                     return True
     return False
+
+
+# ==================== AUTO VERIFICATION (IMAP) ====================
+# ملاحظة: هذا القسم يتحقق فقط من صحة كلمة مرور التطبيق (App Password)
+# عبر بروتوكول IMAP الرسمي. لا يستخدم بروكسي، لا ينتحل جهازاً،
+# ولا يسجل الدخول عبر أي متصفح. والنتيجة تُعرض للمالك فقط ولا تُقبل/تُرفض تلقائياً.
+
+IMAP_PROVIDERS = {
+    "gmail.com": ("imap.gmail.com", 993),
+    "googlemail.com": ("imap.gmail.com", 993),
+    "outlook.com": ("outlook.office365.com", 993),
+    "outlook.sa": ("outlook.office365.com", 993),
+    "hotmail.com": ("outlook.office365.com", 993),
+    "hotmail.sa": ("outlook.office365.com", 993),
+    "live.com": ("outlook.office365.com", 993),
+    "msn.com": ("outlook.office365.com", 993),
+    "yahoo.com": ("imap.mail.yahoo.com", 993),
+    "ymail.com": ("imap.mail.yahoo.com", 993),
+    "icloud.com": ("imap.mail.me.com", 993),
+    "me.com": ("imap.mail.me.com", 993),
+    "mac.com": ("imap.mail.me.com", 993),
+    "aol.com": ("imap.aol.com", 993),
+    "zoho.com": ("imap.zoho.com", 993),
+    "yandex.com": ("imap.yandex.com", 993),
+    "yandex.ru": ("imap.yandex.com", 993),
+    "mail.ru": ("imap.mail.ru", 993),
+    "gmx.com": ("imap.gmx.com", 993),
+    "gmx.net": ("imap.gmx.net", 993),
+}
+
+
+def get_imap_host(email: str) -> tuple[str, int]:
+    domain = email.rsplit("@", 1)[-1].lower() if "@" in email else ""
+    if domain in IMAP_PROVIDERS:
+        return IMAP_PROVIDERS[domain]
+    if domain:
+        return (f"imap.{domain}", 993)
+    return ("", 0)
+
+
+def _imap_login_sync(email: str, password: str, timeout: int = 15) -> tuple[bool, str]:
+    """محاولة تسجيل دخول IMAP — ترجع (نجح؟، رسالة)."""
+    host, port = get_imap_host(email)
+    if not host:
+        return False, "⚠️ مزود الإيميل غير معروف، تعذّر تحديد خادم IMAP."
+
+    try:
+        ctx = ssl.create_default_context()
+        with imaplib.IMAP4_SSL(host, port, ssl_context=ctx, timeout=timeout) as imap:
+            imap.login(email, password)
+            try:
+                imap.logout()
+            except Exception:
+                pass
+            return True, "تم تسجيل الدخول عبر IMAP بنجاح."
+    except imaplib.IMAP4.error as exc:
+        err = str(exc)
+        low = err.lower()
+        if "application-specific password required" in low:
+            return False, "يتطلب كلمة مرور تطبيق (App Password) وليس كلمة المرور العادية."
+        if "invalid credentials" in low or "authenticationfailed" in low or "auth" in low and "fail" in low:
+            return False, "بيانات الدخول غير صحيحة (الإيميل أو كلمة مرور التطبيق)."
+        if "account is disabled" in low or "disabled" in low:
+            return False, "الحساب معطّل من قبل المزود."
+        if "too many" in low or "rate" in low or "limit" in low:
+            return False, "تم تجاوز عدد محاولات الدخول. حاول لاحقاً."
+        return False, f"فشل الدخول: {err}"
+    except (socket.timeout, TimeoutError):
+        return False, "انتهت مهلة الاتصال بخادم البريد."
+    except socket.gaierror:
+        return False, "تعذّر الوصول إلى خادم البريد (DNS)."
+    except ssl.SSLError as exc:
+        return False, f"خطأ في اتصال SSL: {exc}"
+    except OSError as exc:
+        return False, f"تعذّر الاتصال بالخادم: {exc}"
+    except Exception:
+        logger.exception("IMAP verification error for %s", email)
+        return False, "خطأ غير متوقع أثناء التحقق."
+
+
+async def verify_account_credentials(
+    email: str,
+    password: str = "",
+    app_pass: str = "",
+    totp_secret: str = "",
+) -> dict:
+    """
+    تحقق تلقائي من الحساب عبر IMAP (باستخدام كلمة مرور التطبيق إن وُجدت).
+    لا يقبل ولا يرفض — فقط يعيد النتيجة.
+
+    Returns:
+        {
+          level: 'verified' | 'partial' | 'failed',
+          badge: '🟢' | '🟡' | '🔴',
+          message: str,
+          imap_ok: bool,
+          totp_ok: bool,
+        }
+    """
+    result = {
+        "level": "failed",
+        "badge": "🔴",
+        "message": "",
+        "imap_ok": False,
+        "totp_ok": False,
+    }
+
+    # 1) تحقق من صحة مفتاح TOTP (شكلي فقط)
+    if totp_secret:
+        cleaned_totp = totp_secret.replace(" ", "").upper()
+        if validate_totp_secret(cleaned_totp):
+            try:
+                pyotp.TOTP(cleaned_totp).now()
+                result["totp_ok"] = True
+            except Exception:
+                result["totp_ok"] = False
+
+    # 2) اختر كلمة مرور IMAP: App Password إن وُجد، وإلا كلمة المرور العادية
+    imap_pass = ""
+    if app_pass:
+        imap_pass = app_pass.replace(" ", "").upper()
+    elif password:
+        imap_pass = password
+
+    if imap_pass:
+        ok, msg = await asyncio.to_thread(_imap_login_sync, email, imap_pass)
+        result["imap_ok"] = ok
+        result["message"] = msg
+    else:
+        result["message"] = "لا توجد بيانات دخول للتحقق منها."
+
+    # 3) حدد المستوى
+    if result["imap_ok"]:
+        result["level"] = "verified"
+        result["badge"] = "🟢"
+        if app_pass:
+            result["message"] = "🟢 تم التحقق الكامل عبر IMAP باستخدام كلمة مرور التطبيق."
+        else:
+            result["message"] = "🟢 تم تسجيل الدخول عبر IMAP بنجاح."
+    elif app_pass and not result["imap_ok"]:
+        result["level"] = "failed"
+        result["badge"] = "🔴"
+    elif result["totp_ok"]:
+        result["level"] = "partial"
+        result["badge"] = "🟡"
+        if not result["message"]:
+            result["message"] = "🟡 مفتاح 2FA صالح، لكن لا يمكن التحقق الكامل بدون كلمة مرور تطبيق."
+    else:
+        result["level"] = "failed"
+        result["badge"] = "🔴"
+        if not result["message"]:
+            result["message"] = "❌ فشل التحقق التلقائي."
+
+    return result
 
 
 # ==================== FORCED CHANNEL CHECK ====================
@@ -532,9 +669,6 @@ async def check_forced_channel_callback(update: Update, context: ContextTypes.DE
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
-    # Returning to the menu must end any partially completed input flow.
-    # Otherwise the next free-text message can be routed to an old edit
-    # session instead of the flow the member just selected.
     clear_edit_state(context)
     SESSIONS.pop(update.effective_user.id, None)
     user = update.effective_user
@@ -605,7 +739,6 @@ async def view_member_rejected_emails(update: Update, context: ContextTypes.DEFA
     user_data = get_user(query.from_user.id)
     rejected = user_data.get("rejected_requests", [])
 
-    # Keep compatibility with older records that only stored the email string.
     if not rejected:
         rejected = [{"email": email, "reject_reason": "unknown"}
                     for email in user_data.get("rejected_emails", [])]
@@ -782,7 +915,6 @@ async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
     uid = update.effective_user.id
-    # Do not let a previous edit/check flow intercept the new email.
     clear_edit_state(context)
     SESSIONS[uid] = Session(step="email")
     config = load_json(DATA_DIR / "config.json")
@@ -809,9 +941,6 @@ async def show_video_in_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_video(chat_id=query.from_user.id, video=open(path, "rb"),
                                          caption="📹 *فيديو تعليمي*\nشاهد الفيديو لمعرفة الطريقة الصحيحة.",
                                          parse_mode=ParseMode.MARKDOWN, supports_streaming=True)
-            # Keep the active add-account session and its current step.
-            # Restarting add_account_start here resets users back to email,
-            # even when they opened the video while entering the 2FA secret.
         except Exception as e:
             logger.error(f"Error sending video: {e}")
             await query.edit_message_text("⚠️ حدث خطأ في تشغيل الفيديو.", reply_markup=kb_single("🔙 العودة", "add_account"))
@@ -855,7 +984,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             SESSIONS.pop(uid, None)
             return
 
-        # Rejected records are intentionally not checked: they may be resubmitted.
         session.email = email
         session.step = "password"
         has_password_video = config.get("video_password") and Path(config.get("video_password", "")).exists()
@@ -1249,7 +1377,6 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def restore_leave_checks(application: Application):
-    """Restore pending 24-hour transfers after a bot restart."""
     users = load_json(USERS_DB)
     changed = False
     now = datetime.now(timezone.utc)
@@ -1295,7 +1422,6 @@ async def restore_leave_checks(application: Application):
 
 
 def create_owner_stats_chart(path: Path, password_only: int, extra_sections: int) -> bool:
-    """Create a small aggregate chart without exposing user data."""
     try:
         from PIL import Image, ImageDraw, ImageFont
     except ImportError:
@@ -1752,13 +1878,13 @@ async def view_pending_requests(update: Update, context: ContextTypes.DEFAULT_TY
         for idx, req in enumerate(u_data.get("pending_requests", [])):
             req_copy = req.copy()
             req_copy["user_id"] = uid
-            req_copy["index"] = idx  # Store index for callback
+            req_copy["index"] = idx
             pending.append(req_copy)
-    
+
     if not pending:
         await query.edit_message_text("📭 لا توجد طلبات منتظرة.", reply_markup=kb_single("🔙 الطلبات", "approval_requests"))
         return
-    
+
     buttons = []
     for req in pending:
         tier_icon = "🔵"
@@ -1766,13 +1892,16 @@ async def view_pending_requests(update: Update, context: ContextTypes.DEFAULT_TY
             tier_icon = "🟢"
         elif req.get("has_totp", False):
             tier_icon = "🟡"
-        email_display = req.get('email', '')[:15] + "..." if len(req.get('email', '')) > 15 else req.get('email', '')
+        v = req.get("verification") or {}
+        v_badge = v.get("badge", "⚪")
+        email = req.get("email", "")
+        email_display = email[:15] + "..." if len(email) > 15 else email
         buttons.append(
-            (f"{tier_icon} {email_display}", f"pending_detail:{req['user_id']}:{req['index']}")
+            (f"{v_badge}{tier_icon} {email_display}", f"pending_detail:{req['user_id']}:{req['index']}")
         )
     buttons.append(("🔙 الطلبات", "approval_requests"))
     await query.edit_message_text(
-        "⏳ *الطلبات المنتظرة*\n🟢 مكتمل | 🟡 مع رمز المصادقة | 🔵 باسورد فقط\n\nاختر الإيميل لعرض التفاصيل:",
+        "⏳ *الطلبات المنتظرة*\n🟢 مكتمل | 🟡 مع رمز المصادقة | 🔵 باسورد فقط\n⚪ لم يُتحقق | 🟢 تم التحقق | 🟡 تحقق جزئي | 🔴 فشل التحقق\n\nاختر الإيميل لعرض التفاصيل:",
         parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
 
 
@@ -1785,17 +1914,17 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts = query.data.split(":")
     uid = int(parts[1])
     index = int(parts[2])
-    
+
     user_data = get_user(uid)
     pending = user_data.get("pending_requests", [])
     if index >= len(pending):
-        await query.edit_message_text("⚠️ هذا الطلب غير موجود أو تمت معالجته.", 
+        await query.edit_message_text("⚠️ هذا الطلب غير موجود أو تمت معالجته.",
                                      reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
         return
-    
+
     request = pending[index]
     email = request.get("email", "")
-    
+
     tier_icon = "🟢" if request.get("has_app_pass", False) else "🟡" if request.get("has_totp", False) else "🔵"
     tier_text = "مكتمل" if request.get("has_app_pass", False) else "مع رمز المصادقة" if request.get("has_totp", False) else "باسورد فقط"
     display_email = tg_html_escape(email)
@@ -1807,39 +1936,170 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg += f"🆔 <b>اليوزر:</b> @{user_username}\n"
     msg += f"📧 <b>الإيميل:</b> <code>{display_email}</code>\n"
     msg += f"🔑 <b>الباسورد:</b> <code>{tg_html_escape(request.get('password', ''))}</code>\n"
-    
+
     if request.get("has_totp", False):
         msg += f"🔐 <b>رمز المصادقة:</b> <code>{tg_html_escape(request.get('totp', ''))}</code>\n"
     else:
         msg += "🔐 <b>رمز المصادقة:</b> ❌ غير مرسل\n"
-    
+
     if request.get("has_app_pass", False):
         formatted_pass = tg_html_escape(format_app_password(request.get("app_pass", "")))
         msg += f"🗝 <b>كلمة مرور التطبيق:</b> <code>{formatted_pass}</code>\n"
     else:
         msg += "🗝 <b>كلمة مرور التطبيق:</b> ❌ غير مرسل\n"
-    
+
     msg += f"📦 <b>المستوى:</b> {tier_icon} {tier_text}\n"
     msg += f"👤 <b>المستخدم:</b> <code>{uid}</code>\n"
     msg += f"💰 <b>السعر:</b> ${request.get('amount', 0):.2f}\n"
-    
+
+    # عرض حالة التحقق إن وجدت
+    verification = request.get("verification") or {}
+    if verification:
+        v_badge = verification.get("badge", "⚪")
+        v_level = verification.get("level", "unknown")
+        v_msg = tg_html_escape(verification.get("message", ""))
+        v_time = verification.get("verified_at", "")
+        level_text = {
+            "verified": "🟢 تحقق كامل",
+            "partial": "🟡 تحقق جزئي",
+            "failed": "🔴 فشل التحقق",
+        }.get(v_level, "⚪ غير محدد")
+        msg += f"\n🔍 <b>آخر تحقق تلقائي:</b>\n"
+        msg += f"   {v_badge} {level_text}\n"
+        if v_msg:
+            msg += f"   <i>{v_msg}</i>\n"
+        if v_time:
+            try:
+                dt = datetime.fromisoformat(v_time)
+                msg += f"   🕐 {dt.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            except Exception:
+                pass
+
     config = load_json(DATA_DIR / "config.json")
     has_leave_video = config.get("video_leave") and Path(config.get("video_leave", "")).exists()
-    
+
     buttons = []
     buttons.append(("✅ قبول فوري", f"approve_request:{uid}:{index}"))
     if has_leave_video:
         buttons.append(("📹 قبول مع فيديو المغادرة", f"approve_with_leave:{uid}:{index}"))
+    # زر التحقق التلقائي — يظهر فقط إذا كان هناك App Password للتحقق منه
+    if request.get("has_app_pass", False) and request.get("app_pass", ""):
+        buttons.append(("🔍 تحقق تلقائي (App Password)", f"auto_verify:{uid}:{index}"))
     buttons.append(("❌ رفض", f"reject_request:{uid}:{index}"))
     buttons.append(("🔙 الطلبات المنتظرة", "view_pending"))
-    
+
     await query.edit_message_text(msg, parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
+
+
+# ==================== AUTO VERIFY (OWNER-TRIGGERED) ====================
+async def auto_verify_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تحقق تلقائي يدوي من طلب — يعرض النتيجة فقط دون قبول أو رفض."""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+
+    parts = query.data.split(":")
+    uid = int(parts[1])
+    index = int(parts[2])
+
+    user_data = get_user(uid)
+    pending = user_data.get("pending_requests", [])
+    if index >= len(pending):
+        await query.edit_message_text(
+            "⚠️ هذا الطلب غير موجود أو تمت معالجته.",
+            reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"),
+        )
+        return
+
+    request = pending[index]
+    email = request.get("email", "")
+    password = request.get("password", "")
+    app_pass = request.get("app_pass", "")
+    totp_secret = request.get("totp", "")
+    has_app_pass = request.get("has_app_pass", False)
+
+    if not has_app_pass or not app_pass:
+        await query.answer("⚠️ هذا الطلب بدون كلمة مرور تطبيق — لا يمكن التحقق التلقائي.", show_alert=True)
+        return
+
+    await query.answer("🔍 جاري التحقق…", show_alert=False)
+
+    # عرض رسالة تحميل
+    loading_text = (
+        f"🔍 <b>جاري التحقق التلقائي…</b>\n\n"
+        f"📧 <code>{tg_html_escape(email)}</code>\n\n"
+        f"<i>يتم الاتصال بخادم البريد والتحقق من كلمة مرور التطبيق…</i>"
+    )
+    try:
+        await query.edit_message_text(
+            loading_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_single("⏳ يرجى الانتظار", f"pending_detail:{uid}:{index}"),
+        )
+    except Exception:
+        pass
+
+    # تنفيذ التحقق
+    result = await verify_account_credentials(
+        email=email,
+        password=password,
+        app_pass=app_pass,
+        totp_secret=totp_secret,
+    )
+
+    # حفظ النتيجة في الطلب (لا يُقبل ولا يُرفض)
+    request["verification"] = {
+        "level": result["level"],
+        "badge": result["badge"],
+        "message": result["message"],
+        "imap_ok": result["imap_ok"],
+        "totp_ok": result["totp_ok"],
+        "verified_at": datetime.now(timezone.utc).isoformat(),
+        "verified_by": "owner_manual",
+    }
+    pending[index] = request
+    user_data["pending_requests"] = pending
+    save_user(uid, user_data)
+
+    # بناء رسالة النتيجة
+    if result["level"] == "verified":
+        title = "🟢 <b>نجح التحقق التلقائي</b>"
+    elif result["level"] == "partial":
+        title = "🟡 <b>تحقق جزئي</b>"
+    else:
+        title = "🔴 <b>فشل التحقق التلقائي</b>"
+
+    result_msg = f"{title}\n\n"
+    result_msg += f"📧 <b>الإيميل:</b> <code>{tg_html_escape(email)}</code>\n\n"
+    result_msg += f"📬 <b>IMAP (كلمة مرور التطبيق):</b> {'✅ نجح' if result['imap_ok'] else '❌ فشل'}\n"
+    if totp_secret:
+        result_msg += f"🔐 <b>مفتاح 2FA:</b> {'✅ صالح' if result['totp_ok'] else '❌ غير صالح'}\n"
+    result_msg += f"\n📝 <b>النتيجة:</b> {tg_html_escape(result['message'])}\n"
+    result_msg += f"\n<i>📌 هذا مجرد تقرير — لم يتم قبول أو رفض الطلب. القرار يبقى لك.</i>"
+
+    buttons = [
+        ("🔍 تحقق مرة أخرى", f"auto_verify:{uid}:{index}"),
+        ("✅ قبول فوري", f"approve_request:{uid}:{index}"),
+    ]
+    config = load_json(DATA_DIR / "config.json")
+    has_leave_video = config.get("video_leave") and Path(config.get("video_leave", "")).exists()
+    if has_leave_video:
+        buttons.append(("📹 قبول مع فيديو المغادرة", f"approve_with_leave:{uid}:{index}"))
+    buttons.append(("❌ رفض", f"reject_request:{uid}:{index}"))
+    buttons.append(("🔙 تفاصيل الطلب", f"pending_detail:{uid}:{index}"))
+    buttons.append(("🔙 الطلبات المنتظرة", "view_pending"))
+
+    await query.edit_message_text(
+        result_msg,
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_vertical(buttons),
+    )
 
 
 # ==================== COMPLETE APPROVAL ====================
 async def complete_approval(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: int, index: int,
                             approved_request: dict, with_leave: bool = False):
-    """Complete the approval process"""
     user_data = get_user(uid)
     config = load_json(DATA_DIR / "config.json")
     requested_amount = approved_request.get(
@@ -1854,7 +2114,6 @@ async def complete_approval(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     price = round(float(requested_amount), 2)
     approved_request["amount"] = price
 
-    # Generate TOTP code if TOTP exists
     totp_code = ""
     if approved_request.get("has_totp", False) and approved_request.get("totp", ""):
         try:
@@ -1899,7 +2158,6 @@ async def complete_approval(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     user_data["total_approved_emails"] = int(user_data.get("total_approved_emails", 0)) + 1
     save_user(uid, user_data)
 
-    # Referral bonus
     referred_by = user_data.get("referred_by")
     if referred_by:
         referral_bonus = float(config.get("referral_bonus", 0.0))
@@ -1919,7 +2177,6 @@ async def complete_approval(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             except:
                 pass
 
-    # Send confirmation to user
     email = approved_request.get("email", "")
     user_message = f"✅ <b>تم قبول طلبك!</b>\n\n📧 الإيميل: <code>{tg_html_escape(email)}</code>\n"
     if totp_code:
@@ -1934,7 +2191,6 @@ async def complete_approval(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     except:
         pass
 
-    # Schedule leave check if with_leave
     if with_leave:
         await send_leave_video_to_user(context, uid, email)
         await schedule_leave_check(
@@ -1944,7 +2200,6 @@ async def complete_approval(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             approved_request.get("release_at"),
         )
 
-    # Clear approval data
     context.user_data.pop("approval_uid", None)
     context.user_data.pop("approval_index", None)
     context.user_data.pop("approval_data", None)
@@ -1961,23 +2216,22 @@ async def approve_request_owner(update: Update, context: ContextTypes.DEFAULT_TY
     parts = query.data.split(":")
     uid = int(parts[1])
     index = int(parts[2])
-    
+
     user_data = get_user(uid)
     pending = user_data.get("pending_requests", [])
     if index >= len(pending):
         await query.edit_message_text("⚠️ هذا الطلب غير موجود أو تمت معالجته مسبقاً.",
                                       reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
         return
-    
+
     approved_request = pending[index]
     email = approved_request.get("email", "")
     display_email = tg_html_escape(email)
-    
-    # Check if TOTP is missing
+
     if not approved_request.get("has_totp", False):
         context.user_data["approval_uid"] = uid
         context.user_data["approval_index"] = index
-        context.user_data["approval_step"] = "waiting_totp"  # KEY FIX: Use approval_step consistently
+        context.user_data["approval_step"] = "waiting_totp"
         context.user_data["approval_data"] = approved_request
         context.user_data["approval_with_leave"] = False
         await query.edit_message_text(
@@ -1988,12 +2242,11 @@ async def approve_request_owner(update: Update, context: ContextTypes.DEFAULT_TY
             ])
         )
         return
-    
-    # Check if App Pass is missing
+
     if not approved_request.get("has_app_pass", False):
         context.user_data["approval_uid"] = uid
         context.user_data["approval_index"] = index
-        context.user_data["approval_step"] = "waiting_app_pass"  # KEY FIX: Use approval_step consistently
+        context.user_data["approval_step"] = "waiting_app_pass"
         context.user_data["approval_data"] = approved_request
         context.user_data["approval_with_leave"] = False
         await query.edit_message_text(
@@ -2004,8 +2257,7 @@ async def approve_request_owner(update: Update, context: ContextTypes.DEFAULT_TY
             ])
         )
         return
-    
-    # Complete approval
+
     await complete_approval(update, context, uid, index, approved_request, False)
     await query.edit_message_text(
         f"✅ تم قبول الحساب <code>{display_email}</code> بنجاح!\n💰 تم نقل ${approved_request.get('amount', 0):.2f} من قيد الانتظار إلى الرصيد المملوك.",
@@ -2023,23 +2275,22 @@ async def approve_with_leave(update: Update, context: ContextTypes.DEFAULT_TYPE)
     parts = query.data.split(":")
     uid = int(parts[1])
     index = int(parts[2])
-    
+
     user_data = get_user(uid)
     pending = user_data.get("pending_requests", [])
     if index >= len(pending):
         await query.edit_message_text("⚠️ هذا الطلب غير موجود أو تمت معالجته مسبقاً.",
                                       reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
         return
-    
+
     approved_request = pending[index]
     email = approved_request.get("email", "")
     display_email = tg_html_escape(email)
-    
-    # Check if TOTP is missing
+
     if not approved_request.get("has_totp", False):
         context.user_data["approval_uid"] = uid
         context.user_data["approval_index"] = index
-        context.user_data["approval_step"] = "waiting_totp"  # KEY FIX: Use approval_step consistently
+        context.user_data["approval_step"] = "waiting_totp"
         context.user_data["approval_data"] = approved_request
         context.user_data["approval_with_leave"] = True
         await query.edit_message_text(
@@ -2050,12 +2301,11 @@ async def approve_with_leave(update: Update, context: ContextTypes.DEFAULT_TYPE)
             ])
         )
         return
-    
-    # Check if App Pass is missing
+
     if not approved_request.get("has_app_pass", False):
         context.user_data["approval_uid"] = uid
         context.user_data["approval_index"] = index
-        context.user_data["approval_step"] = "waiting_app_pass"  # KEY FIX: Use approval_step consistently
+        context.user_data["approval_step"] = "waiting_app_pass"
         context.user_data["approval_data"] = approved_request
         context.user_data["approval_with_leave"] = True
         await query.edit_message_text(
@@ -2066,8 +2316,7 @@ async def approve_with_leave(update: Update, context: ContextTypes.DEFAULT_TYPE)
             ])
         )
         return
-    
-    # Complete approval with leave
+
     await complete_approval(update, context, uid, index, approved_request, True)
     await query.edit_message_text(
         f"✅ تم قبول الحساب <code>{display_email}</code> مع فيديو المغادرة!\n💰 المبلغ ${approved_request.get('amount', 0):.2f} معلق لمدة 24 ساعة.\n⏰ سيتم تحويله تلقائياً بعد 24 ساعة.",
@@ -2085,18 +2334,18 @@ async def reject_request_reason(update: Update, context: ContextTypes.DEFAULT_TY
     parts = query.data.split(":")
     uid = int(parts[1])
     index = int(parts[2])
-    
+
     user_data = get_user(uid)
     pending = user_data.get("pending_requests", [])
     if index >= len(pending):
         await query.edit_message_text("⚠️ هذا الطلب غير موجود.", reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
         return
-    
+
     email = pending[index].get("email", "")
     display_email = tg_html_escape(email)
     context.user_data["reject_uid"] = uid
     context.user_data["reject_index"] = index
-    
+
     buttons = [
         ("📧 إيميل خطأ", f"reject_reason:email:{uid}:{index}"),
         ("🔑 باسورد خطأ", f"reject_reason:password:{uid}:{index}"),
@@ -2121,13 +2370,13 @@ async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TY
     reason_type = parts[1]
     uid = int(parts[2])
     index = int(parts[3])
-    
+
     user_data = get_user(uid)
     pending = user_data.get("pending_requests", [])
     if index >= len(pending):
         await query.edit_message_text("⚠️ هذا الطلب غير موجود.", reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending"))
         return
-    
+
     request = pending[index]
     email = request.get("email", "")
     display_email = tg_html_escape(email)
@@ -2135,14 +2384,14 @@ async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TY
     move_request_to_rejected(user_data, request, reason_type)
     user_data["pending_requests"] = pending
     save_user(uid, user_data)
-    
+
     reason_messages = {"email": "❌ الإيميل الذي أرسلته غير صحيح أو غير مقبول.",
                        "password": "❌ كلمة المرور التي أرسلتها غير صحيحة.",
                        "totp": "❌ رمز المصادقة الثنائية الذي أرسلته غير صحيح.",
                        "app_pass": "❌ كلمة مرور التطبيق التي أرسلتها غير صحيحة.",
                        "other": "❌ تم رفض طلبك لسبب آخر."}
     reason = reason_messages.get(reason_type, "❌ تم رفض طلبك.")
-    
+
     config = load_json(DATA_DIR / "config.json")
     if reason_type in ["email", "password", "totp", "app_pass"]:
         video_key = {"email": "video_email", "password": "video_password", "totp": "video_totp",
@@ -2166,7 +2415,7 @@ async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TY
         )
         context.user_data["step"] = "reject_reason_text"
         return
-    
+
     try:
         await context.bot.send_message(chat_id=uid,
                                        text=f"{reason}\n\n📧 الإيميل: `{email}`\nيمكنك إعادة المحاولة بإرسال إيميل جديد.",
@@ -2187,27 +2436,27 @@ async def handle_reject_reason_text(update: Update, context: ContextTypes.DEFAUL
     if not uid or index is None:
         await update.message.reply_text("⚠️ حدث خطأ، حاول مرة أخرى.")
         return
-    
+
     user_data = get_user(uid)
     pending = user_data.get("pending_requests", [])
     if index >= len(pending):
         await update.message.reply_text("⚠️ الطلب غير موجود.")
         return
-    
+
     request = pending[index]
     email = request.get("email", "")
     pending.pop(index)
     move_request_to_rejected(user_data, request, "other", text)
     user_data["pending_requests"] = pending
     save_user(uid, user_data)
-    
+
     try:
         await context.bot.send_message(chat_id=uid,
                                        text=f"❌ *تم رفض طلبك*\n\n📧 الإيميل: `{email}`\n📝 السبب: {text}\n\nيمكنك إعادة المحاولة بإرسال إيميل جديد.",
                                        parse_mode=ParseMode.MARKDOWN)
     except:
         pass
-    
+
     context.user_data.pop("reject_uid", None)
     context.user_data.pop("reject_index", None)
     context.user_data.pop("reject_reason", None)
@@ -2223,26 +2472,24 @@ async def handle_approval_totp(update: Update, context: ContextTypes.DEFAULT_TYP
     index = context.user_data.get("approval_index")
     approved_request = context.user_data.get("approval_data")
     with_leave = context.user_data.get("approval_with_leave", False)
-    
+
     if not uid or index is None or not approved_request:
         await update.message.reply_text("⚠️ حدث خطأ، حاول مرة أخرى.")
         return
-    
+
     user_data = get_user(uid)
     pending = user_data.get("pending_requests", [])
     if index >= len(pending):
         await update.message.reply_text("⚠️ الطلب غير موجود.")
         return
-    
+
     email = pending[index].get("email", "")
-    
+
     if text.lower() == "تخطي":
-        # Skip TOTP
         approved_request["totp"] = ""
         approved_request["has_totp"] = False
         context.user_data["approval_data"] = approved_request
-        
-        # Check if we need to ask for app pass
+
         if not approved_request.get("has_app_pass", False):
             context.user_data["approval_step"] = "waiting_app_pass"
             await update.message.reply_text(
@@ -2253,11 +2500,9 @@ async def handle_approval_totp(update: Update, context: ContextTypes.DEFAULT_TYP
                 ])
             )
         else:
-            # Complete approval
             await complete_approval(update, context, uid, index, approved_request, with_leave)
         return
-    
-    # Validate TOTP secret
+
     cleaned = text.replace(" ", "").upper()
     if len(cleaned) != 32:
         await update.message.reply_text("⚠️ مفتاح المصادقة يجب أن يكون 32 حرفاً.")
@@ -2272,10 +2517,9 @@ async def handle_approval_totp(update: Update, context: ContextTypes.DEFAULT_TYP
         approved_request["totp"] = secret
         approved_request["has_totp"] = True
         context.user_data["approval_data"] = approved_request
-        
+
         formatted_secret = format_totp_secret(secret)
-        
-        # Check if we need to ask for app pass
+
         if not approved_request.get("has_app_pass", False):
             context.user_data["approval_step"] = "waiting_app_pass"
             await update.message.reply_text(
@@ -2286,7 +2530,6 @@ async def handle_approval_totp(update: Update, context: ContextTypes.DEFAULT_TYP
                 ])
             )
         else:
-            # Complete approval
             await complete_approval(update, context, uid, index, approved_request, with_leave)
     except Exception as e:
         await update.message.reply_text(f"⚠️ مفتاح 2FA غير صالح: {str(e)}\n\n📌 أرسل رمز المصادقة الصحيح أو اكتب 'تخطي' لتخطي هذه الخطوة.",
@@ -2300,19 +2543,19 @@ async def handle_approval_app_pass(update: Update, context: ContextTypes.DEFAULT
     index = context.user_data.get("approval_index")
     approved_request = context.user_data.get("approval_data")
     with_leave = context.user_data.get("approval_with_leave", False)
-    
+
     if not uid or index is None or not approved_request:
         await update.message.reply_text("⚠️ حدث خطأ، حاول مرة أخرى.")
         return
-    
+
     user_data = get_user(uid)
     pending = user_data.get("pending_requests", [])
     if index >= len(pending):
         await update.message.reply_text("⚠️ الطلب غير موجود.")
         return
-    
+
     email = pending[index].get("email", "")
-    
+
     if text.lower() == "تخطي":
         approved_request["app_pass"] = ""
         approved_request["has_app_pass"] = False
@@ -2322,7 +2565,6 @@ async def handle_approval_app_pass(update: Update, context: ContextTypes.DEFAULT
         await complete_approval(update, context, uid, index, approved_request, with_leave)
         return
 
-    # Validate app password
     cleaned = text.replace(" ", "").upper()
     if len(cleaned) != 16:
         await update.message.reply_text("⚠️ كلمة مرور التطبيق يجب أن تكون 16 حرفاً (مثل: XXXX XXXX XXXX XXXX)")
@@ -2331,7 +2573,6 @@ async def handle_approval_app_pass(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text("⚠️ كلمة مرور التطبيق تحتوي على أحرف غير صالحة.")
         return
 
-    # Only approved/pending records reserve an app password; rejected records do not.
     if has_active_app_password(cleaned):
         config = load_json(DATA_DIR / "config.json")
         video_path = config.get("video_app_pass")
@@ -2354,7 +2595,6 @@ async def handle_approval_app_pass(update: Update, context: ContextTypes.DEFAULT
     approved_request["app_pass"] = cleaned
     approved_request["has_app_pass"] = True
 
-    # Recalculate price
     context.user_data["approval_data"] = approved_request
 
     formatted_pass = format_app_password(cleaned)
@@ -2405,26 +2645,26 @@ async def approved_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts = query.data.split(":")
     uid = int(parts[1])
     token = parts[2]
-    
+
     user_data = get_user(uid)
     account_match = find_approved_account(user_data, token)
     if account_match is None:
         await query.edit_message_text("⚠️ هذا الحساب غير موجود.", reply_markup=kb_single("🔙 الطلبات المقبولة", "view_approved"))
         return
-    
+
     index, account = account_match
     account_token = account_callback_token(account.get("email", ""))
     tier_icon = "🟢" if account.get("has_app_pass", False) else "🟡" if account.get("has_totp", False) else "🔵"
     tier_text = "مكتمل" if account.get("has_app_pass", False) else "مع رمز المصادقة" if account.get("has_totp", False) else "باسورد فقط"
     user_name = account.get("user_name", "غير معروف")
     user_username = account.get("user_username", "لا يوجد")
-    
+
     msg = f"📋 *تفاصيل الحساب المقبول*\n\n"
     msg += f"👤 *البائع:* {user_name}\n"
     msg += f"🆔 *اليوزر:* @{user_username}\n"
     msg += f"📧 *الإيميل:* `{account.get('email', '')}`\n"
     msg += f"🔑 *الباسورد:* `{account.get('password', '')}`\n"
-    
+
     if account.get("has_totp", False):
         msg += f"🔐 *رمز المصادقة:* `{account.get('totp', '')}`\n"
         totp_code = account.get("totp_code", "")
@@ -2438,17 +2678,17 @@ async def approved_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
     else:
         msg += f"🔐 *رمز المصادقة:* ❌ غير مرسل\n"
-    
+
     if account.get("has_app_pass", False):
         formatted_pass = format_app_password(account.get("app_pass", ""))
         msg += f"🗝 *كلمة مرور التطبيق:* `{formatted_pass}`\n"
     else:
         msg += f"🗝 *كلمة مرور التطبيق:* ❌ غير مرسل\n"
-    
+
     msg += f"📦 *المستوى:* {tier_icon} {tier_text}\n"
     msg += f"👤 *المستخدم:* `{uid}`\n"
     msg += f"💰 *السعر:* ${account.get('amount', 0):.2f}\n"
-    
+
     leave_status = ""
     if account.get("approved_with_leave", False) and not account.get("leave_confirmed", False):
         leave_status = "⏳ معلق (24 ساعة)"
@@ -2524,13 +2764,13 @@ async def deduct_points(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts = query.data.split(":")
     uid = int(parts[1])
     token = parts[2]
-    
+
     user_data = get_user(uid)
     account_match = find_approved_account(user_data, token)
     if account_match is None:
         await query.edit_message_text("⚠️ الحساب غير موجود.", reply_markup=kb_single("🔙 الطلبات المقبولة", "view_approved"))
         return
-    
+
     index, account = account_match
     email = account.get("email", "")
     context.user_data["deduct_uid"] = uid
@@ -2630,13 +2870,13 @@ async def rejected_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts = query.data.split(":")
     uid = int(parts[1])
     index = int(parts[2])
-    
+
     user_data = get_user(uid)
     rejected_list = user_data.get("rejected_requests", [])
     if index >= len(rejected_list):
         await query.edit_message_text("⚠️ هذا الطلب غير موجود.", reply_markup=kb_single("🔙 الطلبات المرفوضة", "view_rejected"))
         return
-    
+
     request = rejected_list[index]
     reason = request.get('reject_reason', 'غير معروف')
     reason_map = {"email": "❌ الإيميل غير صحيح أو غير مقبول.", "password": "❌ كلمة المرور غير صحيحة.",
@@ -2647,29 +2887,29 @@ async def rejected_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tier_text = "مكتمل" if request.get("has_app_pass", False) else "مع رمز المصادقة" if request.get("has_totp", False) else "باسورد فقط"
     user_name = request.get("user_name", "غير معروف")
     user_username = request.get("user_username", "لا يوجد")
-    
+
     msg = f"📋 *تفاصيل الطلب المرفوض*\n\n"
     msg += f"👤 *البائع:* {user_name}\n"
     msg += f"🆔 *اليوزر:* @{user_username}\n"
     msg += f"📧 *الإيميل:* `{request.get('email', '')}`\n"
     msg += f"🔑 *الباسورد:* `{request.get('password', '')}`\n"
-    
+
     if request.get("has_totp", False):
         msg += f"🔐 *رمز المصادقة:* `{request.get('totp', '')}`\n"
     else:
         msg += f"🔐 *رمز المصادقة:* ❌ غير مرسل\n"
-    
+
     if request.get("has_app_pass", False):
         msg += f"🗝 *كلمة مرور التطبيق:* `{request.get('app_pass', '')}`\n"
     else:
         msg += f"🗝 *كلمة مرور التطبيق:* ❌ غير مرسل\n"
-    
+
     msg += f"📦 *المستوى:* {tier_icon} {tier_text}\n"
     msg += f"👤 *المستخدم:* `{uid}`\n"
     msg += f"💰 *السعر:* ${request.get('amount', 0):.2f}\n"
     msg += f"📝 *سبب الرفض:* {reason_text}\n\n"
     msg += f"📌 *هل تريد إعطاء نقاط للمستخدم رغم الرفض؟*"
-    
+
     buttons = [
         ("💰 إعطاء نقاط", f"give_points:{uid}:{index}"),
         ("🔙 الطلبات المرفوضة", "view_rejected")
@@ -2686,13 +2926,13 @@ async def give_points(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts = query.data.split(":")
     uid = int(parts[1])
     index = int(parts[2])
-    
+
     user_data = get_user(uid)
     rejected_list = user_data.get("rejected_requests", [])
     if index >= len(rejected_list):
         await query.edit_message_text("⚠️ الطلب غير موجود.", reply_markup=kb_single("🔙 الطلبات المرفوضة", "view_rejected"))
         return
-    
+
     email = rejected_list[index].get("email", "")
     context.user_data["give_uid"] = uid
     context.user_data["give_index"] = index
@@ -2723,10 +2963,10 @@ async def handle_give_points_input(update: Update, context: ContextTypes.DEFAULT
         user_data = get_user(uid)
         user_data["balance"] = float(user_data.get("balance", 0.0)) + amount
         save_user(uid, user_data)
-        
+
         rejected_list = user_data.get("rejected_requests", [])
         email = rejected_list[index].get("email", "") if index < len(rejected_list) else ""
-        
+
         try:
             await context.bot.send_message(chat_id=uid,
                                            text=f"💰 *تم إضافة نقاط إلى رصيدك!*\n\n📧 الإيميل: `{email}`\n💰 المبلغ المضاف: *+${amount:.2f}*\n💰 الرصيد الجديد: *${user_data['balance']:.2f}*\n\n_تم إضافة هذه النقاط كتعويض عن طلبك المرفوض._",
@@ -3045,7 +3285,6 @@ async def mark_extracted(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def build_accounts_export(title: str, accounts: list) -> bytes:
-    """Build a plain-text export so account values cannot break Telegram formatting."""
     lines = [title, "=" * 60, ""]
     for idx, acc in enumerate(accounts, 1):
         leave_status = ""
@@ -3068,7 +3307,6 @@ def build_accounts_export(title: str, accounts: list) -> bytes:
 
 
 async def send_accounts_export(context: ContextTypes.DEFAULT_TYPE, accounts: list, filename: str, caption: str):
-    """Send exports as a file; this avoids Markdown and Telegram message-size failures."""
     document = io.BytesIO(build_accounts_export(caption, accounts))
     await context.bot.send_document(
         chat_id=OWNER_ID,
@@ -3111,7 +3349,6 @@ async def export_unextracted(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text("✅ لا توجد حسابات غير مستخرجة.")
         return
 
-    # Only mark accounts after Telegram confirms the document was sent.
     await send_accounts_export(context, unextracted, "unextracted_accounts.txt", "الحسابات غير المستخرجة")
     for uid, user_data in users.items():
         changed = False
@@ -3508,30 +3745,30 @@ async def referral_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     user_id = update.effective_user.id
-    
+
     if user_id in PENDING_PURCHASES:
         await handle_purchase_message(update, context)
         return
-        
+
     if not await check_forced_channel(update, context):
         return
-        
+
     if context.user_data.get("step") == "reject_reason_text":
         await handle_reject_reason_text(update, context)
         return
-        
+
     if context.user_data.get("step") == "deduct_points_input":
         await handle_deduct_points_input(update, context)
         return
-        
+
     if context.user_data.get("step") == "give_points_input":
         await handle_give_points_input(update, context)
         return
-        
+
     if context.user_data.get("step") == "give_points_by_id_input":
         await handle_points_by_id_input(update, context)
         return
-        
+
     if context.user_data.get("step") == "deduct_points_by_id_input":
         await handle_points_by_id_input(update, context)
         return
@@ -3539,16 +3776,15 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("step") == "check_member_input":
         await handle_member_check_input(update, context)
         return
-    
-    # KEY FIX: Check for approval_step instead of step
+
     if context.user_data.get("approval_step") == "waiting_totp":
         await handle_approval_totp(update, context)
         return
-        
+
     if context.user_data.get("approval_step") == "waiting_app_pass":
         await handle_approval_app_pass(update, context)
         return
-        
+
     if context.user_data.get("mode") == "set_tier_price":
         if user_id != OWNER_ID:
             return
@@ -3571,7 +3807,7 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             await update.message.reply_text("⚠️ أرسل رقماً صحيحاً (مثال: 0.25)")
         return
-        
+
     if context.user_data.get("mode") == "set_price":
         if user_id != OWNER_ID:
             return
@@ -3586,7 +3822,7 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             await update.message.reply_text("⚠️ أرسل رقماً صحيحاً.")
         return
-        
+
     if context.user_data.get("mode") == "set_referral_bonus":
         if user_id != OWNER_ID:
             return
@@ -3601,15 +3837,15 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             await update.message.reply_text("⚠️ أرسل رقماً صحيحاً.")
         return
-        
+
     if context.user_data.get("store_action"):
         await handle_store_input(update, context)
         return
-        
+
     if context.user_data.get("step") == "editing_field":
         await handle_edit_field_input(update, context)
         return
-        
+
     await add_account_step(update, context)
 
 
@@ -3872,7 +4108,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await query.answer()
     data = query.data
-    
+
     if data == "main_menu":
         await main_menu(update, context)
     elif data == "add_account":
@@ -3913,6 +4149,8 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await view_rejected_requests(update, context)
     elif data.startswith("pending_detail:"):
         await pending_detail(update, context)
+    elif data.startswith("auto_verify:"):
+        await auto_verify_account(update, context)
     elif data.startswith("approved_detail:"):
         await approved_detail(update, context)
     elif data.startswith("new_totp_code:"):
