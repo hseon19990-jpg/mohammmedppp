@@ -307,16 +307,16 @@ def validate_totp_secret(secret: str) -> bool:
 
 
 def validate_app_password(password: str) -> bool:
-    cleaned = password.replace(" ", "").upper()
+    cleaned = password.replace(" ", "")
     if len(cleaned) != 16:
         return False
-    if not re.match(r'^[A-Z0-9]{16}$', cleaned):
+    if not re.match(r'^[A-Za-z0-9]{16}$', cleaned):
         return False
     return True
 
 
 def format_app_password(password: str) -> str:
-    cleaned = password.replace(" ", "").upper()
+    cleaned = password.replace(" ", "")
     if len(cleaned) != 16:
         return password
     return f"{cleaned[0:4]} {cleaned[4:8]} {cleaned[8:12]} {cleaned[12:16]}"
@@ -554,7 +554,7 @@ async def verify_account_credentials(
     # 2) اختر كلمة مرور IMAP: App Password إن وُجد، وإلا كلمة المرور العادية
     imap_pass = ""
     if app_pass:
-        imap_pass = app_pass.replace(" ", "").upper()
+        imap_pass = app_pass.replace(" ", "")
     elif password:
         imap_pass = password
 
@@ -1051,11 +1051,11 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await update.message.reply_text(f"⚠️ مفتاح 2FA غير صالح: {str(e)}")
     elif session.step == "app_pass":
-        cleaned = text.replace(" ", "").upper()
+        cleaned = text.replace(" ", "")
         if len(cleaned) != 16:
             await update.message.reply_text("⚠️ كلمة مرور التطبيق يجب أن تكون 16 حرفاً (مثل: XXXX XXXX XXXX XXXX)")
             return
-        if not re.match(r'^[A-Z0-9]{16}$', cleaned):
+        if not re.match(r'^[A-Za-z0-9]{16}$', cleaned):
             await update.message.reply_text("⚠️ كلمة مرور التطبيق تحتوي على أحرف غير صالحة. استخدم أحرف وأرقام فقط.")
             return
 
@@ -2565,11 +2565,11 @@ async def handle_approval_app_pass(update: Update, context: ContextTypes.DEFAULT
         await complete_approval(update, context, uid, index, approved_request, with_leave)
         return
 
-    cleaned = text.replace(" ", "").upper()
+    cleaned = text.replace(" ", "")
     if len(cleaned) != 16:
         await update.message.reply_text("⚠️ كلمة مرور التطبيق يجب أن تكون 16 حرفاً (مثل: XXXX XXXX XXXX XXXX)")
         return
-    if not re.match(r'^[A-Z0-9]{16}$', cleaned):
+    if not re.match(r'^[A-Za-z0-9]{16}$', cleaned):
         await update.message.reply_text("⚠️ كلمة مرور التطبيق تحتوي على أحرف غير صالحة.")
         return
 
