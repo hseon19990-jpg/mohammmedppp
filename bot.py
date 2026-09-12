@@ -769,7 +769,16 @@ async def verify_account_credentials(
     elif password:
         imap_pass = password
 
-    if imap_pass:
+    is_gmail_account = email.rsplit("@", 1)[-1].lower() in {"gmail.com", "googlemail.com"}
+    if password and not app_pass and is_gmail_account:
+        result["level"] = "unknown"
+        result["badge"] = "⚪"
+        result["category"] = "unsupported_auth"
+        result["message"] = (
+            "⚪ Gmail لا يسمح بالتحقق من الياسورد العادي عبر IMAP. "
+            "استخدم App Password أو OAuth2."
+        )
+    elif imap_pass:
         ok, msg = await asyncio.to_thread(_imap_login_sync, email, imap_pass)
         result["imap_ok"] = ok
         result["message"] = msg
@@ -801,6 +810,8 @@ async def verify_account_credentials(
                 "⚪ رفض Gmail مصادقة IMAP بطريقة تشير إلى App Password/2FA؛ "
                 "لا يمكن إثبات حالة 2FA أو صحة بيانات الحساب من هذا الرد."
             )
+    elif result["category"] == "unsupported_auth":
+        pass
     elif result["category"] == "network":
         result["level"] = "unknown"
         result["badge"] = "⚪"
@@ -2294,7 +2305,9 @@ async def auto_verify_account(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif result["level"] == "partial":
         title = "🟡 <b>تحقق جزئي</b>"
     elif result["level"] == "unknown":
-        if category in {"2fa", "auth_or_policy"}:
+        if category == "unsupported_auth":
+            title = "⚪ <b>Gmail يحتاج App Password أو OAuth2</b>"
+        elif category in {"2fa", "auth_or_policy"}:
             title = "⚪ <b>تعذّر التحقق (رد Gmail عام)</b>"
         else:
             title = "⚪ <b>تعذّر التحقق (خطأ شبكة)</b>"
@@ -2302,7 +2315,12 @@ async def auto_verify_account(update: Update, context: ContextTypes.DEFAULT_TYPE
         title = "🔴 <b>فشل التحقق التلقائي</b>"
 
     # شرح نوع الحساب
-    if category == "2fa":
+    if category == "unsupported_auth":
+        category_hint = (
+            "🔐 لم نغيّر خطوات الأعضاء. Gmail لا يقبل الياسورد العادي عبر IMAP؛ "
+            "التحقق الصحيح يحتاج App Password أو OAuth2."
+        )
+    elif category == "2fa":
         category_hint = (
             "⚠️ رد Gmail يشير إلى App Password/2FA، لكنه لا يثبت أن الحساب محمي بـ2FA "
             "ولا يثبت صحة الإيميل أو كلمة المرور. صلاحية TOTP إن ظهرت هي فحص محلي للمفتاح فقط."
