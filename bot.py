@@ -632,41 +632,82 @@ def get_imap_host(email: str) -> Tuple[str, int]:
 
 
 def _imap_login_sync(email: str, password: str, timeout: int = 15) -> Tuple[bool, str]:
+    """Check IMAP transport stages before authentication without exposing secrets."""
     host, port = get_imap_host(email)
     if not host:
-        return False, "⚠️ مزود الإيميل غير معروف."
+        return False, "⚠️ فشل تحديد مزود الإيميل: لا يوجد خادم IMAP معروف لهذا النطاق."
+
+    started = time.monotonic()
+
+    def elapsed() -> str:
+        return f"{time.monotonic() - started:.1f} ثوانٍ"
+
+    # Stage 1: DNS resolution.
+    try:
+        socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        return False, f"❌ فشل DNS في تحويل {host} إلى عنوان IP بعد {elapsed()}: {exc}"
+    except (socket.timeout, TimeoutError) as exc:
+        return False, f"❌ انتهت مهلة DNS لـ {host} بعد {elapsed()}: {exc}"
+    except OSError as exc:
+        return False, f"❌ فشل DNS لـ {host} بعد {elapsed()}: {exc}"
+
+    # Stage 2: TCP connection to IMAPS.
+    raw_socket = None
+    try:
+        raw_socket = socket.create_connection((host, port), timeout=timeout)
+    except (socket.timeout, TimeoutError) as exc:
+        return False, (f"❌ فشل TCP: انتهت مهلة فتح الاتصال إلى {host}:{port} "
+                       f"بعد {elapsed()}. قد يكون الخروج من Railway محجوباً أو لا يوجد رد من الخادم. {exc}")
+    except ConnectionRefusedError as exc:
+        return False, f"❌ فشل TCP: الخادم رفض الاتصال بـ {host}:{port} بعد {elapsed()}: {exc}"
+    except OSError as exc:
+        return False, f"❌ فشل TCP إلى {host}:{port} بعد {elapsed()}: {exc}"
+
+    # Stage 3: TLS handshake.
     try:
         ctx = ssl.create_default_context()
-        with imaplib.IMAP4_SSL(host, port, ssl_context=ctx, timeout=timeout) as imap:
+        with raw_socket:
+            with ctx.wrap_socket(raw_socket, server_hostname=host):
+                pass
+    except (socket.timeout, TimeoutError) as exc:
+        return False, f"❌ فشل TLS: انتهت مهلة المصافحة مع {host} بعد {elapsed()}: {exc}"
+    except ssl.SSLError as exc:
+        return False, f"❌ فشل TLS مع {host} بعد {elapsed()}: {exc}"
+    except OSError as exc:
+        return False, f"❌ فشل TLS/الشبكة مع {host} بعد {elapsed()}: {exc}"
+
+    # Stage 4: IMAP authentication, only after transport is confirmed.
+    try:
+        with imaplib.IMAP4_SSL(host, port, ssl_context=ssl.create_default_context(), timeout=timeout) as imap:
             imap.login(email, password)
             try:
                 imap.logout()
             except Exception:
                 pass
-            return True, "تم تسجيل الدخول بنجاح."
+            return True, f"✅ نجحت مراحل DNS وTCP وTLS ومصادقة IMAP خلال {elapsed()}."
     except imaplib.IMAP4.error as exc:
         err = str(exc)
         low = err.lower()
+        prefix = f"✅ الشبكة سليمة (DNS/TCP/TLS)، لكن فشلت مصادقة IMAP بعد {elapsed()}: "
         if "application-specific password required" in low:
-            return False, "يتطلب كلمة مرور تطبيق (App Password) وليس كلمة المرور العادية."
+            return False, prefix + "يتطلب كلمة مرور تطبيق (App Password) وليس كلمة المرور العادية."
         if "invalid credentials" in low or "authenticationfailed" in low or ("auth" in low and "fail" in low):
-            return False, "بيانات الدخول غير صحيحة (الإيميل أو كلمة المرور)."
+            return False, prefix + "بيانات الدخول غير صحيحة أو رفض المزود المصادقة."
         if "account is disabled" in low or "disabled" in low:
-            return False, "الحساب معطّل من قبل المزود."
+            return False, prefix + "الحساب معطّل من قبل المزود."
         if "too many" in low or "rate" in low or "limit" in low:
-            return False, "تم تجاوز عدد محاولات الدخول. حاول لاحقاً."
-        return False, f"فشل الدخول: {err}"
-    except (socket.timeout, TimeoutError):
-        return False, "انتهت مهلة الاتصال بخادم البريد."
-    except socket.gaierror:
-        return False, "تعذّر الوصول إلى خادم البريد (DNS)."
+            return False, prefix + "تم تجاوز عدد محاولات الدخول. حاول لاحقاً."
+        return False, prefix + f"رد IMAP: {err}"
+    except (socket.timeout, TimeoutError) as exc:
+        return False, f"❌ نجحت مراحل DNS/TCP مبدئياً، لكن انتهت مهلة IMAP/TLS بعد {elapsed()}: {exc}"
     except ssl.SSLError as exc:
-        return False, f"خطأ SSL: {exc}"
+        return False, f"❌ نجحت الشبكة مبدئياً، لكن فشل TLS أثناء جلسة IMAP بعد {elapsed()}: {exc}"
     except OSError as exc:
-        return False, f"تعذّر الاتصال بالخادم: {exc}"
+        return False, f"❌ نجحت DNS مبدئياً، لكن فشلت جلسة IMAP بعد {elapsed()}: {exc}"
     except Exception:
         logger.exception("IMAP verification error for %s", email)
-        return False, "خطأ غير متوقع أثناء التحقق."
+        return False, f"❌ خطأ غير متوقع بعد نجاح فحص الشبكة ({elapsed()}). راجع سجل الخدمة دون تسجيل بيانات الاعتماد."
 
 
 NETWORK_ERROR_MARKERS = (
