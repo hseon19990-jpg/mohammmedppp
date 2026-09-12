@@ -2288,6 +2288,7 @@ async def auto_verify_account(update: Update, context: ContextTypes.DEFAULT_TYPE
     user_data["pending_requests"] = pending
     save_user(uid, user_data)
 
+    category = result.get("category", "unknown")
     if result["level"] == "verified":
         title = "🟢 <b>نجح التحقق التلقائي</b>"
     elif result["level"] == "partial":
@@ -2301,7 +2302,6 @@ async def auto_verify_account(update: Update, context: ContextTypes.DEFAULT_TYPE
         title = "🔴 <b>فشل التحقق التلقائي</b>"
 
     # شرح نوع الحساب
-    category = result.get("category", "unknown")
     if category == "2fa":
         category_hint = (
             "⚠️ رد Gmail يشير إلى App Password/2FA، لكنه لا يثبت أن الحساب محمي بـ2FA "
