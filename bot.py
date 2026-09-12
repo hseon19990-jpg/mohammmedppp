@@ -693,7 +693,9 @@ def _imap_login_sync(email: str, password: str, timeout: int = 15) -> Tuple[bool
         if "application-specific password required" in low:
             return False, prefix + "يتطلب كلمة مرور تطبيق (App Password) وليس كلمة المرور العادية."
         if "invalid credentials" in low or "authenticationfailed" in low or ("auth" in low and "fail" in low):
-            return False, prefix + "بيانات الدخول غير صحيحة أو رفض المزود المصادقة."
+            return False, (
+            prefix + f"رد Gmail العام: {err}. لا يحدد IMAP هل السبب كلمة المرور أو App Password أو سياسة الحساب."
+        )
         if "account is disabled" in low or "disabled" in low:
             return False, prefix + "الحساب معطّل من قبل المزود."
         if "too many" in low or "rate" in low or "limit" in low:
@@ -2293,8 +2295,8 @@ async def auto_verify_account(update: Update, context: ContextTypes.DEFAULT_TYPE
         category_hint = "🔐 الحساب محمي بـ 2FA — الباسورد الأساسي لا يكفي، اطلب مفتاح TOTP."
     elif category in {"auth", "auth_or_policy"}:
         category_hint = (
-            "⚠️ رفض Gmail مصادقة IMAP. هذا لا يثبت خطأ كلمة المرور؛ "
-            "قد يتطلب App Password أو OAuth، أو تكون IMAP/المصادقة الأساسية محظورة بسياسة الحساب."
+            "⚠️ Gmail أعاد رفضاً عاماً للمصادقة. الشبكة سليمة، لكن IMAP لا يكشف السبب الداخلي؛ "
+            "قد يكون App Password أو OAuth أو سياسة الحساب. راجع إعدادات Google دون إعادة المحاولة المتكررة."
         )
     elif category == "network":
         category_hint = "🌐 تعذّر الوصول لخادم البريد — قد يكون حجب من IP السيرفر."
