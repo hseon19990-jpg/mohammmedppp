@@ -1927,7 +1927,13 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
 
     price = float(account.get("amount", 0.0))
 
-    if account.get("auto_verified", False):
+    # الحسابات التي أكملها الأدمن أو تحققت تلقائياً يجب إعادة فحص IMAP
+    # قبل تحرير الرصيد؛ نجاح الفحص الأول لا يكفي بعد مرور فترة التعليق.
+    requires_release_recheck = (
+        account.get("auto_verified", False)
+        or bool(account.get("completed_by_admin"))
+    )
+    if requires_release_recheck:
         allowed, wait = imap_rate_ok(email)
         if not allowed:
             await schedule_leave_check(
@@ -1980,6 +1986,15 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
             return
+        account["verification_24h"] = {
+            "level": recheck["level"],
+            "badge": recheck["badge"],
+            "message": recheck["message"],
+            "imap_ok": recheck["imap_ok"],
+            "totp_ok": recheck["totp_ok"],
+            "verified_at": datetime.now(timezone.utc).isoformat(),
+            "verified_by": "release_recheck",
+        }
 
     user_data["hold_balance"] = clamp_money(
         float(user_data.get("hold_balance", 0.0)) - price)
