@@ -1,7 +1,9 @@
 """
-Advanced Telegram Account Manager Bot - v4
-- Owner-triggered IMAP verification only (no auto verification on submit)
-- Works for tier 1 (email+password), tier 2 (+2FA), tier 3 (+app password)
+Advanced Telegram Account Manager Bot - v4.1
+- Owner-triggered IMAP verification
+- AUTO IMAP verification on submit (full 4-field accounts only)
+- 24-hour hold + re-verification before releasing points
+- Rejected-after-24h accounts stay in records
 - Encryption at rest (Fernet)
 - Session & pending-purchase persistence
 - Config cache with TTL
@@ -247,6 +249,7 @@ BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 PAGE_SIZE = 8
 LEAVE_HOLD_SECONDS = 24 * 60 * 60
 IMAP_RATE_LIMIT_SECONDS = 60
+AUTO_VERIFY_ENABLED = True  # ⚙️ تحكم بسيط بالتحقق التلقائي عند الإرسال
 
 # ==================== DATA HELPERS ====================
 def load_json(path: Path) -> dict:
@@ -720,7 +723,6 @@ AUTH_ERROR_MARKERS = (
     "invalid credentials", "authenticationfailed",
     "username and password not accepted",
     "بيانات الدخول غير صحيحة",
-    "بيانات الدخول غير صحيحة",
 )
 TWO_FA_ERROR_MARKERS = (
     "application-specific password", "app password",
@@ -796,8 +798,6 @@ async def verify_account_credentials(
         result["message"] = ("🟢 تم التحقق الكامل عبر IMAP باستخدام كلمة مرور التطبيق."
                              if app_pass else "🟢 تم تسجيل الدخول عبر IMAP بنجاح.")
     elif result["category"] == "2fa":
-        # Gmail's IMAP response is only a provider/policy hint; it does not prove
-        # that this account has 2FA or that the supplied credentials are correct.
         result["level"] = "partial" if result["totp_ok"] else "unknown"
         result["badge"] = "🟡" if result["totp_ok"] else "⚪"
         if result["totp_ok"]:
@@ -993,7 +993,9 @@ async def my_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += "✅ *مقبولة:*\n"
         for idx, acc in enumerate(approved, 1):
             leave_status = ""
-            if acc.get("approved_with_leave", False) and not acc.get("leave_confirmed", False):
+            if acc.get("rejected_at_24h"):
+                leave_status = " ❌ (رفض بعد 24 ساعة)"
+            elif acc.get("approved_with_leave", False) and not acc.get("leave_confirmed", False):
                 leave_status = " ⏳ (معلق 24 ساعة)"
             elif acc.get("approved_with_leave", False) and acc.get("leave_confirmed", False):
                 leave_status = " ✅ (تم التحويل)"
@@ -1302,17 +1304,29 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.delete()
         except Exception:
             pass
-        has_totp_video = config.get("video_totp") and Path(config.get("video_totp", "")).exists()
-        buttons = [("✅ استلم $0.10 (باسورد فقط)", f"submit_tier_1:{uid}")]
-        if has_totp_video:
-            buttons.append(("📹 طريقة العثور على رمز المصادقة", "show_video:totp"))
-        buttons.append(("❌ إلغاء", "cancel"))
+
+        # ⚠️ شاشة التنبيه قبل المتابعة
+        warning_text = (
+            "⚠️ *تنبيه مهم قبل المتابعة*\n\n"
+            "لقد أدخلت الإيميل والباسورد فقط.\n\n"
+            "🚨 *في حال إرسال الحساب الآن:*\n"
+            f"• سيتم ربح *${prices['tier_1']:.2f}* فقط\n"
+            "• احتمال كبير للرفض\n"
+            "• قبول بطيء (مراجعة يدوية من المالك)\n\n"
+            "✅ *ننصحك بإكمال البيانات:*\n"
+            "• إيميل + باسورد + رمز مصادقة + كلمة مرور التطبيق\n"
+            f"• سعر أعلى (*${prices['tier_3']:.2f}*)\n"
+            "• *تحقق تلقائي فوري* وقبول سريع\n\n"
+            "📌 ماذا تريد أن تفعل؟"
+        )
+        buttons = [
+            ("✅ إكمال العملية (موصى به)", f"continue_full:{uid}"),
+            (f"⚠️ تأكيد وإرسال بـ ${prices['tier_1']:.2f}", f"submit_tier_1:{uid}"),
+            ("❌ إلغاء", "cancel"),
+        ]
         await update.message.reply_text(
-            f"🔐 *الخطوة 3/4*: أرسل مفتاح المصادقة (Secret Key):\n\n"
-            f"💰 *السعر الحالي:* ${prices['tier_1']:.2f} (إيميل + باسورد)\n"
-            f"💰 *السعر مع رمز المصادقة:* ${prices['tier_2']:.2f}\n\n"
-            f"📌 *يمكنك استلام {prices['tier_1']:.2f}$ الآن وإكمال الباقي لاحقاً*",
-            parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
+            warning_text, parse_mode=ParseMode.MARKDOWN,
+            reply_markup=kb_vertical(buttons))
 
     elif session.step == "totp":
         try:
@@ -1388,6 +1402,150 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.delete()
         except Exception:
             pass
+
+        # 🔍 تحقق IMAP تلقائي فوري (لأن الأربعة حقول مكتملة)
+        if AUTO_VERIFY_ENABLED:
+            allowed, wait = imap_rate_ok(session.email)
+            if not allowed:
+                await update.message.reply_text(
+                    f"⏳ انتظر {wait} ثانية قبل إعادة المحاولة لنفس الإيميل.",
+                    reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+                return
+            imap_rate_mark(session.email)
+
+            progress_msg = await update.message.reply_text(
+                f"🔍 *جاري التحقق التلقائي من الحساب...*\n\n"
+                f"📧 `{session.email}`\n\n"
+                f"_يتم الاتصال بخادم البريد وفحص البيانات..._",
+                parse_mode=ParseMode.MARKDOWN)
+
+            verify_result = await verify_account_credentials(
+                email=session.email,
+                password=session.password,
+                app_pass=session.app_pass,
+                totp_secret=session.totp if session.has_totp else "",
+            )
+
+            # ❌ فشل التحقق → إعلام المستخدم وإلغاء الطلب
+            if not verify_result["imap_ok"]:
+                try:
+                    await progress_msg.delete()
+                except Exception:
+                    pass
+                SESSIONS.pop(uid, None)
+                save_sessions()
+                fail_text = (
+                    f"❌ *فشل التحقق التلقائي*\n\n"
+                    f"📧 `{session.email}`\n\n"
+                    f"📝 *السبب:* {tg_html_escape(verify_result['message'])}\n\n"
+                    f"⚠️ لم يتم قبول الحساب. يمكنك المحاولة مرة أخرى بعد التأكد من صحة البيانات."
+                )
+                await update.message.reply_text(
+                    fail_text, parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+                return
+
+            # ✅ نجح التحقق → أضف إلى الحسابات المقبولة (مع تعليق 24 ساعة)
+            user = update.effective_user
+            user_full_name = user.full_name or "غير معروف"
+            user_username = user.username or "لا يوجد"
+            final_price = calculate_account_price(session.has_totp, session.has_app_pass)
+            clear_rejected_email_records(user_data, session.email)
+
+            approval_time = datetime.now(timezone.utc)
+            account_record = {
+                "email": session.email,
+                "password": session.password,
+                "totp": session.totp,
+                "app_pass": session.app_pass,
+                "amount": final_price,
+                "timestamp": approval_time.isoformat(),
+                "approval_time": approval_time.isoformat(),
+                "release_at": (approval_time + timedelta(seconds=LEAVE_HOLD_SECONDS)).isoformat(),
+                "extracted": False,
+                "has_totp": True,
+                "has_app_pass": True,
+                "user_name": user_full_name,
+                "user_username": user_username,
+                "approved_with_leave": True,
+                "leave_confirmed": False,
+                "auto_verified": True,
+                "verification": {
+                    "level": verify_result["level"],
+                    "badge": verify_result["badge"],
+                    "message": verify_result["message"],
+                    "imap_ok": verify_result["imap_ok"],
+                    "totp_ok": verify_result["totp_ok"],
+                    "verified_at": approval_time.isoformat(),
+                    "verified_by": "auto_on_submit",
+                },
+            }
+            user_data.setdefault("approved_accounts", []).append(account_record)
+            user_data["hold_balance"] = clamp_money(
+                float(user_data.get("hold_balance", 0.0)) + final_price)
+            user_data["total_credited_balance"] = clamp_money(
+                float(user_data.get("total_credited_balance", 0.0) or 0.0) + final_price)
+            user_data["total_approved_emails"] = int(user_data.get("total_approved_emails", 0)) + 1
+            add_transaction(user_data, "hold", final_price,
+                            "تحقق تلقائي - معلق 24 ساعة", session.email)
+            save_user(uid, user_data)
+            SESSIONS.pop(uid, None)
+            save_sessions()
+
+            # 📅 جدولة إعادة الفحص بعد 24 ساعة
+            await schedule_leave_check(context, uid, session.email,
+                                        account_record["release_at"])
+
+            # 📢 إشعار المُحيل
+            referred_by = user_data.get("referred_by")
+            if referred_by:
+                try:
+                    await context.bot.send_message(
+                        chat_id=referred_by,
+                        text=f"📢 *إشعار إحالة*\n\nالمستخدم `{uid}` تم قبول إيميله `{session.email}` تلقائياً.",
+                        parse_mode=ParseMode.MARKDOWN)
+                except Exception:
+                    pass
+
+            # 📢 إشعار المالك
+            try:
+                await context.bot.send_message(
+                    chat_id=OWNER_ID,
+                    text=(f"🟢 *تحقق تلقائي ناجح*\n\n"
+                          f"👤 `{user_full_name}` (@{user_username})\n"
+                          f"🆔 `{uid}`\n"
+                          f"📧 `{session.email}`\n"
+                          f"💰 `${final_price:.2f}`\n\n"
+                          f"⏰ سيُعاد فحصه تلقائياً بعد 24 ساعة."),
+                    parse_mode=ParseMode.MARKDOWN)
+            except Exception:
+                pass
+
+            try:
+                await progress_msg.delete()
+            except Exception:
+                pass
+
+            # 📹 فيديو المغادرة
+            await send_leave_video_to_user(context, uid, session.email)
+
+            # ✅ إعلام المستخدم
+            await update.message.reply_text(
+                f"✅ *تم التحقق من الحساب بنجاح!*\n\n"
+                f"📧 `{session.email}`\n"
+                f"📦 *المستوى:* 🟢 مكتمل (كامل المعلومات)\n"
+                f"💰 تم إضافة *${final_price:.2f}* إلى رصيدك المعلق\n\n"
+                f"⏰ *ملاحظات مهمة:*\n"
+                f"• سيتم إعادة فحص الحساب تلقائياً بعد *24 ساعة*\n"
+                f"• إذا كان الحساب ما زال يعمل، سيتم تحويل المبلغ إلى رصيدك الدائم\n"
+                f"• إذا فشل الفحص الثاني، سيتم رفض الحساب (يبقى في السجلات)\n"
+                f"• ⚠️ *قم بمغادرة الحساب الآن* لتجنب الرفض\n\n"
+                f"📹 تم إرسال فيديو المغادرة إليك.",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+            return
+
+        # ⚙️ في حال تعطيل التحقق التلقائي: يذهب للطلبات المعلقة يدوياً
         user = update.effective_user
         user_full_name = user.full_name or "غير معروف"
         user_username = user.username or "لا يوجد"
@@ -1414,29 +1572,39 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_user(uid, user_data)
         SESSIONS.pop(uid, None)
         save_sessions()
-        referred_by = user_data.get("referred_by")
-        if referred_by:
-            try:
-                await context.bot.send_message(
-                    chat_id=referred_by,
-                    text=f"📢 *إشعار إحالة*\n\nالمستخدم `{uid}` أضاف إيميل `{session.email}` وهو قيد الانتظار.",
-                    parse_mode=ParseMode.MARKDOWN)
-            except Exception:
-                pass
-        await send_leave_video_to_user(context, uid, session.email)
-        if session.has_app_pass and session.has_totp:
-            tier_text = "📦 *مكتمل (كامل المعلومات)*"
-        elif session.has_totp:
-            tier_text = "📦 *ناقص كلمة مرور التطبيق*"
-        else:
-            tier_text = "📦 *ناقص رمز المصادقة وكلمة مرور التطبيق*"
         await update.message.reply_text(
-            f"✅ *تم إرسال الطلب للمالك للموافقة!*\n\n{tier_text}\n"
-            f"💰 تمت إضافة *${final_price:.2f}* إلى الأموال قيد الانتظار.\n\n"
-            f"📹 تم إرسال فيديو المغادرة إليك.\n"
-            f"⚠️ قم بمغادرة الحساب لتجنب تأخير الدفعة.\n\n"
-            f"_🔄 سيتم تحويل المبلغ إلى رصيدك بعد موافقة المالك_",
-            parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+            f"✅ *تم إرسال الطلب للمالك للموافقة!*\n\n"
+            f"📦 *مكتمل (كامل المعلومات)*\n"
+            f"💰 تمت إضافة *${final_price:.2f}* إلى الأموال قيد الانتظار.",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+
+
+async def continue_full_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """زر «إكمال العملية» — يعرض خطوة إدخال TOTP."""
+    query = update.callback_query
+    uid = int(query.data.split(":")[1])
+    if query.from_user.id != uid:
+        await query.answer("⚠️ غير مصرح.", show_alert=True)
+        return
+    session = SESSIONS.get(uid)
+    if not session:
+        await query.answer("⚠️ الجلسة منتهية.", show_alert=True)
+        return
+    config = load_config()
+    prices = get_tier_prices()
+    has_totp_video = config.get("video_totp") and Path(config.get("video_totp", "")).exists()
+    buttons = []
+    if has_totp_video:
+        buttons.append(("📹 طريقة العثور على رمز المصادقة", "show_video:totp"))
+    buttons.append(("❌ إلغاء", "cancel"))
+    await query.edit_message_text(
+        f"🔐 *الخطوة 3/4*: أرسل مفتاح المصادقة (Secret Key):\n\n"
+        f"💰 *السعر الحالي:* ${prices['tier_1']:.2f} (إيميل + باسورد)\n"
+        f"💰 *مع رمز المصادقة:* ${prices['tier_2']:.2f}\n"
+        f"💰 *الكامل (مع كلمة مرور التطبيق):* ${prices['tier_3']:.2f}\n\n"
+        f"📌 أرسل الآن مفتاح المصادقة للمتابعة إلى الخطوة 4/4",
+        parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
 
 
 async def submit_tier_1(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1600,6 +1768,7 @@ async def schedule_leave_check(context: ContextTypes.DEFAULT_TYPE, user_id: int,
 
 
 async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
+    """فحص ما بعد 24 ساعة: إعادة التحقق من IMAP ثم تحرير النقاط أو الرفض."""
     job_data = context.job.data
     user_id = job_data["user_id"]
     email = job_data["email"]
@@ -1607,26 +1776,90 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
     if release_at and release_at > datetime.now(timezone.utc):
         await schedule_leave_check(context, user_id, email, release_at.isoformat())
         return
+
     user_data = get_user(user_id)
     accounts = user_data.get("approved_accounts", [])
     account = next((acc for acc in accounts if acc.get("email") == email), None)
     if not account or account.get("leave_confirmed", False):
         return
+
     price = float(account.get("amount", 0.0))
-    user_data["hold_balance"] = clamp_money(float(user_data.get("hold_balance", 0.0)) - price)
-    user_data["balance"] = clamp_money(float(user_data.get("balance", 0.0)) + price)
+
+    # 🔁 إعادة فحص IMAP للحسابات المُتحقق منها تلقائياً
+    if account.get("auto_verified", False):
+        allowed, wait = imap_rate_ok(email)
+        if not allowed:
+            await schedule_leave_check(
+                context, user_id, email,
+                (datetime.now(timezone.utc) + timedelta(seconds=wait)).isoformat())
+            return
+        imap_rate_mark(email)
+
+        recheck = await verify_account_credentials(
+            email=account.get("email", ""),
+            password=account.get("password", ""),
+            app_pass=account.get("app_pass", ""),
+            totp_secret=account.get("totp", ""),
+        )
+
+        if not recheck["imap_ok"]:
+            # ❌ فشل الفحص الثاني → رفض مع الاحتفاظ بالسجل
+            user_data["hold_balance"] = clamp_money(
+                float(user_data.get("hold_balance", 0.0)) - price)
+            account["leave_confirmed"] = True
+            account["rejected_at_24h"] = True
+            account["rejection_reason"] = "فشل إعادة فحص IMAP بعد 24 ساعة"
+            account["verification_24h"] = {
+                "level": recheck["level"],
+                "badge": recheck["badge"],
+                "message": recheck["message"],
+                "verified_at": datetime.now(timezone.utc).isoformat(),
+            }
+            add_transaction(user_data, "debit", price,
+                            "رفض بعد فحص 24 ساعة", email)
+            save_user(user_id, user_data)
+            try:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=(f"❌ *فشل الحساب في الفحص الثاني*\n\n"
+                          f"📧 `{email}`\n"
+                          f"📝 السبب: {tg_html_escape(recheck['message'])}\n\n"
+                          f"💰 تم خصم *${price:.2f}* من رصيدك المعلق."),
+                    parse_mode=ParseMode.MARKDOWN)
+            except Exception:
+                pass
+            try:
+                await context.bot.send_message(
+                    chat_id=OWNER_ID,
+                    text=(f"🔴 *فشل حساب في الفحص الثاني بعد 24 ساعة*\n\n"
+                          f"👤 المستخدم: `{user_id}`\n"
+                          f"📧 `{email}`\n"
+                          f"💰 `${price:.2f}`\n"
+                          f"📝 {tg_html_escape(recheck['message'])}"),
+                    parse_mode=ParseMode.MARKDOWN)
+            except Exception:
+                pass
+            return
+
+    # ✅ نجح الفحص → حرّر النقاط إلى الرصيد الدائم
+    user_data["hold_balance"] = clamp_money(
+        float(user_data.get("hold_balance", 0.0)) - price)
+    user_data["balance"] = clamp_money(
+        float(user_data.get("balance", 0.0)) + price)
     account["leave_confirmed"] = True
     account["auto_confirmed"] = True
     account["confirmed_at"] = datetime.now(timezone.utc).isoformat()
     account["released_amount"] = price
-    add_transaction(user_data, "release", price, "تحويل تلقائي بعد 24 ساعة", email)
+    add_transaction(user_data, "release", price,
+                    "تحويل تلقائي بعد 24 ساعة", email)
     save_user(user_id, user_data)
     try:
         await context.bot.send_message(
             chat_id=user_id,
-            text=f"✅ *تم إضافة المبلغ إلى رصيدك تلقائياً!*\n\n"
-                 f"📧 الإيميل: `{email}`\n💰 تم إضافة *${price:.2f}* إلى رصيدك.\n\n"
-                 f"_شكراً لاستخدامك البوت 🤖_",
+            text=(f"✅ *تم إضافة المبلغ إلى رصيدك تلقائياً!*\n\n"
+                  f"📧 الإيميل: `{email}`\n"
+                  f"💰 تم إضافة *${price:.2f}* إلى رصيدك الدائم.\n\n"
+                  f"_شكراً لاستخدامك البوت 🤖_"),
             parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
         logger.error(f"Could not send auto-confirmation to user {user_id}: {e}")
@@ -2267,7 +2500,6 @@ async def auto_verify_account(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer("⚠️ لا توجد بيانات دخول للتحقق منها.", show_alert=True)
         return
 
-    # 🚦 Rate limit
     allowed, wait = imap_rate_ok(email)
     if not allowed:
         await query.answer(f"⏳ انتظر {wait} ثانية قبل إعادة المحاولة لنفس الإيميل.", show_alert=True)
@@ -2314,7 +2546,6 @@ async def auto_verify_account(update: Update, context: ContextTypes.DEFAULT_TYPE
     else:
         title = "🔴 <b>فشل التحقق التلقائي</b>"
 
-    # شرح نوع الحساب
     if category == "unsupported_auth":
         category_hint = (
             "🔐 لم نغيّر خطوات الأعضاء. Gmail لا يقبل الياسورد العادي عبر IMAP؛ "
@@ -2328,7 +2559,7 @@ async def auto_verify_account(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif category in {"auth", "auth_or_policy"}:
         category_hint = (
             "⚠️ Gmail أعاد رفضاً عاماً للمصادقة. الشبكة سليمة، لكن IMAP لا يكشف السبب الداخلي؛ "
-            "قد يكون App Password أو OAuth أو سياسة الحساب. راجع إعدادات Google دون إعادة المحاولة المتكررة."
+            "قد يكون App Password أو OAuth أو سياسة الحساب."
         )
     elif category == "network":
         category_hint = "🌐 تعذّر الوصول لخادم البريد — قد يكون حجب من IP السيرفر."
@@ -2769,7 +3000,14 @@ async def view_approved_requests(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     def label(acc):
-        tier_icon = "🟢" if acc.get("has_app_pass") else "🟡" if acc.get("has_totp") else "🔵"
+        if acc.get("rejected_at_24h"):
+            tier_icon = "🔴"
+        elif acc.get("has_app_pass"):
+            tier_icon = "🟢"
+        elif acc.get("has_totp"):
+            tier_icon = "🟡"
+        else:
+            tier_icon = "🔵"
         user_name = acc.get("user_name", "غير معروف")
         user_username = acc.get("user_username", "لا يوجد")
         display_name = f"{user_name} (@{user_username})" if user_username != "لا يوجد" else user_name
@@ -2800,8 +3038,18 @@ async def approved_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     index, account = account_match
     account_token = account_callback_token(account.get("email", ""))
-    tier_icon = "🟢" if account.get("has_app_pass") else "🟡" if account.get("has_totp") else "🔵"
-    tier_text = "مكتمل" if account.get("has_app_pass") else "مع رمز المصادقة" if account.get("has_totp") else "باسورد فقط"
+    if account.get("rejected_at_24h"):
+        tier_icon = "🔴"
+        tier_text = "مرفوض بعد فحص 24 ساعة"
+    elif account.get("has_app_pass"):
+        tier_icon = "🟢"
+        tier_text = "مكتمل"
+    elif account.get("has_totp"):
+        tier_icon = "🟡"
+        tier_text = "مع رمز المصادقة"
+    else:
+        tier_icon = "🔵"
+        tier_text = "باسورد فقط"
     msg = f"📋 *تفاصيل الحساب المقبول*\n\n"
     msg += f"👤 *البائع:* {account.get('user_name', 'غير معروف')}\n"
     msg += f"🆔 *اليوزر:* @{account.get('user_username', 'لا يوجد')}\n"
@@ -2826,10 +3074,15 @@ async def approved_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg += f"📦 *المستوى:* {tier_icon} {tier_text}\n"
     msg += f"👤 *المستخدم:* `{uid}`\n"
     msg += f"💰 *السعر:* ${account.get('amount', 0):.2f}\n"
-    if account.get("approved_with_leave", False) and not account.get("leave_confirmed", False):
+    if account.get("rejected_at_24h"):
+        msg += "📌 *الحالة:* ❌ مرفوض بعد الفحص الثاني\n"
+    elif account.get("approved_with_leave", False) and not account.get("leave_confirmed", False):
         msg += "📌 *حالة المغادرة:* ⏳ معلق (24 ساعة)\n"
     elif account.get("approved_with_leave", False) and account.get("leave_confirmed", False):
         msg += "📌 *حالة المغادرة:* ✅ تم التحويل\n"
+    if account.get("verification_24h"):
+        v = account["verification_24h"]
+        msg += f"\n🔍 *فحص 24 ساعة:* {v.get('badge', '⚪')}\n   <i>{tg_html_escape(v.get('message', ''))}</i>\n"
     if account.get("has_totp", False) and account.get("totp", ""):
         buttons = [("🔄 كود جديد", f"new_totp_code:{uid}:{account_token}"),
                    ("💰 خصم نقاط", f"deduct_points:{uid}:{account_token}"),
@@ -3283,16 +3536,22 @@ async def all_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total = len(all_accs)
     msg = f"📊 *إجمالي: {total}*\n\n"
     for idx, acc in enumerate(all_accs[:10], 1):
-        leave_status = ""
-        if acc.get("approved_with_leave") and not acc.get("leave_confirmed"):
-            leave_status = " ⏳"
-        tier_icon = "🟢" if acc.get("has_app_pass") else "🟡" if acc.get("has_totp") else "🔵"
+        if acc.get("rejected_at_24h"):
+            leave_status = " 🔴"
+            tier_icon = "🔴"
+        else:
+            leave_status = ""
+            if acc.get("approved_with_leave") and not acc.get("leave_confirmed"):
+                leave_status = " ⏳"
+            tier_icon = "🟢" if acc.get("has_app_pass") else "🟡" if acc.get("has_totp") else "🔵"
         msg += f"{idx}. {tier_icon} 📧 `{acc.get('email', '')}`{leave_status}\n"
         msg += f"   🔑 `{acc.get('password', '')}`\n"
         if acc.get("has_totp"):
             msg += f"   🔐 `{acc.get('totp', '')}`\n"
         if acc.get("has_app_pass"):
             msg += f"   🗝 `{format_app_password(acc.get('app_pass', ''))}`\n"
+        if acc.get("rejected_at_24h"):
+            msg += f"   ❌ مرفوض بعد فحص 24 ساعة\n"
         msg += f"   👤 {acc.get('user_id', '')} | 💰 ${acc.get('amount', 0):.2f}\n   ─────────────\n"
     if total > 10:
         msg += f"\n📌 أول 10 من {total}"
@@ -3325,13 +3584,18 @@ async def unextracted_accounts(update: Update, context: ContextTypes.DEFAULT_TYP
     total = len(unextracted)
     msg = f"🆕 *غير مستخرجة: {total}*\n\n"
     for idx, acc in enumerate(unextracted[:10], 1):
-        tier_icon = "🟢" if acc.get("has_app_pass") else "🟡" if acc.get("has_totp") else "🔵"
+        if acc.get("rejected_at_24h"):
+            tier_icon = "🔴"
+        else:
+            tier_icon = "🟢" if acc.get("has_app_pass") else "🟡" if acc.get("has_totp") else "🔵"
         msg += f"{idx}. {tier_icon} 📧 `{acc.get('email', '')}`\n"
         msg += f"   🔑 `{acc.get('password', '')}`\n"
         if acc.get("has_totp"):
             msg += f"   🔐 `{acc.get('totp', '')}`\n"
         if acc.get("has_app_pass"):
             msg += f"   🗝 `{format_app_password(acc.get('app_pass', ''))}`\n"
+        if acc.get("rejected_at_24h"):
+            msg += f"   ❌ مرفوض بعد 24 ساعة\n"
         msg += f"   👤 {acc.get('user_id', '')}\n   ─────────────\n"
     if total > 10:
         msg += f"\n📌 أول 10 من {total}"
@@ -3390,7 +3654,9 @@ def build_accounts_export(title: str, accounts: list) -> bytes:
     lines = [title, "=" * 60, ""]
     for idx, acc in enumerate(accounts, 1):
         leave_status = ""
-        if acc.get("approved_with_leave") and not acc.get("leave_confirmed"):
+        if acc.get("rejected_at_24h"):
+            leave_status = " (مرفوض بعد 24 ساعة)"
+        elif acc.get("approved_with_leave") and not acc.get("leave_confirmed"):
             leave_status = " (معلق)"
         tier_icon = "🟢" if acc.get("has_app_pass") else "🟡" if acc.get("has_totp") else "🔵"
         lines.append(f"{tier_icon} {idx}. البريد: {acc.get('email', '')}{leave_status}")
@@ -4163,6 +4429,8 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await add_account_start(update, context)
     elif data == "cancel":
         await add_account_cancel(update, context)
+    elif data.startswith("continue_full:"):
+        await continue_full_process(update, context)
     elif data.startswith("submit_tier_1:"):
         await submit_tier_1(update, context)
     elif data.startswith("submit_tier_2:"):
