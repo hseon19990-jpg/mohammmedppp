@@ -2529,6 +2529,7 @@ async def admin_request_detail(update: Update, context: ContextTypes.DEFAULT_TYP
         buttons.append(("📝 إكمال الطلب (إضافة 2FA + App Pass)", f"admin_complete_start:{uid}:{index}"))
     elif has_totp and not has_app_pass:
         buttons.append(("📝 إكمال الطلب (إضافة App Pass)", f"admin_complete_start:{uid}:{index}"))
+    buttons.append(("❌ رفض الطلب", f"reject_request:{uid}:{index}"))
     buttons.append(("🔙 الطلبات", "admin_requests:0"))
     await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
 
@@ -3500,6 +3501,23 @@ async def complete_approval(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
 
 # ==================== APPROVE / REJECT ====================
+def can_reject_pending_request(actor_id: int, user_data: dict, index: int) -> bool:
+    """المالك يستطيع رفض أي طلب، والأدمن يرفض فقط الطلبات الظاهرة في قائمته."""
+    if actor_id == OWNER_ID:
+        return True
+    if not is_admin(actor_id):
+        return False
+    pending = user_data.get("pending_requests", [])
+    return (
+        0 <= index < len(pending)
+        and not pending[index].get("has_app_pass", False)
+    )
+
+
+def rejection_list_callback(actor_id: int) -> str:
+    return "view_pending:0" if actor_id == OWNER_ID else "admin_requests:0"
+
+
 async def approve_request_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
@@ -3597,20 +3615,30 @@ async def approve_with_leave(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def reject_request_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
+    actor_id = update.effective_user.id
+    if not is_admin_or_owner(actor_id):
+        await query.answer("🚫 هذا الإجراء للمالك والأدمن فقط.", show_alert=True)
         return
     parts = query.data.split(":")
     uid = int(parts[1])
     index = int(parts[2])
     user_data = get_user(uid)
     pending = user_data.get("pending_requests", [])
+    if not can_reject_pending_request(actor_id, user_data, index):
+        await query.answer("🚫 لا تملك صلاحية رفض هذا الطلب.", show_alert=True)
+        return
     if index >= len(pending):
         await query.edit_message_text("⚠️ الطلب غير موجود.",
-                                      reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending:0"))
+                                      reply_markup=kb_single(
+                                          "🔙 العودة", rejection_list_callback(actor_id)))
         return
     email = pending[index].get("email", "")
     display_email = tg_html_escape(email)
+    detail_callback = (
+        f"pending_detail:{uid}:{index}"
+        if actor_id == OWNER_ID
+        else f"admin_request_detail:{uid}:{index}"
+    )
     context.user_data["reject_uid"] = uid
     context.user_data["reject_index"] = index
     buttons = [
@@ -3620,7 +3648,7 @@ async def reject_request_reason(update: Update, context: ContextTypes.DEFAULT_TY
         ("🗝 كلمة مرور تطبيق خطأ", f"reject_reason:app_pass:{uid}:{index}"),
         ("📱 يحتاج رقم هاتف", f"reject_reason:phone:{uid}:{index}"),
         ("📝 خطأ آخر (اكتب السبب)", f"reject_reason:other:{uid}:{index}"),
-        ("🔙 التفاصيل", f"pending_detail:{uid}:{index}"),
+        ("🔙 التفاصيل", detail_callback),
     ]
     await query.edit_message_text(
         f"❌ <b>رفض الطلب</b>\n\n📧 <code>{display_email}</code>\n\nاختر سبب الرفض:",
@@ -3629,8 +3657,9 @@ async def reject_request_reason(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
+    actor_id = update.effective_user.id
+    if not is_admin_or_owner(actor_id):
+        await query.answer("🚫 هذا الإجراء للمالك والأدمن فقط.", show_alert=True)
         return
     parts = query.data.split(":")
     reason_type = parts[1]
@@ -3638,13 +3667,22 @@ async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TY
     index = int(parts[3])
     user_data = get_user(uid)
     pending = user_data.get("pending_requests", [])
+    if not can_reject_pending_request(actor_id, user_data, index):
+        await query.answer("🚫 لا تملك صلاحية رفض هذا الطلب.", show_alert=True)
+        return
     if index >= len(pending):
         await query.edit_message_text("⚠️ الطلب غير موجود.",
-                                      reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending:0"))
+                                      reply_markup=kb_single(
+                                          "🔙 العودة", rejection_list_callback(actor_id)))
         return
     request = pending[index]
     email = request.get("email", "")
     display_email = tg_html_escape(email)
+    detail_callback = (
+        f"pending_detail:{uid}:{index}"
+        if actor_id == OWNER_ID
+        else f"admin_request_detail:{uid}:{index}"
+    )
 
     # For "other" we ask for custom text before removing
     if reason_type == "other":
@@ -3654,7 +3692,7 @@ async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text(
             f"📝 <b>اكتب سبب الرفض</b>\n\nأرسل رسالة توضح سبب رفض طلب <code>{display_email}</code>:",
             parse_mode=ParseMode.HTML,
-            reply_markup=kb_single("🔙 إلغاء", f"pending_detail:{uid}:{index}"))
+            reply_markup=kb_single("🔙 إلغاء", detail_callback))
         context.user_data["step"] = "reject_reason_text"
         return
 
@@ -3694,10 +3732,11 @@ async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TY
         f"✅ تم رفض الطلب <code>{display_email}</code>.\n"
         f"📝 السبب: {REJECT_REASON_LABELS.get(reason_type, reason_type)}",
         parse_mode=ParseMode.HTML,
-        reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending:0"))
+        reply_markup=kb_single("🔙 العودة", rejection_list_callback(actor_id)))
 
 
 async def handle_reject_reason_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    actor_id = update.effective_user.id
     uid = context.user_data.get("reject_uid")
     index = context.user_data.get("reject_index")
     text = update.message.text.strip()
@@ -3706,6 +3745,9 @@ async def handle_reject_reason_text(update: Update, context: ContextTypes.DEFAUL
         return
     user_data = get_user(uid)
     pending = user_data.get("pending_requests", [])
+    if not can_reject_pending_request(actor_id, user_data, index):
+        await update.message.reply_text("🚫 لا تملك صلاحية رفض هذا الطلب.")
+        return
     if index >= len(pending):
         await update.message.reply_text("⚠️ الطلب غير موجود.")
         return
@@ -3725,7 +3767,8 @@ async def handle_reject_reason_text(update: Update, context: ContextTypes.DEFAUL
     for key in ("reject_uid", "reject_index", "reject_reason", "step"):
         context.user_data.pop(key, None)
     await update.message.reply_text(f"✅ تم رفض الطلب `{email}`.",
-                                    reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending:0"))
+                                    reply_markup=kb_single(
+                                        "🔙 العودة", rejection_list_callback(actor_id)))
 
 
 async def handle_approval_totp(update: Update, context: ContextTypes.DEFAULT_TYPE):
