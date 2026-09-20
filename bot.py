@@ -1,11 +1,12 @@
 """
-Advanced Telegram Account Manager Bot - v5.1
+Advanced Telegram Account Manager Bot - v5.2
 - Owner-triggered IMAP verification
 - AUTO IMAP verification on submit (full 4-field accounts only)
 - 24-hour hold + re-verification before releasing points
 - Rejected-after-24h accounts stay in records
 - Admin panel: complete tier1/tier2 requests to tier3, earn bonus
-- Show TOTP code button for admin & owner (tier_2 requests)
+- Show TOTP code button for admin & owner (tier_2 requests) [FIXED]
+- Reject reason: "Needs phone number" added
 - Encryption at rest (Fernet)
 - Session & pending-purchase persistence
 - Config cache with TTL
@@ -254,6 +255,48 @@ LEAVE_HOLD_SECONDS = 24 * 60 * 60
 IMAP_RATE_LIMIT_SECONDS = 60
 AUTO_VERIFY_ENABLED = True
 ADMIN_TIER3_PRICE = 0.20
+
+# ==================== REJECT REASONS ====================
+REJECT_REASON_KEYS = ("email", "password", "totp", "app_pass", "phone", "other")
+
+REJECT_REASON_ICONS = {
+    "email": "📧",
+    "password": "🔑",
+    "totp": "🔐",
+    "app_pass": "🗝",
+    "phone": "📱",
+    "other": "📝",
+    "custom": "📝",
+    "unknown": "❌",
+}
+
+REJECT_REASON_LABELS = {
+    "email": "إيميل خطأ",
+    "password": "باسورد خطأ",
+    "totp": "رمز مصادقة خطأ",
+    "app_pass": "كلمة مرور تطبيق خطأ",
+    "phone": "يحتاج رقم هاتف",
+    "other": "خطأ آخر",
+    "custom": "سبب مخصص",
+    "unknown": "غير معروف",
+}
+
+REJECT_REASON_MESSAGES = {
+    "email": "❌ الإيميل غير صحيح أو غير مقبول.",
+    "password": "❌ كلمة المرور غير صحيحة.",
+    "totp": "❌ رمز المصادقة غير صحيح.",
+    "app_pass": "❌ كلمة مرور التطبيق غير صحيحة.",
+    "phone": "📱 هذا الحساب يحتاج رقم هاتف للتفعيل.",
+    "other": "❌ تم رفض طلبك لسبب آخر.",
+}
+
+REJECT_REASON_VIDEO_KEY = {
+    "email": "video_email",
+    "password": "video_password",
+    "totp": "video_totp",
+    "app_pass": "video_app_pass",
+    "phone": "video_phone",
+}
 
 
 # ==================== DATA HELPERS ====================
@@ -867,6 +910,84 @@ def imap_rate_mark(email: str):
     _IMAP_RATE[normalize_email(email)] = time.time()
 
 
+# ==================== TOTP CODE GENERATION ====================
+def generate_totp_code_info(totp_secret: str) -> Tuple[bool, str, str, int]:
+    """
+    Generate current TOTP code.
+    Returns: (success, code, error_message, seconds_remaining)
+    """
+    if not totp_secret:
+        return False, "", "لا يوجد رمز مصادقة لهذا الطلب.", 0
+    cleaned = totp_secret.replace(" ", "").upper()
+    if not validate_totp_secret(cleaned):
+        return False, "", "رمز المصادقة غير صالح (يجب أن يكون 32 حرفاً Base32).", 0
+    try:
+        totp = pyotp.TOTP(cleaned)
+        code = totp.now()
+        if not code or len(code) != 6 or not code.isdigit():
+            return False, "", "فشل توليد الكود.", 0
+        seconds_remaining = 30 - (int(time.time()) % 30)
+        if seconds_remaining <= 0:
+            seconds_remaining = 30
+        return True, code, "", seconds_remaining
+    except Exception as exc:
+        logger.exception("TOTP generation error")
+        return False, "", f"خطأ في توليد الكود: {exc}", 0
+
+
+async def send_totp_code_message(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    totp_secret: str,
+    email: str = "",
+    title: str = "🔢 كود المصادقة الحالي",
+    back_callback: str = "",
+    auto_refresh: bool = False,
+):
+    """Send TOTP code as a normal message (more reliable than alert)."""
+    ok, code, err, seconds = generate_totp_code_info(totp_secret)
+    if not ok:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"⚠️ {err}",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return None
+
+    email_line = f"\n📧 `{email}`\n" if email else "\n"
+    text = (
+        f"{title}\n"
+        f"{email_line}\n"
+        f"🔢 *الكود:* `{code}`\n\n"
+        f"⏰ صالح لمدة *{seconds}* ثانية\n\n"
+        f"_اضغط «🔄 كود جديد» للحصول على كود محدّث._"
+    )
+    buttons = []
+    if auto_refresh and back_callback:
+        buttons.append(("🔄 كود جديد", back_callback))
+    if back_callback:
+        buttons.append(("🔙 رجوع", back_callback))
+    reply_markup = kb_vertical(buttons) if buttons else None
+    try:
+        msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=reply_markup,
+        )
+        return msg
+    except Exception as exc:
+        logger.exception("Failed to send TOTP code message")
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"🔢 الكود: {code}\n⏰ {seconds} ثانية",
+            )
+        except Exception:
+            pass
+        return None
+
+
 # ==================== FORCED CHANNEL ====================
 def normalize_forced_channel(value: str) -> str:
     value = value.strip()
@@ -1037,9 +1158,7 @@ async def my_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += "❌ *مرفوضة:*\n"
         for idx, rej in enumerate(rejected, 1):
             reason = rej.get('reject_reason', 'غير معروف')
-            reason_map = {"email": "إيميل خطأ", "password": "باسورد خطأ", "totp": "رمز مصادقة خطأ",
-                          "app_pass": "كلمة مرور تطبيق خطأ", "custom": "سبب مخصص"}
-            reason_text = reason_map.get(reason, reason)
+            reason_text = REJECT_REASON_LABELS.get(reason, reason)
             msg += f"  {idx}. 📧 `{rej.get('email', '')}` ❌ - {reason_text}\n"
         msg += "\n"
     await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN,
@@ -1060,11 +1179,16 @@ async def view_member_rejected_emails(update: Update, context: ContextTypes.DEFA
         await query.edit_message_text("📭 لا توجد لديك إيميلات مرفوضة حاليًا.",
                                       reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
         return
-    reason_map = {"email": "الإيميل غير صحيح أو غير مقبول",
-                  "password": "كلمة المرور غير صحيحة",
-                  "totp": "رمز المصادقة غير صحيح",
-                  "app_pass": "كلمة مرور التطبيق غير صحيحة",
-                  "other": "سبب آخر", "custom": "سبب مخصص", "unknown": "غير معروف"}
+    reason_map = {
+        "email": "الإيميل غير صحيح أو غير مقبول",
+        "password": "كلمة المرور غير صحيحة",
+        "totp": "رمز المصادقة غير صحيح",
+        "app_pass": "كلمة مرور التطبيق غير صحيحة",
+        "phone": "يحتاج رقم هاتف",
+        "other": "سبب آخر",
+        "custom": "سبب مخصص",
+        "unknown": "غير معروف",
+    }
     lines = ["❌ <b>الإيميلات المرفوضة</b>", ""]
     for index, request in enumerate(rejected, 1):
         email = tg_html_escape(str(request.get("email", "غير معروف")))
@@ -2410,14 +2534,25 @@ async def admin_request_detail(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def admin_show_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """زر عرض كود TOTP الحالي للأدمن."""
+    """
+    زر عرض كود TOTP الحالي للأدمن.
+    [FIXED] يُرسل الكود كرسالة عادية (وليس alert) لضمان الوصول.
+    """
     query = update.callback_query
     if not is_admin(query.from_user.id):
         await query.answer("🚫 أدمن فقط.", show_alert=True)
         return
     parts = query.data.split(":")
-    uid = int(parts[1])
-    index = int(parts[2])
+    if len(parts) < 3:
+        await query.answer("⚠️ بيانات غير صحيحة.", show_alert=True)
+        return
+    try:
+        uid = int(parts[1])
+        index = int(parts[2])
+    except (ValueError, IndexError):
+        await query.answer("⚠️ بيانات غير صحيحة.", show_alert=True)
+        return
+
     user_data = get_user(uid)
     pending = user_data.get("pending_requests", [])
     if index >= len(pending):
@@ -2426,28 +2561,40 @@ async def admin_show_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     request = pending[index]
     email = request.get("email", "")
     totp_secret = request.get("totp", "")
+
     if not totp_secret:
         await query.answer("⚠️ لا يوجد رمز مصادقة لهذا الطلب.", show_alert=True)
         return
-    try:
-        cleaned = totp_secret.replace(" ", "").upper()
-        if not validate_totp_secret(cleaned):
-            await query.answer("⚠️ رمز المصادقة غير صالح.", show_alert=True)
-            return
-        code = pyotp.TOTP(cleaned).now()
-    except Exception as e:
-        logger.exception("TOTP code generation failed for %s", email)
-        await query.answer(f"⚠️ خطأ: {e}", show_alert=True)
-        return
-    # حساب الثواني المتبقية
-    try:
-        time_remaining = 30 - (int(time.time()) % 30)
-    except Exception:
-        time_remaining = 30
 
-    await query.answer(
-        f"🔢 الكود الحالي:\n\n{code}\n\n⏰ صالح لمدة {time_remaining} ثانية",
-        show_alert=True)
+    ok, code, err, seconds = generate_totp_code_info(totp_secret)
+    if not ok:
+        await query.answer(f"⚠️ {err}", show_alert=True)
+        return
+
+    # ✅ إرسال الكود كرسالة جديدة (وليس alert) لضمان الوصول
+    await query.answer("✅ تم إرسال الكود إليك.", show_alert=False)
+    try:
+        await send_totp_code_message(
+            context=context,
+            chat_id=query.from_user.id,
+            totp_secret=totp_secret,
+            email=email,
+            title="🔢 كود المصادقة الحالي (أدمن)",
+            back_callback=f"admin_show_code:{uid}:{index}",
+            auto_refresh=True,
+        )
+    except Exception as exc:
+        logger.exception("Failed to send TOTP code to admin")
+        try:
+            await query.edit_message_text(
+                f"🔢 *الكود الحالي:* `{code}`\n\n⏰ صالح لمدة *{seconds}* ثانية",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=kb_vertical([
+                    ("🔄 كود جديد", f"admin_show_code:{uid}:{index}"),
+                    ("🔙 تفاصيل الطلب", f"admin_request_detail:{uid}:{index}"),
+                ]))
+        except Exception:
+            await query.answer(f"🔢 الكود: {code} | ⏰ {seconds}s", show_alert=True)
 
 
 async def admin_complete_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2809,9 +2956,15 @@ async def videos_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
     config = load_config()
-    video_types = {"general": "📖 شرح عام للبوت", "email": "📹 فيديو إنشاء إيميل",
-                   "password": "📹 فيديو تغيير باسورد", "totp": "📹 فيديو إضافة 2FA",
-                   "app_pass": "📹 فيديو كلمة مرور التطبيق", "leave": "📹 فيديو المغادرة"}
+    video_types = {
+        "general": "📖 شرح عام للبوت",
+        "email": "📹 فيديو إنشاء إيميل",
+        "password": "📹 فيديو تغيير باسورد",
+        "totp": "📹 فيديو إضافة 2FA",
+        "app_pass": "📹 فيديو كلمة مرور التطبيق",
+        "leave": "📹 فيديو المغادرة",
+        "phone": "📱 فيديو يحتاج رقم هاتف",
+    }
     buttons = []
     for key, name in video_types.items():
         video_path = config.get(f"video_{key}")
@@ -3082,42 +3235,67 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def owner_show_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """زر عرض كود TOTP الحالي للمالك."""
+    """
+    زر عرض كود TOTP الحالي للمالك.
+    [FIXED] يُرسل الكود كرسالة عادية (وليس alert) لضمان الوصول.
+    """
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
     parts = query.data.split(":")
-    uid = int(parts[1])
-    index = int(parts[2])
+    if len(parts) < 3:
+        await query.answer("⚠️ بيانات غير صحيحة.", show_alert=True)
+        return
+    try:
+        uid = int(parts[1])
+        index = int(parts[2])
+    except (ValueError, IndexError):
+        await query.answer("⚠️ بيانات غير صحيحة.", show_alert=True)
+        return
+
     user_data = get_user(uid)
     pending = user_data.get("pending_requests", [])
     if index >= len(pending):
         await query.answer("⚠️ الطلب غير موجود.", show_alert=True)
         return
     request = pending[index]
+    email = request.get("email", "")
     totp_secret = request.get("totp", "")
+
     if not totp_secret:
         await query.answer("⚠️ لا يوجد رمز مصادقة لهذا الطلب.", show_alert=True)
         return
-    try:
-        cleaned = totp_secret.replace(" ", "").upper()
-        if not validate_totp_secret(cleaned):
-            await query.answer("⚠️ رمز المصادقة غير صالح.", show_alert=True)
-            return
-        code = pyotp.TOTP(cleaned).now()
-    except Exception as e:
-        logger.exception("TOTP code generation failed")
-        await query.answer(f"⚠️ خطأ: {e}", show_alert=True)
-        return
-    try:
-        time_remaining = 30 - (int(time.time()) % 30)
-    except Exception:
-        time_remaining = 30
 
-    await query.answer(
-        f"🔢 الكود الحالي:\n\n{code}\n\n⏰ صالح لمدة {time_remaining} ثانية",
-        show_alert=True)
+    ok, code, err, seconds = generate_totp_code_info(totp_secret)
+    if not ok:
+        await query.answer(f"⚠️ {err}", show_alert=True)
+        return
+
+    # ✅ إرسال الكود كرسالة جديدة (وليس alert)
+    await query.answer("✅ تم إرسال الكود إليك.", show_alert=False)
+    try:
+        await send_totp_code_message(
+            context=context,
+            chat_id=query.from_user.id,
+            totp_secret=totp_secret,
+            email=email,
+            title="🔢 كود المصادقة الحالي (مالك)",
+            back_callback=f"owner_show_code:{uid}:{index}",
+            auto_refresh=True,
+        )
+    except Exception as exc:
+        logger.exception("Failed to send TOTP code to owner")
+        try:
+            await query.edit_message_text(
+                f"🔢 *الكود الحالي:* `{code}`\n\n⏰ صالح لمدة *{seconds}* ثانية",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=kb_vertical([
+                    ("🔄 كود جديد", f"owner_show_code:{uid}:{index}"),
+                    ("🔙 تفاصيل الطلب", f"pending_detail:{uid}:{index}"),
+                ]))
+        except Exception:
+            await query.answer(f"🔢 الكود: {code} | ⏰ {seconds}s", show_alert=True)
 
 
 # ==================== AUTO VERIFY (OWNER-TRIGGERED) ====================
@@ -3435,12 +3613,15 @@ async def reject_request_reason(update: Update, context: ContextTypes.DEFAULT_TY
     display_email = tg_html_escape(email)
     context.user_data["reject_uid"] = uid
     context.user_data["reject_index"] = index
-    buttons = [("📧 إيميل خطأ", f"reject_reason:email:{uid}:{index}"),
-               ("🔑 باسورد خطأ", f"reject_reason:password:{uid}:{index}"),
-               ("🔐 رمز مصادقة خطأ", f"reject_reason:totp:{uid}:{index}"),
-               ("🗝 كلمة مرور تطبيق خطأ", f"reject_reason:app_pass:{uid}:{index}"),
-               ("📝 خطأ آخر (اكتب السبب)", f"reject_reason:other:{uid}:{index}"),
-               ("🔙 التفاصيل", f"pending_detail:{uid}:{index}")]
+    buttons = [
+        ("📧 إيميل خطأ", f"reject_reason:email:{uid}:{index}"),
+        ("🔑 باسورد خطأ", f"reject_reason:password:{uid}:{index}"),
+        ("🔐 رمز مصادقة خطأ", f"reject_reason:totp:{uid}:{index}"),
+        ("🗝 كلمة مرور تطبيق خطأ", f"reject_reason:app_pass:{uid}:{index}"),
+        ("📱 يحتاج رقم هاتف", f"reject_reason:phone:{uid}:{index}"),
+        ("📝 خطأ آخر (اكتب السبب)", f"reject_reason:other:{uid}:{index}"),
+        ("🔙 التفاصيل", f"pending_detail:{uid}:{index}"),
+    ]
     await query.edit_message_text(
         f"❌ <b>رفض الطلب</b>\n\n📧 <code>{display_email}</code>\n\nاختر سبب الرفض:",
         parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
@@ -3464,29 +3645,9 @@ async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TY
     request = pending[index]
     email = request.get("email", "")
     display_email = tg_html_escape(email)
-    pending.pop(index)
-    move_request_to_rejected(user_data, request, reason_type)
-    user_data["pending_requests"] = pending
-    save_user(uid, user_data)
-    reason_messages = {"email": "❌ الإيميل غير صحيح أو غير مقبول.",
-                       "password": "❌ كلمة المرور غير صحيحة.",
-                       "totp": "❌ رمز المصادقة غير صحيح.",
-                       "app_pass": "❌ كلمة مرور التطبيق غير صحيحة.",
-                       "other": "❌ تم رفض طلبك لسبب آخر."}
-    reason = reason_messages.get(reason_type, "❌ تم رفض طلبك.")
-    config = load_config()
-    if reason_type in ["email", "password", "totp", "app_pass"]:
-        video_key = {"email": "video_email", "password": "video_password",
-                     "totp": "video_totp", "app_pass": "video_app_pass"}.get(reason_type)
-        video_path = config.get(video_key)
-        if video_path and Path(video_path).exists():
-            try:
-                await context.bot.send_video(chat_id=uid, video=open(video_path, "rb"),
-                                             caption=f"{reason}\n\n📹 *شاهد الفيديو:*",
-                                             parse_mode=ParseMode.MARKDOWN, supports_streaming=True)
-            except Exception:
-                pass
-    else:
+
+    # For "other" we ask for custom text before removing
+    if reason_type == "other":
         context.user_data["reject_uid"] = uid
         context.user_data["reject_index"] = index
         context.user_data["reject_reason"] = "other"
@@ -3496,6 +3657,31 @@ async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TY
             reply_markup=kb_single("🔙 إلغاء", f"pending_detail:{uid}:{index}"))
         context.user_data["step"] = "reject_reason_text"
         return
+
+    # All other reasons (email, password, totp, app_pass, phone): reject immediately
+    pending.pop(index)
+    move_request_to_rejected(user_data, request, reason_type)
+    user_data["pending_requests"] = pending
+    save_user(uid, user_data)
+
+    reason = REJECT_REASON_MESSAGES.get(reason_type, "❌ تم رفض طلبك.")
+
+    # Send rejection video if available
+    config = load_config()
+    video_key = REJECT_REASON_VIDEO_KEY.get(reason_type)
+    video_path = config.get(video_key) if video_key else None
+    if video_path and Path(video_path).exists():
+        try:
+            await context.bot.send_video(
+                chat_id=uid,
+                video=open(video_path, "rb"),
+                caption=f"{reason}\n\n📹 *شاهد الفيديو:*",
+                parse_mode=ParseMode.MARKDOWN,
+                supports_streaming=True,
+            )
+        except Exception:
+            logger.exception("Failed to send rejection video")
+
     try:
         await context.bot.send_message(
             chat_id=uid,
@@ -3503,8 +3689,10 @@ async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TY
             parse_mode=ParseMode.MARKDOWN)
     except Exception:
         pass
+
     await query.edit_message_text(
-        f"✅ تم رفض الطلب <code>{display_email}</code>.",
+        f"✅ تم رفض الطلب <code>{display_email}</code>.\n"
+        f"📝 السبب: {REJECT_REASON_LABELS.get(reason_type, reason_type)}",
         parse_mode=ParseMode.HTML,
         reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending:0"))
 
@@ -3871,8 +4059,7 @@ async def view_rejected_requests(update: Update, context: ContextTypes.DEFAULT_T
 
     def label(rej):
         reason = rej.get('reject_reason', 'غير معروف')
-        reason_map = {"email": "📧", "password": "🔑", "totp": "🔐", "app_pass": "🗝", "other": "📝"}
-        icon = reason_map.get(reason, "❌")
+        icon = REJECT_REASON_ICONS.get(reason, "❌")
         user_name = rej.get("user_name", "غير معروف")
         user_username = rej.get("user_username", "لا يوجد")
         display_name = f"{user_name} (@{user_username})" if user_username != "لا يوجد" else user_name
@@ -3903,9 +4090,15 @@ async def rejected_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     request = rejected_list[index]
     reason = request.get('reject_reason', 'غير معروف')
-    reason_map = {"email": "❌ الإيميل غير صحيح.", "password": "❌ كلمة المرور غير صحيحة.",
-                  "totp": "❌ رمز المصادقة غير صحيح.", "app_pass": "❌ كلمة مرور التطبيق غير صحيحة.",
-                  "other": "❌ سبب آخر.", "custom": "❌ سبب مخصص."}
+    reason_map = {
+        "email": "❌ الإيميل غير صحيح.",
+        "password": "❌ كلمة المرور غير صحيحة.",
+        "totp": "❌ رمز المصادقة غير صحيح.",
+        "app_pass": "❌ كلمة مرور التطبيق غير صحيحة.",
+        "phone": "📱 هذا الحساب يحتاج رقم هاتف.",
+        "other": "❌ سبب آخر.",
+        "custom": "❌ سبب مخصص.",
+    }
     reason_text = request.get("reject_reason_text") or reason_map.get(reason, reason)
     tier_icon = "🟢" if request.get("has_app_pass") else "🟡" if request.get("has_totp") else "🔵"
     tier_text = "مكتمل" if request.get("has_app_pass") else "مع رمز المصادقة" if request.get("has_totp") else "باسورد فقط"
@@ -4635,7 +4828,8 @@ async def tutorials(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = []
     for key, name in [("general", "📖 شرح عام"), ("email", "📹 إنشاء إيميل"),
                       ("password", "📹 تغيير باسورد"), ("totp", "📹 إضافة 2FA"),
-                      ("app_pass", "📹 كلمة مرور التطبيق"), ("leave", "📹 فيديو المغادرة")]:
+                      ("app_pass", "📹 كلمة مرور التطبيق"), ("leave", "📹 فيديو المغادرة"),
+                      ("phone", "📱 يحتاج رقم هاتف")]:
         if config.get(f"video_{key}") and Path(config.get(f"video_{key}", "")).exists():
             buttons.append((name, f"play_video:{key}"))
     buttons.append(("🔙 القائمة الرئيسية", "main_menu"))
@@ -4651,7 +4845,8 @@ async def play_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_config()
     path = config.get(f"video_{vtype}")
     video_names = {"general": "شرح عام", "email": "إنشاء إيميل", "password": "تغيير باسورد",
-                   "totp": "إضافة 2FA", "app_pass": "كلمة مرور التطبيق", "leave": "المغادرة"}
+                   "totp": "إضافة 2FA", "app_pass": "كلمة مرور التطبيق", "leave": "المغادرة",
+                   "phone": "يحتاج رقم هاتف"}
     if path and Path(path).exists():
         try:
             await context.bot.send_video(chat_id=query.from_user.id, video=open(path, "rb"),
