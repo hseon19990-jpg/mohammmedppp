@@ -3230,6 +3230,12 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ✅ زر عرض الكود إذا كان الطلب يحتوي على TOTP
     if request.get("has_totp", False) and request.get("totp"):
         buttons.append(("🔢 عرض الكود", f"owner_show_code:{uid}:{index}"))
+    if not request.get("has_totp", False) or not request.get("has_app_pass", False):
+        buttons.append(("📝 إكمال المعلومات قبل القبول",
+                        f"complete_request_owner:{uid}:{index}"))
+        if has_leave_video:
+            buttons.append(("📝 إكمال ثم قبول مع فيديو المغادرة",
+                            f"complete_request_owner_with_leave:{uid}:{index}"))
     buttons.append(("✅ قبول فوري", f"approve_request:{uid}:{index}"))
     if has_leave_video:
         buttons.append(("📹 قبول مع فيديو المغادرة", f"approve_with_leave:{uid}:{index}"))
@@ -3526,6 +3532,66 @@ def rejection_list_callback(actor_id: int) -> str:
     return "view_pending:0" if actor_id == OWNER_ID else "admin_requests:0"
 
 
+async def start_owner_completion(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                 uid: int, index: int, with_leave: bool = False):
+    """ابدأ إكمال الحقول الناقصة فقط عند طلب المالك ذلك صراحةً."""
+    query = update.callback_query
+    user_data = get_user(uid)
+    pending = user_data.get("pending_requests", [])
+    if index >= len(pending):
+        await query.edit_message_text(
+            "⚠️ الطلب غير موجود.",
+            reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending:0"))
+        return
+
+    approved_request = pending[index]
+    display_email = tg_html_escape(approved_request.get("email", ""))
+    context.user_data["approval_uid"] = uid
+    context.user_data["approval_index"] = index
+    context.user_data["approval_data"] = approved_request
+    context.user_data["approval_with_leave"] = with_leave
+
+    if not approved_request.get("has_totp", False):
+        context.user_data["approval_step"] = "waiting_totp"
+        await query.edit_message_text(
+            f"🔐 <b>إكمال الطلب</b>\n\n📧 <code>{display_email}</code>\n\n"
+            f"📌 أرسل رمز المصادقة (32 حرفاً):\n\n<i>أو 'تخطي'</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_single("🔙 إلغاء", f"pending_detail:{uid}:{index}"))
+        return
+
+    if not approved_request.get("has_app_pass", False):
+        context.user_data["approval_step"] = "waiting_app_pass"
+        await query.edit_message_text(
+            f"🗝 <b>إكمال الطلب</b>\n\n📧 <code>{display_email}</code>\n\n"
+            f"📌 أرسل كلمة مرور التطبيق (16 حرفاً):\n\n<i>أو 'تخطي'</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_single("🔙 إلغاء", f"pending_detail:{uid}:{index}"))
+        return
+
+    await complete_approval(update, context, uid, index, approved_request, with_leave)
+
+
+async def complete_request_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    parts = query.data.split(":")
+    await start_owner_completion(
+        update, context, int(parts[1]), int(parts[2]), with_leave=False)
+
+
+async def complete_request_owner_with_leave(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    parts = query.data.split(":")
+    await start_owner_completion(
+        update, context, int(parts[1]), int(parts[2]), with_leave=True)
+
+
 async def approve_request_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
@@ -3542,30 +3608,6 @@ async def approve_request_owner(update: Update, context: ContextTypes.DEFAULT_TY
         return
     approved_request = pending[index]
     display_email = tg_html_escape(approved_request.get("email", ""))
-    if not approved_request.get("has_totp", False):
-        context.user_data["approval_uid"] = uid
-        context.user_data["approval_index"] = index
-        context.user_data["approval_step"] = "waiting_totp"
-        context.user_data["approval_data"] = approved_request
-        context.user_data["approval_with_leave"] = False
-        await query.edit_message_text(
-            f"🔐 <b>طلب رمز المصادقة</b>\n\n📧 <code>{display_email}</code>\n\n"
-            f"📌 أرسل رمز المصادقة (32 حرفاً):\n\n<i>أو 'تخطي'</i>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=kb_single("🔙 إلغاء", f"pending_detail:{uid}:{index}"))
-        return
-    if not approved_request.get("has_app_pass", False):
-        context.user_data["approval_uid"] = uid
-        context.user_data["approval_index"] = index
-        context.user_data["approval_step"] = "waiting_app_pass"
-        context.user_data["approval_data"] = approved_request
-        context.user_data["approval_with_leave"] = False
-        await query.edit_message_text(
-            f"🗝 <b>طلب كلمة مرور التطبيق</b>\n\n📧 <code>{display_email}</code>\n\n"
-            f"📌 أرسل كلمة مرور التطبيق (16 حرفاً):\n\n<i>أو 'تخطي'</i>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=kb_single("🔙 إلغاء", f"pending_detail:{uid}:{index}"))
-        return
     await complete_approval(update, context, uid, index, approved_request, False)
     await query.edit_message_text(
         f"✅ تم قبول الحساب <code>{display_email}</code> بنجاح!",
@@ -3589,30 +3631,6 @@ async def approve_with_leave(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     approved_request = pending[index]
     display_email = tg_html_escape(approved_request.get("email", ""))
-    if not approved_request.get("has_totp", False):
-        context.user_data["approval_uid"] = uid
-        context.user_data["approval_index"] = index
-        context.user_data["approval_step"] = "waiting_totp"
-        context.user_data["approval_data"] = approved_request
-        context.user_data["approval_with_leave"] = True
-        await query.edit_message_text(
-            f"🔐 <b>طلب رمز المصادقة</b>\n\n📧 <code>{display_email}</code>\n\n"
-            f"📌 أرسل رمز المصادقة (32 حرفاً):\n\n<i>أو 'تخطي'</i>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=kb_single("🔙 إلغاء", f"pending_detail:{uid}:{index}"))
-        return
-    if not approved_request.get("has_app_pass", False):
-        context.user_data["approval_uid"] = uid
-        context.user_data["approval_index"] = index
-        context.user_data["approval_step"] = "waiting_app_pass"
-        context.user_data["approval_data"] = approved_request
-        context.user_data["approval_with_leave"] = True
-        await query.edit_message_text(
-            f"🗝 <b>طلب كلمة مرور التطبيق</b>\n\n📧 <code>{display_email}</code>\n\n"
-            f"📌 أرسل كلمة مرور التطبيق (16 حرفاً):\n\n<i>أو 'تخطي'</i>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=kb_single("🔙 إلغاء", f"pending_detail:{uid}:{index}"))
-        return
     await complete_approval(update, context, uid, index, approved_request, True)
     await query.edit_message_text(
         f"✅ تم قبول الحساب <code>{display_email}</code> مع فيديو المغادرة!\n"
@@ -5394,6 +5412,10 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await view_rejected_requests(update, context)
     elif data.startswith("pending_detail:"):
         await pending_detail(update, context)
+    elif data.startswith("complete_request_owner_with_leave:"):
+        await complete_request_owner_with_leave(update, context)
+    elif data.startswith("complete_request_owner:"):
+        await complete_request_owner(update, context)
     elif data.startswith("auto_verify:"):
         await auto_verify_account(update, context)
     elif data.startswith("approved_detail:"):
