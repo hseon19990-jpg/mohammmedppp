@@ -260,6 +260,7 @@ BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 
 PAGE_SIZE = 8
 LEAVE_HOLD_SECONDS = 24 * 60 * 60
+LEAVE_HOLD_48H_SECONDS = 48 * 60 * 60
 IMAP_RATE_LIMIT_SECONDS = 60
 AUTO_VERIFY_ENABLED = True
 ADMIN_TIER3_PRICE = 0.20
@@ -2035,7 +2036,8 @@ async def restore_leave_checks(application: Application):
                 approval_time = parse_iso_datetime(account.get("approval_time"))
                 if approval_time is None:
                     continue
-                release_at = approval_time + timedelta(seconds=LEAVE_HOLD_SECONDS)
+                hold_seconds = int(account.get("hold_seconds", LEAVE_HOLD_SECONDS))
+                release_at = approval_time + timedelta(seconds=hold_seconds)
                 account["release_at"] = release_at.isoformat()
                 changed = True
             email = account.get("email", "")
@@ -2715,7 +2717,7 @@ async def handle_admin_totp_input(update: Update, context: ContextTypes.DEFAULT_
             reply_markup=kb_single("🔙 إلغاء",
                                    f"admin_request_detail:{uid}:{index}"))
     else:
-        await admin_verify_and_store(update, context, uid, index)
+        await prompt_admin_acceptance_choice(update, context, uid, index)
 
 
 async def handle_admin_app_pass_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2752,17 +2754,86 @@ async def handle_admin_app_pass_input(update: Update, context: ContextTypes.DEFA
         await update.message.delete()
     except Exception:
         pass
-    await admin_verify_and_store(update, context, uid, index)
+    await prompt_admin_acceptance_choice(update, context, uid, index)
 
 
-async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_TYPE,
-                                  uid: int, index: int):
-    """بعد اكتمال 4 حقول من قبل الأدمن: تحقق IMAP ثم اعتماد الطلب مع تعليق 24 ساعة."""
-    admin_id = update.effective_user.id
+async def prompt_admin_acceptance_choice(update: Update,
+                                          context: ContextTypes.DEFAULT_TYPE,
+                                          uid: int, index: int):
+    """بعد اكتمال البيانات، دع الأدمن يختار مدة التعليق وطريقة القبول."""
     user_data = get_user(uid)
     pending = user_data.get("pending_requests", [])
     if index >= len(pending):
-        await update.message.reply_text("⚠️ الطلب غير موجود.")
+        await update.effective_message.reply_text("⚠️ الطلب غير موجود.")
+        return
+
+    request = pending[index]
+    if not all(request.get(field) for field in ("email", "password", "totp", "app_pass")):
+        await update.effective_message.reply_text("⚠️ الطلب غير مكتمل.")
+        return
+
+    context.user_data["admin_completing_uid"] = uid
+    context.user_data["admin_completing_index"] = index
+    context.user_data["admin_approval_step"] = "waiting_acceptance_choice"
+    await update.effective_message.reply_text(
+        f"✅ تم استلام جميع المعلومات للحساب:\n"
+        f"📧 `{request.get('email', '')}`\n\n"
+        f"اختر طريقة القبول:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                "✅ قبول تلقائي — فحص الآن / تحرير بعد 24 ساعة",
+                callback_data=f"admin_accept_auto:{uid}:{index}")],
+            [InlineKeyboardButton(
+                "📹 قبول مع فيديو المغادرة — فحص الآن / تحرير بعد 48 ساعة",
+                callback_data=f"admin_accept_leave:{uid}:{index}")],
+            [InlineKeyboardButton(
+                "❌ إلغاء",
+                callback_data=f"admin_completion_cancel:{uid}:{index}")],
+        ]))
+
+
+async def admin_completion_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not is_admin(query.from_user.id):
+        await query.answer("🚫 أدمن فقط.", show_alert=True)
+        return
+    parts = query.data.split(":")
+    uid = int(parts[1])
+    index = int(parts[2])
+    for key in ("admin_completing_uid", "admin_completing_index", "admin_approval_step"):
+        context.user_data.pop(key, None)
+    await admin_request_detail(update, context)
+
+
+async def admin_accept_completed(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not is_admin(query.from_user.id):
+        await query.answer("🚫 أدمن فقط.", show_alert=True)
+        return
+    parts = query.data.split(":")
+    uid = int(parts[1])
+    index = int(parts[2])
+    leave_video = query.data.startswith("admin_accept_leave:")
+    hold_seconds = LEAVE_HOLD_48H_SECONDS if leave_video else LEAVE_HOLD_SECONDS
+    await admin_verify_and_store(
+        update, context, uid, index,
+        hold_seconds=hold_seconds,
+        send_leave_video=leave_video,
+    )
+
+
+async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                  uid: int, index: int,
+                                  hold_seconds: int = LEAVE_HOLD_SECONDS,
+                                  send_leave_video: bool = False):
+    """تحقق IMAP فوراً ثم اعتمد الطلب بمدة التعليق التي اختارها الأدمن."""
+    admin_id = update.effective_user.id
+    reply_target = update.effective_message
+    user_data = get_user(uid)
+    pending = user_data.get("pending_requests", [])
+    if index >= len(pending):
+        await reply_target.reply_text("⚠️ الطلب غير موجود.")
         return
     request = pending[index]
     email = request.get("email", "")
@@ -2771,18 +2842,18 @@ async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_T
     app_pass = request.get("app_pass", "")
 
     if not email or not password or not totp or not app_pass:
-        await update.message.reply_text("⚠️ الطلب غير مكتمل.")
+        await reply_target.reply_text("⚠️ الطلب غير مكتمل.")
         return
 
     allowed, wait = imap_rate_ok(email)
     if not allowed:
-        await update.message.reply_text(
+        await reply_target.reply_text(
             f"⏳ انتظر {wait} ثانية قبل إعادة المحاولة لنفس الإيميل.",
             reply_markup=kb_single("🔙 الطلبات", "admin_requests:0"))
         return
     imap_rate_mark(email)
 
-    progress_msg = await update.message.reply_text(
+    progress_msg = await reply_target.reply_text(
         f"🔍 *جاري التحقق التلقائي من الحساب...*\n\n"
         f"📧 `{email}`\n\n"
         f"_يتم الاتصال بخادم البريد..._",
@@ -2796,7 +2867,7 @@ async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_T
             await progress_msg.delete()
         except Exception:
             pass
-        await update.message.reply_text(
+        await reply_target.reply_text(
             f"❌ *فشل التحقق التلقائي*\n\n"
             f"📧 `{email}`\n\n"
             f"📝 *السبب:* {tg_html_escape(verify_result['message'])}\n\n"
@@ -2834,7 +2905,9 @@ async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_T
         "completed_at": approval_time.isoformat(),
         "timestamp": approval_time.isoformat(),
         "approval_time": approval_time.isoformat(),
-        "release_at": (approval_time + timedelta(seconds=LEAVE_HOLD_SECONDS)).isoformat(),
+        "release_at": (approval_time + timedelta(seconds=hold_seconds)).isoformat(),
+        "hold_seconds": hold_seconds,
+        "acceptance_mode": "leave_video" if send_leave_video else "automatic",
         "extracted": False,
         "has_totp": True,
         "has_app_pass": True,
@@ -2865,8 +2938,9 @@ async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_T
     user_data["total_approved_emails"] = int(user_data.get("total_approved_emails", 0)) + 1
     pending.pop(index)
     user_data["pending_requests"] = pending
+    hold_hours = hold_seconds // 3600
     add_transaction(user_data, "hold", original_amount,
-                    f"أكمله الأدمن {admin_id} - معلق 24 ساعة", email)
+                    f"أكمله الأدمن {admin_id} - معلق {hold_hours} ساعة", email)
     save_user(uid, user_data)
 
     if admin_bonus > 0 and admin_id != OWNER_ID:
@@ -2906,7 +2980,7 @@ async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_T
                   f"🆔 المستخدم: `{uid}`\n"
                   f"📧 `{email}`\n"
                   f"💰 مكافأة الأدمن: `${admin_bonus:.2f}`\n"
-                  f"⏰ سيُعاد فحصه بعد 24 ساعة."),
+                  f"⏰ سيُعاد فحصه بعد {hold_hours} ساعة."),
             parse_mode=ParseMode.MARKDOWN)
     except Exception:
         pass
@@ -2916,7 +2990,8 @@ async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_T
     except Exception:
         pass
 
-    await send_leave_video_to_user(context, uid, email)
+    if send_leave_video:
+        await send_leave_video_to_user(context, uid, email)
 
     try:
         await context.bot.send_message(
@@ -2924,8 +2999,8 @@ async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_T
             text=(f"✅ *تم التحقق من الحساب بنجاح!*\n\n"
                   f"📧 `{email}`\n"
                   f"💰 تم إضافة *${original_amount:.2f}* إلى رصيدك المعلق\n\n"
-                  f"⏰ سيتم فحص الحساب بعد *24 ساعة* ويتم تسليمك النقاط.\n"
-                  f"⚠️ *لا تنسى المغادرة.*"),
+                  f"⏰ سيتم فحص الحساب بعد *{hold_hours} ساعة* ويتم تسليمك النقاط."
+                  + (f"\n⚠️ *لا تنسى المغادرة.*" if send_leave_video else "")),
             parse_mode=ParseMode.MARKDOWN)
     except Exception:
         pass
@@ -2933,10 +3008,10 @@ async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_T
     for k in ("admin_completing_uid", "admin_completing_index", "admin_approval_step"):
         context.user_data.pop(k, None)
 
-    await update.message.reply_text(
+    await reply_target.reply_text(
         f"✅ *تم اعتماد الحساب!*\n\n"
         f"📧 `{email}`\n"
-        f"💰 للعضو: `${original_amount:.2f}` (معلق 24 ساعة)\n"
+        f"💰 للعضو: `${original_amount:.2f}` (معلق {hold_hours} ساعة)\n"
         f"💵 مكافأتك: `${admin_bonus:.2f}`",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=kb_single("🔙 الطلبات", "admin_requests:0"))
@@ -5055,6 +5130,12 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_admin_totp_input(update, context); return
     if admin_approval_step == "waiting_app_pass":
         await handle_admin_app_pass_input(update, context); return
+    if admin_approval_step == "waiting_acceptance_choice":
+        await prompt_admin_acceptance_choice(
+            update, context,
+            context.user_data.get("admin_completing_uid"),
+            context.user_data.get("admin_completing_index"))
+        return
 
     if context.user_data.get("step") == "add_admin_input":
         await handle_add_admin_input(update, context); return
@@ -5409,6 +5490,10 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await admin_request_detail(update, context)
     elif data.startswith("admin_complete_start:"):
         await admin_complete_start(update, context)
+    elif data.startswith("admin_accept_auto:") or data.startswith("admin_accept_leave:"):
+        await admin_accept_completed(update, context)
+    elif data.startswith("admin_completion_cancel:"):
+        await admin_completion_cancel(update, context)
     elif data.startswith("admin_show_code:"):
         await admin_show_code(update, context)
     elif data == "check_member":
