@@ -2435,15 +2435,13 @@ async def admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
 
 
-# ==================== ADMIN REQUESTS (TIER 1 & 2 ONLY) ====================
+# ==================== ADMIN REQUESTS ====================
 def _collect_admin_requests() -> List[dict]:
     users = load_json(USERS_DB)
     items = []
     for uid, encrypted_data in users.items():
         user_data = decrypt_user_data(encrypted_data)
         for idx, req in enumerate(user_data.get("pending_requests", [])):
-            if req.get("has_app_pass", False):
-                continue
             copy = dict(req)
             copy["user_id"] = uid
             copy["index"] = idx
@@ -2462,12 +2460,17 @@ async def admin_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
         page = 0
     items = _collect_admin_requests()
     if not items:
-        await query.edit_message_text("📭 لا توجد طلبات تحتاج إكمالاً حالياً.",
+        await query.edit_message_text("📭 لا توجد طلبات معلقة حالياً.",
                                       reply_markup=kb_single("🔙 إعدادات الأدمن", "admin_settings"))
         return
 
     def label(req):
-        tier_icon = "🟡" if req.get("has_totp") else "🔵"
+        if req.get("has_app_pass"):
+            tier_icon = "🟢"
+        elif req.get("has_totp"):
+            tier_icon = "🟡"
+        else:
+            tier_icon = "🔵"
         amount = float(req.get("amount", 0.0))
         email = req.get("email", "")
         email_display = email[:18] + "..." if len(email) > 18 else email
@@ -2477,12 +2480,9 @@ async def admin_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = paginate_buttons(items, page, "admin_requests", label)
     buttons.append(("🔙 إعدادات الأدمن", "admin_settings"))
     await query.edit_message_text(
-        f"📋 *الطلبات المتاحة لإكمالها ({len(items)})*\n"
-        f"🔵 إيميل + باسورد — $0.10\n"
-        f"🟡 إيميل + باسورد + 2FA — $0.15\n\n"
-        f"💰 عند الإكمال إلى $0.20:\n"
-        f"• يحصل العضو على المبلغ الأصلي\n"
-        f"• تحصل على الفرق كمكافأة\n\n"
+        f"📋 *الطلبات المعلقة ({len(items)})*\n"
+        f"🟢 مكتمل | 🟡 مع 2FA | 🔵 باسورد فقط\n\n"
+        f"يمكنك إكمال الطلبات غير المكتملة أو رفض أي طلب تريد رفضه.\n\n"
         f"اختر الطلب:",
         parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
 
@@ -3502,16 +3502,13 @@ async def complete_approval(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
 # ==================== APPROVE / REJECT ====================
 def can_reject_pending_request(actor_id: int, user_data: dict, index: int) -> bool:
-    """المالك يستطيع رفض أي طلب، والأدمن يرفض فقط الطلبات الظاهرة في قائمته."""
+    """المالك والأدمن يستطيعان رفض أي طلب معلق ظاهر في قائمتهما."""
     if actor_id == OWNER_ID:
         return True
     if not is_admin(actor_id):
         return False
     pending = user_data.get("pending_requests", [])
-    return (
-        0 <= index < len(pending)
-        and not pending[index].get("has_app_pass", False)
-    )
+    return 0 <= index < len(pending)
 
 
 def rejection_list_callback(actor_id: int) -> str:
