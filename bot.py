@@ -1,10 +1,11 @@
 """
-Advanced Telegram Account Manager Bot - v5
+Advanced Telegram Account Manager Bot - v5.1
 - Owner-triggered IMAP verification
 - AUTO IMAP verification on submit (full 4-field accounts only)
 - 24-hour hold + re-verification before releasing points
 - Rejected-after-24h accounts stay in records
 - Admin panel: complete tier1/tier2 requests to tier3, earn bonus
+- Show TOTP code button for admin & owner (tier_2 requests)
 - Encryption at rest (Fernet)
 - Session & pending-purchase persistence
 - Config cache with TTL
@@ -252,7 +253,7 @@ PAGE_SIZE = 8
 LEAVE_HOLD_SECONDS = 24 * 60 * 60
 IMAP_RATE_LIMIT_SECONDS = 60
 AUTO_VERIFY_ENABLED = True
-ADMIN_TIER3_PRICE = 0.20  # السعر الكامل
+ADMIN_TIER3_PRICE = 0.20
 
 
 # ==================== DATA HELPERS ====================
@@ -1557,7 +1558,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
             return
 
-        # AUTO_VERIFY disabled fallback: pending manual
         user = update.effective_user
         user_full_name = user.full_name or "غير معروف"
         user_username = user.username or "لا يوجد"
@@ -2398,12 +2398,56 @@ async def admin_request_detail(update: Update, context: ContextTypes.DEFAULT_TYP
     msg += f"💵 *مكافأتك عند الإكمال:* ${admin_bonus:.2f}\n"
 
     buttons = []
+    # ✅ زر عرض الكود إذا كان الطلب يحتوي على TOTP
+    if has_totp and request.get("totp"):
+        buttons.append(("🔢 عرض الكود", f"admin_show_code:{uid}:{index}"))
     if not has_totp and not has_app_pass:
         buttons.append(("📝 إكمال الطلب (إضافة 2FA + App Pass)", f"admin_complete_start:{uid}:{index}"))
     elif has_totp and not has_app_pass:
         buttons.append(("📝 إكمال الطلب (إضافة App Pass)", f"admin_complete_start:{uid}:{index}"))
     buttons.append(("🔙 الطلبات", "admin_requests:0"))
     await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
+
+
+async def admin_show_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """زر عرض كود TOTP الحالي للأدمن."""
+    query = update.callback_query
+    if not is_admin(query.from_user.id):
+        await query.answer("🚫 أدمن فقط.", show_alert=True)
+        return
+    parts = query.data.split(":")
+    uid = int(parts[1])
+    index = int(parts[2])
+    user_data = get_user(uid)
+    pending = user_data.get("pending_requests", [])
+    if index >= len(pending):
+        await query.answer("⚠️ الطلب غير موجود.", show_alert=True)
+        return
+    request = pending[index]
+    email = request.get("email", "")
+    totp_secret = request.get("totp", "")
+    if not totp_secret:
+        await query.answer("⚠️ لا يوجد رمز مصادقة لهذا الطلب.", show_alert=True)
+        return
+    try:
+        cleaned = totp_secret.replace(" ", "").upper()
+        if not validate_totp_secret(cleaned):
+            await query.answer("⚠️ رمز المصادقة غير صالح.", show_alert=True)
+            return
+        code = pyotp.TOTP(cleaned).now()
+    except Exception as e:
+        logger.exception("TOTP code generation failed for %s", email)
+        await query.answer(f"⚠️ خطأ: {e}", show_alert=True)
+        return
+    # حساب الثواني المتبقية
+    try:
+        time_remaining = 30 - (int(time.time()) % 30)
+    except Exception:
+        time_remaining = 30
+
+    await query.answer(
+        f"🔢 الكود الحالي:\n\n{code}\n\n⏰ صالح لمدة {time_remaining} ثانية",
+        show_alert=True)
 
 
 async def admin_complete_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2588,14 +2632,12 @@ async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_T
                                    f"admin_request_detail:{uid}:{index}"))
         return
 
-    # ✅ نجح التحقق
     original_amount = float(request.get("amount", 0.0))
     full_price = ADMIN_TIER3_PRICE
     admin_bonus = round(full_price - original_amount, 2)
     if admin_bonus < 0:
         admin_bonus = 0.0
 
-    # سجل بيانات الأدمن
     try:
         admin_user = update.effective_user
         admin_name_str = admin_user.full_name or "غير معروف"
@@ -2639,7 +2681,6 @@ async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_T
         },
     }
 
-    # إزالة الطلب من pending وإضافة إلى approved_accounts
     user_data.setdefault("approved_accounts", []).append(account_record)
     user_data["pending_balance"] = clamp_money(
         float(user_data.get("pending_balance", 0.0)) - original_amount)
@@ -2654,7 +2695,6 @@ async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_T
                     f"أكمله الأدمن {admin_id} - معلق 24 ساعة", email)
     save_user(uid, user_data)
 
-    # مكافأة الأدمن
     if admin_bonus > 0 and admin_id != OWNER_ID:
         admin_data = get_user(admin_id)
         admin_data["balance"] = clamp_money(
@@ -2672,10 +2712,8 @@ async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_T
         except Exception:
             pass
 
-    # جدولة الفحص الثاني
     await schedule_leave_check(context, uid, email, account_record["release_at"])
 
-    # إشعار المُحيل
     referred_by = user_data.get("referred_by")
     if referred_by:
         try:
@@ -2686,7 +2724,6 @@ async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_T
         except Exception:
             pass
 
-    # إشعار المالك
     try:
         await context.bot.send_message(
             chat_id=OWNER_ID,
@@ -2705,10 +2742,8 @@ async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_T
     except Exception:
         pass
 
-    # فيديو المغادرة للعضو
     await send_leave_video_to_user(context, uid, email)
 
-    # إعلام العضو
     try:
         await context.bot.send_message(
             chat_id=uid,
@@ -2721,7 +2756,6 @@ async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_T
     except Exception:
         pass
 
-    # تنظيف
     for k in ("admin_completing_uid", "admin_completing_index", "admin_approval_step"):
         context.user_data.pop(k, None)
 
@@ -3027,7 +3061,11 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     config = load_config()
     has_leave_video = config.get("video_leave") and Path(config.get("video_leave", "")).exists()
-    buttons = [("✅ قبول فوري", f"approve_request:{uid}:{index}")]
+    buttons = []
+    # ✅ زر عرض الكود إذا كان الطلب يحتوي على TOTP
+    if request.get("has_totp", False) and request.get("totp"):
+        buttons.append(("🔢 عرض الكود", f"owner_show_code:{uid}:{index}"))
+    buttons.append(("✅ قبول فوري", f"approve_request:{uid}:{index}"))
     if has_leave_video:
         buttons.append(("📹 قبول مع فيديو المغادرة", f"approve_with_leave:{uid}:{index}"))
     if request.get("password") or request.get("app_pass"):
@@ -3041,6 +3079,45 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons.append(("❌ رفض", f"reject_request:{uid}:{index}"))
     buttons.append(("🔙 الطلبات المنتظرة", "view_pending:0"))
     await query.edit_message_text(msg, parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
+
+
+async def owner_show_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """زر عرض كود TOTP الحالي للمالك."""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    parts = query.data.split(":")
+    uid = int(parts[1])
+    index = int(parts[2])
+    user_data = get_user(uid)
+    pending = user_data.get("pending_requests", [])
+    if index >= len(pending):
+        await query.answer("⚠️ الطلب غير موجود.", show_alert=True)
+        return
+    request = pending[index]
+    totp_secret = request.get("totp", "")
+    if not totp_secret:
+        await query.answer("⚠️ لا يوجد رمز مصادقة لهذا الطلب.", show_alert=True)
+        return
+    try:
+        cleaned = totp_secret.replace(" ", "").upper()
+        if not validate_totp_secret(cleaned):
+            await query.answer("⚠️ رمز المصادقة غير صالح.", show_alert=True)
+            return
+        code = pyotp.TOTP(cleaned).now()
+    except Exception as e:
+        logger.exception("TOTP code generation failed")
+        await query.answer(f"⚠️ خطأ: {e}", show_alert=True)
+        return
+    try:
+        time_remaining = 30 - (int(time.time()) % 30)
+    except Exception:
+        time_remaining = 30
+
+    await query.answer(
+        f"🔢 الكود الحالي:\n\n{code}\n\n⏰ صالح لمدة {time_remaining} ثانية",
+        show_alert=True)
 
 
 # ==================== AUTO VERIFY (OWNER-TRIGGERED) ====================
@@ -4694,14 +4771,12 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
 
-    # Admin completion flow (priority)
     admin_approval_step = context.user_data.get("admin_approval_step")
     if admin_approval_step == "waiting_totp":
         await handle_admin_totp_input(update, context); return
     if admin_approval_step == "waiting_app_pass":
         await handle_admin_app_pass_input(update, context); return
 
-    # Owner add admin input
     if context.user_data.get("step") == "add_admin_input":
         await handle_add_admin_input(update, context); return
 
@@ -5055,6 +5130,8 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await admin_request_detail(update, context)
     elif data.startswith("admin_complete_start:"):
         await admin_complete_start(update, context)
+    elif data.startswith("admin_show_code:"):
+        await admin_show_code(update, context)
     elif data == "check_member":
         await check_member(update, context)
     elif data == "set_tier_prices":
@@ -5175,6 +5252,8 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await edit_field(update, context)
     elif data.startswith("delete_pending:"):
         await delete_pending_account(update, context)
+    elif data.startswith("owner_show_code:"):
+        await owner_show_code(update, context)
     else:
         await placeholder(update, context)
 
