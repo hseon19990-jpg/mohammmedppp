@@ -2510,16 +2510,19 @@ async def admin_request_detail(update: Update, context: ContextTypes.DEFAULT_TYP
     if admin_bonus < 0:
         admin_bonus = 0.0
 
-    msg = "📋 *تفاصيل الطلب*\n\n"
-    msg += f"👤 *البائع:* {request.get('user_name', 'غير معروف')}\n"
-    msg += f"🆔 *اليوزر:* @{request.get('user_username', 'لا يوجد')}\n"
-    msg += f"📧 *الإيميل:* `{email}`\n"
-    msg += f"🔑 *الباسورد:* `{request.get('password', '')}`\n"
-    msg += f"🔐 *رمز المصادقة:* {'✅ ' + request.get('totp', '') if has_totp else '❌ غير مرسل'}\n"
-    msg += f"🗝 *كلمة مرور التطبيق:* {'✅' if has_app_pass else '❌ غير مرسل'}\n"
-    msg += f"\n💰 *المبلغ الأصلي:* ${original_amount:.2f}\n"
-    msg += f"💰 *السعر الكامل:* ${ADMIN_TIER3_PRICE:.2f}\n"
-    msg += f"💵 *مكافأتك عند الإكمال:* ${admin_bonus:.2f}\n"
+    msg = "📋 <b>تفاصيل الطلب</b>\n\n"
+    msg += f"👤 <b>البائع:</b> {tg_html_escape(request.get('user_name', 'غير معروف'))}\n"
+    msg += f"🆔 <b>اليوزر:</b> @{tg_html_escape(request.get('user_username', 'لا يوجد'))}\n"
+    msg += f"📧 <b>الإيميل:</b> <code>{tg_html_escape(email)}</code>\n"
+    msg += f"🔑 <b>الباسورد:</b> <code>{tg_html_escape(request.get('password', ''))}</code>\n"
+    if has_totp:
+        msg += f"🔐 <b>رمز المصادقة:</b> <code>{tg_html_escape(request.get('totp', ''))}</code>\n"
+    else:
+        msg += "🔐 <b>رمز المصادقة:</b> ❌ غير مرسل\n"
+    msg += f"🗝 <b>كلمة مرور التطبيق:</b> {'✅' if has_app_pass else '❌ غير مرسل'}\n"
+    msg += f"\n💰 <b>المبلغ الأصلي:</b> ${original_amount:.2f}\n"
+    msg += f"💰 <b>السعر الكامل:</b> ${ADMIN_TIER3_PRICE:.2f}\n"
+    msg += f"💵 <b>مكافأتك عند الإكمال:</b> ${admin_bonus:.2f}\n"
 
     buttons = []
     # ✅ زر عرض الكود إذا كان الطلب يحتوي على TOTP
@@ -2531,7 +2534,7 @@ async def admin_request_detail(update: Update, context: ContextTypes.DEFAULT_TYP
         buttons.append(("📝 إكمال الطلب (إضافة App Pass)", f"admin_complete_start:{uid}:{index}"))
     buttons.append(("❌ رفض الطلب", f"reject_request:{uid}:{index}"))
     buttons.append(("🔙 الطلبات", "admin_requests:0"))
-    await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
+    await query.edit_message_text(msg, parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
 
 
 async def admin_show_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
