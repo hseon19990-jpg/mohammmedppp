@@ -61,7 +61,15 @@ load_dotenv()
 
 # ==================== CONFIGURATION ====================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
-OWNER_ID = int(os.environ.get("OWNER_TELEGRAM_ID", "0"))
+owner_id_value = (
+    os.environ.get("OWNER_TELEGRAM_ID")
+    or os.environ.get("OWNER_ID")
+    or "0"
+).strip()
+try:
+    OWNER_ID = int(owner_id_value)
+except ValueError:
+    OWNER_ID = 0
 PURCHASE_CHANNEL_1 = os.environ.get("PURCHASE_CHANNEL_1", "").strip()
 PURCHASE_CHANNEL_2 = os.environ.get("PURCHASE_CHANNEL_2", "").strip()
 
