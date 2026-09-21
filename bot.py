@@ -2326,40 +2326,45 @@ def calculate_member_hold_balance(user_data: dict) -> float:
 
 def calculate_admin_ledger(admin_id: int) -> dict:
     """يقرأ مكافآت الأدمن الحالية والقديمة من سجلات الإيميلات نفسها."""
-    pending = 0.0
-    released = 0.0
-    legacy_released = 0.0
+    pending_cents = 0
+    released_cents = 0
+    legacy_released_cents = 0
+    completed_count = 0
+    pending_count = 0
+    released_count = 0
     for encrypted_data in load_json(USERS_DB).values():
         owner_data = decrypt_user_data(encrypted_data)
         for account in owner_data.get("approved_accounts", []):
             if str(account.get("completed_by_admin")) != str(admin_id):
                 continue
-            bonus = clamp_money(account.get("admin_bonus", 0.0))
-            if bonus <= 0:
-                continue
-
             status = account.get("admin_bonus_status")
             if status in {"rejected", "not_applicable"}:
                 continue
             if account.get("rejected_at_24h"):
                 continue
+            completed_count += 1
+            bonus_cents = money_to_cents(account.get("admin_bonus", 0.0))
             if status == "pending":
-                pending += bonus
+                pending_cents += bonus_cents
+                pending_count += 1
             elif status == "released":
-                released += bonus
+                released_cents += bonus_cents
+                released_count += 1
             elif account.get("approved_with_leave") and not account.get("leave_confirmed"):
                 # سجل قديم لم يكن يحتوي admin_bonus_status.
-                pending += bonus
+                pending_cents += bonus_cents
+                pending_count += 1
             else:
                 # سجل قديم وصل بعد انتهاء مدة التعليق.
-                legacy_released += bonus
+                legacy_released_cents += bonus_cents
+                released_count += 1
 
-    released_total = released + legacy_released
-    if released_total <= 0:
+    released_total_cents = released_cents + legacy_released_cents
+    if released_total_cents <= 0:
         # توافق إضافي مع النسخ الأقدم التي كانت تسجل المكافأة كـ admin_bonus
         # قبل إضافة حقل admin_bonus_status إلى سجل الحساب.
-        released_total = sum(
-            float(tx.get("amount", 0.0) or 0.0)
+        released_total_cents = sum(
+            money_to_cents(tx.get("amount", 0.0))
             for raw_uid, encrypted_data in load_json(USERS_DB).items()
             if str(raw_uid) == str(admin_id)
             for tx in decrypt_user_data(encrypted_data).get("transactions", [])
@@ -2367,8 +2372,11 @@ def calculate_admin_ledger(admin_id: int) -> dict:
         )
 
     return {
-        "pending": clamp_money(pending),
-        "released": clamp_money(released_total),
+        "pending": cents_to_money(pending_cents),
+        "released": cents_to_money(released_total_cents),
+        "completed_count": completed_count,
+        "pending_count": pending_count,
+        "released_count": released_count,
     }
 
 
@@ -2382,6 +2390,9 @@ def admin_balance_stats(user_data: dict, admin_id: Optional[int] = None) -> dict
         else {
             "pending": clamp_money(user_data.get("admin_pending_balance", 0.0)),
             "released": clamp_money(user_data.get("admin_received_balance", 0.0)),
+            "completed_count": 0,
+            "pending_count": 0,
+            "released_count": 0,
         }
     )
     admin_pending = admin_ledger["pending"]
@@ -2396,6 +2407,9 @@ def admin_balance_stats(user_data: dict, admin_id: Optional[int] = None) -> dict
         "admin_pending": admin_pending,
         "received": received_total,
         "available_admin": received,
+        "completed_count": admin_ledger["completed_count"],
+        "pending_count": admin_ledger["pending_count"],
+        "released_count": admin_ledger["released_count"],
         "ordinary": ordinary,
         "total_owned": total_owned,
     }
@@ -2479,6 +2493,9 @@ async def handle_member_check_input(update: Update, context: ContextTypes.DEFAUL
             "\n\n🛠 <b>تفصيل رصيد الأدمن</b>\n"
             f"⏳ طلبات بانتظار الموافقة: <code>${admin_balances['pending']:.2f}</code>\n"
             f"🔒 النقاط المقيدة (24/48 ساعة): <code>${admin_balances['hold']:.2f}</code>\n"
+            f"🛠 الإيميلات التي أكملها الأدمن: <code>{admin_balances['completed_count']}</code>\n"
+            f"⏳ منها مكافآت مقيدة: <code>{admin_balances['pending_count']}</code>\n"
+            f"✅ منها مكافآت واصلة: <code>{admin_balances['released_count']}</code>\n"
             f"🛠 مكافآت الأدمن المقيدة (24/48 ساعة): <code>${admin_balances['admin_pending']:.2f}</code>\n"
             f"✅ إجمالي مكافآت الأدمن الواصلة: <code>${admin_balances['received']:.2f}</code>\n"
             f"💳 المتبقي منها للاستخدام: <code>${admin_balances['available_admin']:.2f}</code>\n"
@@ -2728,9 +2745,11 @@ async def admin_request_detail(update: Update, context: ContextTypes.DEFAULT_TYP
     has_totp = request.get("has_totp", False)
     has_app_pass = request.get("has_app_pass", False)
     original_amount = float(request.get("amount", 0.0))
-    admin_bonus = round(ADMIN_TIER3_PRICE - original_amount, 2)
-    if admin_bonus < 0:
-        admin_bonus = 0.0
+    full_price_cents = money_to_cents(get_tier_prices()["tier_3"])
+    original_amount_cents = money_to_cents(original_amount)
+    original_amount = cents_to_money(original_amount_cents)
+    full_price = cents_to_money(full_price_cents)
+    admin_bonus = cents_to_money(max(0, full_price_cents - original_amount_cents))
 
     msg = "📋 <b>تفاصيل الطلب</b>\n\n"
     msg += f"👤 <b>البائع:</b> {tg_html_escape(request.get('user_name', 'غير معروف'))}\n"
@@ -2743,7 +2762,7 @@ async def admin_request_detail(update: Update, context: ContextTypes.DEFAULT_TYP
         msg += "🔐 <b>رمز المصادقة:</b> ❌ غير مرسل\n"
     msg += f"🗝 <b>كلمة مرور التطبيق:</b> {'✅' if has_app_pass else '❌ غير مرسل'}\n"
     msg += f"\n💰 <b>المبلغ الأصلي:</b> ${original_amount:.2f}\n"
-    msg += f"💰 <b>السعر الكامل:</b> ${ADMIN_TIER3_PRICE:.2f}\n"
+    msg += f"💰 <b>السعر الكامل:</b> ${full_price:.2f}\n"
     msg += f"💵 <b>مكافأتك عند الإكمال:</b> ${admin_bonus:.2f}\n"
 
     buttons = []
@@ -3101,12 +3120,11 @@ async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_T
                                    f"admin_request_detail:{uid}:{account_callback_token(email)}"))
         return
 
-    original_amount = float(request.get("amount", 0.0))
+    original_amount_cents = money_to_cents(request.get("amount", 0.0))
     # مكافأة الأدمن هي المتبقي من سعر المستوى الثالث الفعلي بعد سعر الطلب الأصلي.
-    full_price = get_tier_prices()["tier_3"]
-    admin_bonus = round(full_price - original_amount, 2)
-    if admin_bonus < 0:
-        admin_bonus = 0.0
+    full_price_cents = money_to_cents(get_tier_prices()["tier_3"])
+    original_amount = cents_to_money(original_amount_cents)
+    admin_bonus = cents_to_money(max(0, full_price_cents - original_amount_cents))
 
     try:
         admin_user = update.effective_user
@@ -5543,6 +5561,9 @@ async def my_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💰 <b>أموالي — رصيد الأدمن</b>\n\n"
             f"⏳ <b>طلبات بانتظار الموافقة:</b> ${balances['pending']:.2f}\n"
             f"🔒 <b>النقاط المقيدة (24/48 ساعة):</b> ${balances['hold']:.2f}\n"
+            f"🛠 <b>الإيميلات التي أكملها الأدمن:</b> {balances['completed_count']}\n"
+            f"⏳ <b>منها مكافآت مقيدة:</b> {balances['pending_count']}\n"
+            f"✅ <b>منها مكافآت واصلة:</b> {balances['released_count']}\n"
             f"🛠 <b>مكافآت الأدمن المقيدة (24/48 ساعة):</b> ${balances['admin_pending']:.2f}\n"
             f"✅ <b>إجمالي مكافآت الأدمن الواصلة:</b> ${balances['received']:.2f}\n"
             f"💳 <b>المتبقي منها للاستخدام:</b> ${balances['available_admin']:.2f}\n"
