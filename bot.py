@@ -100,6 +100,32 @@ def clamp_money(value: Any) -> float:
         return 0.0
 
 
+def spendable_balance_cents(user_data: dict) -> int:
+    """الرصيد القابل للاستخدام = الرصيد العادي + مكافآت الأدمن الواصلة."""
+    return (
+        money_to_cents(user_data.get("balance", 0))
+        + money_to_cents(user_data.get("admin_received_balance", 0))
+    )
+
+
+def debit_spendable_balance(user_data: dict, amount_cents: int) -> bool:
+    """يخصم من الرصيد العادي أولاً ثم من أموال الأدمن الواصلة."""
+    if amount_cents < 0 or spendable_balance_cents(user_data) < amount_cents:
+        return False
+
+    regular_cents = money_to_cents(user_data.get("balance", 0))
+    admin_cents = money_to_cents(user_data.get("admin_received_balance", 0))
+    regular_debit = min(regular_cents, amount_cents)
+    admin_debit = amount_cents - regular_debit
+
+    user_data["balance"] = cents_to_money(regular_cents - regular_debit)
+    user_data["admin_received_balance"] = cents_to_money(admin_cents - admin_debit)
+    user_data["spent_balance"] = cents_to_money(
+        money_to_cents(user_data.get("spent_balance", 0)) + amount_cents
+    )
+    return True
+
+
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     level=logging.INFO,
@@ -2041,8 +2067,6 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
                 float(admin_data.get("admin_pending_balance", 0.0)) - admin_bonus)
             admin_data["admin_received_balance"] = clamp_money(
                 float(admin_data.get("admin_received_balance", 0.0)) + admin_bonus)
-            admin_data["total_credited_balance"] = clamp_money(
-                float(admin_data.get("total_credited_balance", 0.0)) + admin_bonus)
             add_transaction(admin_data, "admin_bonus_release", admin_bonus,
                             f"وصول مكافأة إكمال طلب {email}", email)
             save_user(int(admin_id), admin_data)
@@ -2268,20 +2292,11 @@ def member_balance_stats(user_data: dict) -> dict:
 
 
 def admin_balance_stats(user_data: dict) -> dict:
-    """أرصدة الأدمن منفصلة عن رصيد العضو المعتاد."""
+    """أرصدة الأدمن مع فصل المعلّق عن المال الواصل والقابل للاستخدام."""
     pending = clamp_money(user_data.get("pending_balance", 0.0))
     hold = clamp_money(user_data.get("hold_balance", 0.0))
     admin_pending = clamp_money(user_data.get("admin_pending_balance", 0.0))
     received = clamp_money(user_data.get("admin_received_balance", 0.0))
-
-    # لا تُعدّ مكافأة الأدمن واصلة إلا من سجل التحرير بعد الفحص الثاني.
-    # معاملات admin_bonus القديمة كانت تُسجل قبل الفحص، لذلك لا تدخل هنا.
-    transaction_received = clamp_money(sum(
-        float(tx.get("amount", 0.0) or 0.0)
-        for tx in user_data.get("transactions", [])
-        if tx.get("kind") == "admin_bonus_release"
-    ))
-    received = max(received, transaction_received)
 
     ordinary = clamp_money(user_data.get("balance", 0.0))
     total_owned = clamp_money(ordinary + received)
@@ -2367,11 +2382,11 @@ async def handle_member_check_input(update: Update, context: ContextTypes.DEFAUL
     if admin_balances is not None:
         message += (
             "\n\n🛠 <b>تفصيل رصيد الأدمن</b>\n"
-            f"⏳ قيد الانتظار: <code>${admin_balances['pending']:.2f}</code>\n"
-            f"🔒 المعلّق: <code>${admin_balances['hold']:.2f}</code>\n"
-            f"🛠 رصيد الأدمن المعلّق: <code>${admin_balances['admin_pending']:.2f}</code>\n"
-            f"✅ رصيد الأدمن الواصل: <code>${admin_balances['received']:.2f}</code>\n"
-            f"📊 الرصيد الكلي المملوك: <code>${admin_balances['total_owned']:.2f}</code>"
+            f"⏳ طلبات بانتظار الموافقة: <code>${admin_balances['pending']:.2f}</code>\n"
+            f"🔒 النقاط المقيدة (24/48 ساعة): <code>${admin_balances['hold']:.2f}</code>\n"
+            f"🛠 مكافآت الأدمن المقيدة (24/48 ساعة): <code>${admin_balances['admin_pending']:.2f}</code>\n"
+            f"✅ أموال الأدمن الواصلة بعد الفحص: <code>${admin_balances['received']:.2f}</code>\n"
+            f"📊 الرصيد المتاح للاستخدام: <code>${admin_balances['total_owned']:.2f}</code>"
         )
     context.user_data.pop("step", None)
     await update.message.reply_text(message, parse_mode=ParseMode.HTML,
@@ -4329,12 +4344,14 @@ async def handle_deduct_points_input(update: Update, context: ContextTypes.DEFAU
             await update.message.reply_text("⚠️ الحساب غير موجود.")
             return
         _, account = account_match
-        current_balance = float(user_data.get("balance", 0.0))
-        if current_balance < amount:
-            await update.message.reply_text(f"⚠️ رصيد المستخدم غير كافٍ!\n💰 الرصيد: ${current_balance:.2f}")
+        amount_cents = money_to_cents(amount)
+        current_balance = spendable_balance_cents(user_data)
+        if current_balance < amount_cents:
+            await update.message.reply_text(
+                f"⚠️ رصيد المستخدم غير كافٍ!\n"
+                f"💰 الرصيد المتاح: ${cents_to_money(current_balance):.2f}")
             return
-        user_data["balance"] = clamp_money(current_balance - amount)
-        user_data["spent_balance"] = clamp_money(float(user_data.get("spent_balance", 0.0)) + amount)
+        debit_spendable_balance(user_data, amount_cents)
         add_transaction(user_data, "debit", amount, "خصم من المالك", account.get("email", ""))
         save_user(uid, user_data)
         try:
@@ -4593,12 +4610,13 @@ async def handle_points_by_id_input(update: Update, context: ContextTypes.DEFAUL
             reply_markup=kb_single("🔙 إدارة النقاط", "points_management"))
     elif step == "deduct_points_by_id_input":
         user_data = get_user(target_user_id)
-        current_balance = float(user_data.get("balance", 0.0))
-        if current_balance < amount:
-            await update.message.reply_text(f"⚠️ رصيد غير كافٍ! الرصيد: ${current_balance:.2f}")
+        amount_cents = money_to_cents(amount)
+        current_balance = spendable_balance_cents(user_data)
+        if current_balance < amount_cents:
+            await update.message.reply_text(
+                f"⚠️ رصيد غير كافٍ! الرصيد المتاح: ${cents_to_money(current_balance):.2f}")
             return
-        user_data["balance"] = clamp_money(current_balance - amount)
-        user_data["spent_balance"] = clamp_money(float(user_data.get("spent_balance", 0.0)) + amount)
+        debit_spendable_balance(user_data, amount_cents)
         add_transaction(user_data, "debit", amount, "خصم من المالك")
         save_user(target_user_id, user_data)
         try:
@@ -5005,7 +5023,7 @@ async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data = get_user(user_id)
     price_cents = money_to_cents(service.get("price", 0))
     price = cents_to_money(price_cents)
-    balance_cents = money_to_cents(user_data.get("balance", 0))
+    balance_cents = spendable_balance_cents(user_data)
     if balance_cents < price_cents:
         await query.edit_message_text(
             f"❌ رصيدك غير كافٍ. الرصيد: ${cents_to_money(balance_cents):.2f}, السعر: ${price:.2f}")
@@ -5069,16 +5087,14 @@ async def handle_purchase_message(update: Update, context: ContextTypes.DEFAULT_
     user_data = get_user(user_id)
     price_cents = money_to_cents(purchase.get("service_price", 0))
     price = cents_to_money(price_cents)
-    balance_cents = money_to_cents(user_data.get("balance", 0))
+    balance_cents = spendable_balance_cents(user_data)
     if balance_cents < price_cents:
         await update.message.reply_text("❌ رصيدك غير كافٍ.",
                                         reply_markup=kb_single("🔙 قسم السحب", "withdraw_store"))
         PENDING_PURCHASES.pop(user_id, None)
         save_pending_purchases()
         return
-    user_data["balance"] = cents_to_money(balance_cents - price_cents)
-    user_data["spent_balance"] = cents_to_money(
-        money_to_cents(user_data.get("spent_balance", 0)) + price_cents)
+    debit_spendable_balance(user_data, price_cents)
     add_transaction(user_data, "purchase", price, f"شراء: {purchase.get('service_name', '')}")
     save_user(user_id, user_data)
     user = update.effective_user
@@ -5129,11 +5145,11 @@ async def my_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         balances = admin_balance_stats(user)
         await query.edit_message_text(
             f"💰 <b>أموالي — رصيد الأدمن</b>\n\n"
-            f"⏳ <b>قيد الانتظار:</b> ${balances['pending']:.2f}\n"
-            f"🔒 <b>المعلّق:</b> ${balances['hold']:.2f}\n"
-            f"🛠 <b>رصيد الأدمن المعلّق:</b> ${balances['admin_pending']:.2f}\n"
-            f"✅ <b>رصيد الأدمن الواصل:</b> ${balances['received']:.2f}\n"
-            f"📊 <b>الرصيد الكلي المملوك:</b> ${balances['total_owned']:.2f}",
+            f"⏳ <b>طلبات بانتظار الموافقة:</b> ${balances['pending']:.2f}\n"
+            f"🔒 <b>النقاط المقيدة (24/48 ساعة):</b> ${balances['hold']:.2f}\n"
+            f"🛠 <b>مكافآت الأدمن المقيدة (24/48 ساعة):</b> ${balances['admin_pending']:.2f}\n"
+            f"✅ <b>أموال الأدمن الواصلة بعد الفحص:</b> ${balances['received']:.2f}\n"
+            f"📊 <b>الرصيد المتاح للاستخدام:</b> ${balances['total_owned']:.2f}",
             parse_mode=ParseMode.HTML,
             reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
         return
