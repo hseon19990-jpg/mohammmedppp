@@ -314,6 +314,7 @@ REJECT_REASON_LABELS = {
     "other": "خطأ آخر",
     "custom": "سبب مخصص",
     "unknown": "غير معروف",
+    "owner_manual": "رفض يدوي من المالك",
 }
 
 REJECT_REASON_MESSAGES = {
@@ -2464,6 +2465,7 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ("📢 قناة إجبارية", "forced_channel"),
         ("📨 كروبات إشعارات الشراء", "purchase_channels"),
         ("📊 جميع الحسابات المقبولة", "all_accounts_section"),
+        ("❌ رفض إيميل مقبول بالعنوان", "reject_approved_by_email"),
         ("📈 إحصائيات المستخدمين", "owner_stats"),
         ("🔎 فحص عضو", "check_member"),
         ("🔗 نظام الإحالة", "referral_settings"),
@@ -4355,6 +4357,117 @@ async def reject_approved_start(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
 
+async def reject_approved_by_email_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    context.user_data["step"] = "reject_approved_email_input"
+    await query.edit_message_text(
+        "❌ <b>رفض إيميل مقبول</b>\n\n"
+        "أرسل عنوان الإيميل الذي تريد رفضه:\n"
+        "مثال: <code>user@example.com</code>\n\n"
+        "سيظهر تأكيد قبل تنفيذ الرفض.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_single("🔙 إلغاء", "owner_panel"),
+    )
+
+
+async def handle_reject_approved_email_input(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    if update.effective_user.id != OWNER_ID:
+        return
+    text = update.message.text.strip()
+    if text.casefold() in {"إلغاء", "الغاء", "cancel"}:
+        context.user_data.pop("step", None)
+        await update.message.reply_text(
+            "❌ تم الإلغاء.",
+            reply_markup=kb_single("🔙 لوحة المالك", "owner_panel"),
+        )
+        return
+
+    email = normalize_email(text)
+    if not email:
+        await update.message.reply_text("⚠️ أرسل عنوان إيميل صحيحاً.")
+        return
+
+    found = None
+    for raw_uid, encrypted_data in load_json(USERS_DB).items():
+        user_data = decrypt_user_data(encrypted_data)
+        for account in user_data.get("approved_accounts", []):
+            if (
+                normalize_email(account.get("email", "")) == email
+                and not account.get("rejected_at_24h")
+            ):
+                found = (int(raw_uid), account)
+                break
+        if found:
+            break
+
+    if found is None:
+        await update.message.reply_text(
+            "⚠️ لم أجد هذا الإيميل ضمن الحسابات المقبولة.",
+            reply_markup=kb_single("🔙 لوحة المالك", "owner_panel"),
+        )
+        return
+
+    uid, account = found
+    token = account_callback_token(account.get("email", ""))
+    amount = clamp_money(account.get("amount", 0.0))
+    status = (
+        "🔒 المبلغ ما زال مقيداً"
+        if account.get("approved_with_leave") and not account.get("leave_confirmed")
+        else "✅ المبلغ وصل وسيتم عكسه"
+    )
+    context.user_data.pop("step", None)
+    await update.message.reply_text(
+        f"⚠️ <b>تأكيد رفض الإيميل</b>\n\n"
+        f"📧 <code>{tg_html_escape(account.get('email', ''))}</code>\n"
+        f"👤 المستخدم: <code>{uid}</code>\n"
+        f"💰 المبلغ: <code>${amount:.2f}</code>\n"
+        f"{status}\n\n"
+        "هل تريد تنفيذ الرفض ونقل الإيميل إلى المرفوضة؟",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                "✅ نعم، ارفض الإيميل",
+                callback_data=f"confirm_reject_approved:{uid}:{token}")],
+            [InlineKeyboardButton("❌ إلغاء", callback_data="owner_panel")],
+        ]),
+    )
+
+
+async def confirm_reject_approved_by_email(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    parts = query.data.split(":")
+    uid = int(parts[1])
+    token = parts[2]
+    user_data = get_user(uid)
+    account_match = find_approved_account(user_data, token)
+    if account_match is None:
+        await query.edit_message_text(
+            "⚠️ الإيميل غير موجود أو تمت معالجته مسبقاً.",
+            reply_markup=kb_single("🔙 لوحة المالك", "owner_panel"),
+        )
+        return
+    index, account = account_match
+    if account.get("rejected_at_24h"):
+        await query.edit_message_text(
+            "⚠️ هذا الإيميل مرفوض مسبقاً.",
+            reply_markup=kb_single("🔙 لوحة المالك", "owner_panel"),
+        )
+        return
+    await finalize_approved_rejection(
+        update, context, uid, index, account, "owner_manual"
+    )
+
+
 async def execute_reject_approved_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
@@ -5567,6 +5680,8 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     step = context.user_data.get("step")
     if step == "reject_reason_text":
         await handle_reject_reason_text(update, context); return
+    if step == "reject_approved_email_input":
+        await handle_reject_approved_email_input(update, context); return
     if step == "reject_approved_reason_text":
         await handle_reject_approved_reason_text(update, context); return
     if step == "deduct_points_input":
@@ -5946,6 +6061,10 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await auto_verify_account(update, context)
     elif data.startswith("approved_detail:"):
         await approved_detail(update, context)
+    elif data == "reject_approved_by_email":
+        await reject_approved_by_email_start(update, context)
+    elif data.startswith("confirm_reject_approved:"):
+        await confirm_reject_approved_by_email(update, context)
     elif data.startswith("reject_approved:"):
         await reject_approved_start(update, context)
     elif data.startswith("reject_approved_reason:"):
