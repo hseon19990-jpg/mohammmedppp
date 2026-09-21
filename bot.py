@@ -406,6 +406,8 @@ DEFAULT_USER_FIELDS = {
     "balance": 0.0,
     "pending_balance": 0.0,
     "hold_balance": 0.0,
+    "admin_pending_balance": 0.0,
+    "admin_received_balance": 0.0,
     "total_credited_balance": 0.0,
     "spent_balance": 0.0,
     "approved_accounts": [],
@@ -430,6 +432,8 @@ def get_user(user_id: int) -> dict:
     merged["balance"] = clamp_money(merged.get("balance"))
     merged["pending_balance"] = clamp_money(merged.get("pending_balance"))
     merged["hold_balance"] = clamp_money(merged.get("hold_balance"))
+    merged["admin_pending_balance"] = clamp_money(merged.get("admin_pending_balance"))
+    merged["admin_received_balance"] = clamp_money(merged.get("admin_received_balance"))
     merged["total_credited_balance"] = clamp_money(merged.get("total_credited_balance"))
     merged["spent_balance"] = clamp_money(merged.get("spent_balance"))
     merged["referral_earnings"] = clamp_money(merged.get("referral_earnings"))
@@ -439,6 +443,7 @@ def get_user(user_id: int) -> dict:
 def save_user(user_id: int, user_data: dict):
     users = load_json(USERS_DB)
     for field_name in ("balance", "pending_balance", "hold_balance",
+                       "admin_pending_balance", "admin_received_balance",
                        "total_credited_balance", "spent_balance", "referral_earnings"):
         if field_name in user_data:
             user_data[field_name] = clamp_money(user_data[field_name])
@@ -622,6 +627,21 @@ def move_request_to_rejected(user_data: dict, request: dict, reason: str, reason
 
 def account_callback_token(email: Any) -> str:
     return hashlib.sha256(normalize_email(email).encode("utf-8")).hexdigest()[:12]
+
+
+def find_pending_request(user_data: dict, token: str) -> Optional[Tuple[int, dict]]:
+    """ابحث بالإيميل الثابت، مع دعم أزرار الفهارس القديمة."""
+    pending = user_data.get("pending_requests", [])
+    if not isinstance(pending, list):
+        return None
+    for index, request in enumerate(pending):
+        if account_callback_token(request.get("email", "")) == token:
+            return index, request
+    if token.isdigit():
+        index = int(token)
+        if 0 <= index < len(pending):
+            return index, pending[index]
+    return None
 
 
 def find_approved_account(user_data: dict, token: str) -> Optional[Tuple[int, dict]]:
@@ -1117,7 +1137,8 @@ async def my_transactions(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                       reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
         return
     kind_icons = {"credit": "➕", "debit": "➖", "hold": "🔒", "release": "🔓",
-                  "referral": "🎁", "purchase": "🛒", "admin_bonus": "🛠"}
+                  "referral": "🎁", "purchase": "🛒", "admin_bonus": "🛠",
+                  "admin_bonus_pending": "⏳", "admin_bonus_release": "✅"}
     lines = ["📜 <b>آخر 20 معاملة:</b>", ""]
     for tx in transactions[-20:][::-1]:
         icon = kind_icons.get(tx.get("kind", ""), "•")
@@ -1927,6 +1948,7 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
         return
 
     price = float(account.get("amount", 0.0))
+    hold_hours = max(1, int(account.get("hold_seconds", LEAVE_HOLD_SECONDS)) // 3600)
 
     # الحسابات التي أكملها الأدمن أو تحققت تلقائياً يجب إعادة فحص IMAP
     # قبل تحرير الرصيد؛ نجاح الفحص الأول لا يكفي بعد مرور فترة التعليق.
@@ -1953,9 +1975,18 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
         if not recheck["imap_ok"]:
             user_data["hold_balance"] = clamp_money(
                 float(user_data.get("hold_balance", 0.0)) - price)
+            if account.get("admin_bonus_status") == "pending":
+                admin_id = account.get("completed_by_admin")
+                admin_bonus = float(account.get("admin_bonus", 0.0) or 0.0)
+                if admin_id and admin_bonus > 0:
+                    admin_data = get_user(int(admin_id))
+                    admin_data["admin_pending_balance"] = clamp_money(
+                        float(admin_data.get("admin_pending_balance", 0.0)) - admin_bonus)
+                    account["admin_bonus_status"] = "rejected"
+                    save_user(int(admin_id), admin_data)
             account["leave_confirmed"] = True
             account["rejected_at_24h"] = True
-            account["rejection_reason"] = "فشل إعادة فحص IMAP بعد 24 ساعة"
+            account["rejection_reason"] = f"فشل إعادة فحص IMAP بعد {hold_hours} ساعة"
             account["verification_24h"] = {
                 "level": recheck["level"],
                 "badge": recheck["badge"],
@@ -1963,12 +1994,12 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
                 "verified_at": datetime.now(timezone.utc).isoformat(),
             }
             add_transaction(user_data, "debit", price,
-                            "رفض بعد فحص 24 ساعة", email)
+                            f"رفض بعد فحص {hold_hours} ساعة", email)
             save_user(user_id, user_data)
             try:
                 await context.bot.send_message(
                     chat_id=user_id,
-                    text=(f"❌ *فشل الحساب في الفحص الثاني*\n\n"
+                    text=(f"❌ *فشل الحساب في الفحص الثاني بعد {hold_hours} ساعة*\n\n"
                           f"📧 `{email}`\n"
                           f"📝 السبب: {tg_html_escape(recheck['message'])}\n\n"
                           f"💰 تم خصم *${price:.2f}* من رصيدك المعلق."),
@@ -1978,7 +2009,7 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
             try:
                 await context.bot.send_message(
                     chat_id=OWNER_ID,
-                    text=(f"🔴 *فشل حساب في الفحص الثاني بعد 24 ساعة*\n\n"
+                    text=(f"🔴 *فشل حساب في الفحص الثاني بعد {hold_hours} ساعة*\n\n"
                           f"👤 المستخدم: `{user_id}`\n"
                           f"📧 `{email}`\n"
                           f"💰 `${price:.2f}`\n"
@@ -2001,12 +2032,29 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
         float(user_data.get("hold_balance", 0.0)) - price)
     user_data["balance"] = clamp_money(
         float(user_data.get("balance", 0.0)) + price)
+    if account.get("admin_bonus_status") == "pending":
+        admin_id = account.get("completed_by_admin")
+        admin_bonus = float(account.get("admin_bonus", 0.0) or 0.0)
+        if admin_id and admin_bonus > 0:
+            admin_data = get_user(int(admin_id))
+            admin_data["admin_pending_balance"] = clamp_money(
+                float(admin_data.get("admin_pending_balance", 0.0)) - admin_bonus)
+            admin_data["admin_received_balance"] = clamp_money(
+                float(admin_data.get("admin_received_balance", 0.0)) + admin_bonus)
+            admin_data["balance"] = clamp_money(
+                float(admin_data.get("balance", 0.0)) + admin_bonus)
+            admin_data["total_credited_balance"] = clamp_money(
+                float(admin_data.get("total_credited_balance", 0.0)) + admin_bonus)
+            add_transaction(admin_data, "admin_bonus_release", admin_bonus,
+                            f"وصول مكافأة إكمال طلب {email}", email)
+            save_user(int(admin_id), admin_data)
+            account["admin_bonus_status"] = "released"
     account["leave_confirmed"] = True
     account["auto_confirmed"] = True
     account["confirmed_at"] = datetime.now(timezone.utc).isoformat()
     account["released_amount"] = price
     add_transaction(user_data, "release", price,
-                    "تحويل تلقائي بعد 24 ساعة", email)
+                    f"تحويل تلقائي بعد {hold_hours} ساعة", email)
     save_user(user_id, user_data)
     try:
         await context.bot.send_message(
@@ -2221,6 +2269,33 @@ def member_balance_stats(user_data: dict) -> dict:
             "total": round(total_balance, 2)}
 
 
+def admin_balance_stats(user_data: dict) -> dict:
+    """أرصدة الأدمن منفصلة عن رصيد العضو المعتاد."""
+    pending = clamp_money(user_data.get("pending_balance", 0.0))
+    hold = clamp_money(user_data.get("hold_balance", 0.0))
+    admin_pending = clamp_money(user_data.get("admin_pending_balance", 0.0))
+    received = clamp_money(user_data.get("admin_received_balance", 0.0))
+
+    # البيانات القديمة كانت تضيف مكافأة الأدمن مباشرة إلى balance.
+    # نقرأ معاملات المكافأة القديمة حتى لا يظهر رصيد الأدمن الواصل صفراً.
+    transaction_received = clamp_money(sum(
+        float(tx.get("amount", 0.0) or 0.0)
+        for tx in user_data.get("transactions", [])
+        if tx.get("kind") in {"admin_bonus", "admin_bonus_release"}
+    ))
+    received = max(received, transaction_received)
+
+    current = clamp_money(user_data.get("balance", 0.0))
+    total_owned = clamp_money(current + admin_pending)
+    return {
+        "pending": pending,
+        "hold": hold,
+        "admin_pending": admin_pending,
+        "received": received,
+        "total_owned": total_owned,
+    }
+
+
 async def check_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
@@ -2261,6 +2336,7 @@ async def handle_member_check_input(update: Update, context: ContextTypes.DEFAUL
     totp_only = sum(1 for a in submitted_accounts if a.get("has_totp") and not a.get("has_app_pass"))
     app_password = sum(1 for a in submitted_accounts if a.get("has_totp") and a.get("has_app_pass"))
     balances = member_balance_stats(user_data)
+    admin_balances = admin_balance_stats(user_data) if is_admin(member_id) else None
     display_username = next(
         (r.get("user_username") for records in (approved, pending, rejected)
          for r in records if r.get("user_username")),
@@ -2289,6 +2365,15 @@ async def handle_member_check_input(update: Update, context: ContextTypes.DEFAUL
         f"⏳ رصيد قيد الانتظار: <code>${balances['pending']:.2f}</code>\n"
         f"🔒 رصيد معلّق للتحويل: <code>${balances['hold']:.2f}</code>"
     )
+    if admin_balances is not None:
+        message += (
+            "\n\n🛠 <b>تفصيل رصيد الأدمن</b>\n"
+            f"⏳ قيد الانتظار: <code>${admin_balances['pending']:.2f}</code>\n"
+            f"🔒 المعلّق: <code>${admin_balances['hold']:.2f}</code>\n"
+            f"🛠 رصيد الأدمن المعلّق: <code>${admin_balances['admin_pending']:.2f}</code>\n"
+            f"✅ رصيد الأدمن الواصل: <code>${admin_balances['received']:.2f}</code>\n"
+            f"📊 الرصيد الكلي المملوك: <code>${admin_balances['total_owned']:.2f}</code>"
+        )
     context.user_data.pop("step", None)
     await update.message.reply_text(message, parse_mode=ParseMode.HTML,
                                     reply_markup=kb_vertical([("🔎 فحص عضو آخر", "check_member"),
@@ -2500,7 +2585,7 @@ async def admin_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
         email = req.get("email", "")
         email_display = email[:18] + "..." if len(email) > 18 else email
         return (f"{tier_icon} {email_display} — ${amount:.2f}",
-                f"admin_request_detail:{req['user_id']}:{req['index']}")
+                f"admin_request_detail:{req['user_id']}:{account_callback_token(email)}")
 
     buttons = paginate_buttons(items, page, "admin_requests", label)
     buttons.append(("🔙 إعدادات الأدمن", "admin_settings"))
@@ -2519,14 +2604,15 @@ async def admin_request_detail(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     parts = query.data.split(":")
     uid = int(parts[1])
-    index = int(parts[2])
+    token = parts[2]
     user_data = get_user(uid)
     pending = user_data.get("pending_requests", [])
-    if index >= len(pending):
+    match = find_pending_request(user_data, token)
+    if match is None:
         await query.edit_message_text("⚠️ الطلب غير موجود أو تمت معالجته.",
                                       reply_markup=kb_single("🔙 الطلبات", "admin_requests:0"))
         return
-    request = pending[index]
+    index, request = match
     email = request.get("email", "")
     has_totp = request.get("has_totp", False)
     has_app_pass = request.get("has_app_pass", False)
@@ -2552,12 +2638,14 @@ async def admin_request_detail(update: Update, context: ContextTypes.DEFAULT_TYP
     buttons = []
     # ✅ زر عرض الكود إذا كان الطلب يحتوي على TOTP
     if has_totp and request.get("totp"):
-        buttons.append(("🔢 عرض الكود", f"admin_show_code:{uid}:{index}"))
+        buttons.append(("🔢 عرض الكود", f"admin_show_code:{uid}:{account_callback_token(email)}"))
     if not has_totp and not has_app_pass:
-        buttons.append(("📝 إكمال الطلب (إضافة 2FA + App Pass)", f"admin_complete_start:{uid}:{index}"))
+        buttons.append(("📝 إكمال الطلب (إضافة 2FA + App Pass)",
+                        f"admin_complete_start:{uid}:{account_callback_token(email)}"))
     elif has_totp and not has_app_pass:
-        buttons.append(("📝 إكمال الطلب (إضافة App Pass)", f"admin_complete_start:{uid}:{index}"))
-    buttons.append(("❌ رفض الطلب", f"reject_request:{uid}:{index}"))
+        buttons.append(("📝 إكمال الطلب (إضافة App Pass)",
+                        f"admin_complete_start:{uid}:{account_callback_token(email)}"))
+    buttons.append(("❌ رفض الطلب", f"reject_request:{uid}:{account_callback_token(email)}"))
     buttons.append(("🔙 الطلبات", "admin_requests:0"))
     await query.edit_message_text(msg, parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
 
@@ -2577,17 +2665,18 @@ async def admin_show_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     try:
         uid = int(parts[1])
-        index = int(parts[2])
+        token = parts[2]
     except (ValueError, IndexError):
         await query.answer("⚠️ بيانات غير صحيحة.", show_alert=True)
         return
 
     user_data = get_user(uid)
     pending = user_data.get("pending_requests", [])
-    if index >= len(pending):
+    match = find_pending_request(user_data, token)
+    if match is None:
         await query.answer("⚠️ الطلب غير موجود.", show_alert=True)
         return
-    request = pending[index]
+    index, request = match
     email = request.get("email", "")
     totp_secret = request.get("totp", "")
 
@@ -2609,7 +2698,7 @@ async def admin_show_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             totp_secret=totp_secret,
             email=email,
             title="🔢 كود المصادقة الحالي (أدمن)",
-            back_callback=f"admin_show_code:{uid}:{index}",
+            back_callback=f"admin_show_code:{uid}:{account_callback_token(email)}",
             auto_refresh=True,
         )
     except Exception as exc:
@@ -2619,8 +2708,8 @@ async def admin_show_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🔢 *الكود الحالي:* `{code}`\n\n⏰ صالح لمدة *{seconds}* ثانية",
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=kb_vertical([
-                    ("🔄 كود جديد", f"admin_show_code:{uid}:{index}"),
-                    ("🔙 تفاصيل الطلب", f"admin_request_detail:{uid}:{index}"),
+                    ("🔄 كود جديد", f"admin_show_code:{uid}:{account_callback_token(email)}"),
+                    ("🔙 تفاصيل الطلب", f"admin_request_detail:{uid}:{account_callback_token(email)}"),
                 ]))
         except Exception:
             await query.answer(f"🔢 الكود: {code} | ⏰ {seconds}s", show_alert=True)
@@ -2633,16 +2722,18 @@ async def admin_complete_start(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     parts = query.data.split(":")
     uid = int(parts[1])
-    index = int(parts[2])
+    token = parts[2]
     user_data = get_user(uid)
     pending = user_data.get("pending_requests", [])
-    if index >= len(pending):
+    match = find_pending_request(user_data, token)
+    if match is None:
         await query.edit_message_text("⚠️ الطلب غير موجود.",
                                       reply_markup=kb_single("🔙 الطلبات", "admin_requests:0"))
         return
-    request = pending[index]
+    index, request = match
     context.user_data["admin_completing_uid"] = uid
     context.user_data["admin_completing_index"] = index
+    context.user_data["admin_completing_token"] = account_callback_token(request.get("email", ""))
 
     if not request.get("has_totp", False):
         context.user_data["admin_approval_step"] = "waiting_totp"
@@ -2653,7 +2744,7 @@ async def admin_complete_start(update: Update, context: ContextTypes.DEFAULT_TYP
             f"_أو 'إلغاء'_",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=kb_single("🔙 إلغاء",
-                                   f"admin_request_detail:{uid}:{index}"))
+                                   f"admin_request_detail:{uid}:{account_callback_token(request.get('email', ''))}"))
         return
     if not request.get("has_app_pass", False):
         context.user_data["admin_approval_step"] = "waiting_app_pass"
@@ -2664,7 +2755,7 @@ async def admin_complete_start(update: Update, context: ContextTypes.DEFAULT_TYP
             f"_أو 'إلغاء'_",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=kb_single("🔙 إلغاء",
-                                   f"admin_request_detail:{uid}:{index}"))
+                                   f"admin_request_detail:{uid}:{account_callback_token(request.get('email', ''))}"))
         return
     await query.edit_message_text("⚠️ الطلب مكتمل بالفعل.",
                                   reply_markup=kb_single("🔙 الطلبات", "admin_requests:0"))
@@ -2673,14 +2764,16 @@ async def admin_complete_start(update: Update, context: ContextTypes.DEFAULT_TYP
 async def handle_admin_totp_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if text.casefold() in {"إلغاء", "الغاء", "cancel"}:
-        for k in ("admin_completing_uid", "admin_completing_index", "admin_approval_step"):
+        for k in ("admin_completing_uid", "admin_completing_index",
+                  "admin_completing_token", "admin_approval_step"):
             context.user_data.pop(k, None)
         await update.message.reply_text("❌ تم الإلغاء.",
                                         reply_markup=kb_single("🔙 الطلبات", "admin_requests:0"))
         return
     uid = context.user_data.get("admin_completing_uid")
     index = context.user_data.get("admin_completing_index")
-    if uid is None or index is None:
+    token = context.user_data.get("admin_completing_token")
+    if uid is None or (index is None and token is None):
         await update.message.reply_text("⚠️ حدث خطأ.")
         return
     cleaned = text.replace(" ", "").upper()
@@ -2695,7 +2788,11 @@ async def handle_admin_totp_input(update: Update, context: ContextTypes.DEFAULT_
 
     user_data = get_user(uid)
     pending = user_data.get("pending_requests", [])
-    if index >= len(pending):
+    if token:
+        match = find_pending_request(user_data, token)
+        if match is not None:
+            index, _ = match
+    if index is None or index >= len(pending):
         await update.message.reply_text("⚠️ الطلب غير موجود.")
         return
     pending[index]["totp"] = cleaned
@@ -2715,7 +2812,7 @@ async def handle_admin_totp_input(update: Update, context: ContextTypes.DEFAULT_
             f"📌 أرسل كلمة مرور التطبيق (16 حرفاً):\n\n_أو 'إلغاء'_",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=kb_single("🔙 إلغاء",
-                                   f"admin_request_detail:{uid}:{index}"))
+                                   f"admin_request_detail:{uid}:{account_callback_token(pending[index].get('email', ''))}"))
     else:
         await prompt_admin_acceptance_choice(update, context, uid, index)
 
@@ -2723,14 +2820,16 @@ async def handle_admin_totp_input(update: Update, context: ContextTypes.DEFAULT_
 async def handle_admin_app_pass_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if text.casefold() in {"إلغاء", "الغاء", "cancel"}:
-        for k in ("admin_completing_uid", "admin_completing_index", "admin_approval_step"):
+        for k in ("admin_completing_uid", "admin_completing_index",
+                  "admin_completing_token", "admin_approval_step"):
             context.user_data.pop(k, None)
         await update.message.reply_text("❌ تم الإلغاء.",
                                         reply_markup=kb_single("🔙 الطلبات", "admin_requests:0"))
         return
     uid = context.user_data.get("admin_completing_uid")
     index = context.user_data.get("admin_completing_index")
-    if uid is None or index is None:
+    token = context.user_data.get("admin_completing_token")
+    if uid is None or (index is None and token is None):
         await update.message.reply_text("⚠️ حدث خطأ.")
         return
     cleaned = text.replace(" ", "")
@@ -2743,7 +2842,11 @@ async def handle_admin_app_pass_input(update: Update, context: ContextTypes.DEFA
 
     user_data = get_user(uid)
     pending = user_data.get("pending_requests", [])
-    if index >= len(pending):
+    if token:
+        match = find_pending_request(user_data, token)
+        if match is not None:
+            index, _ = match
+    if index is None or index >= len(pending):
         await update.message.reply_text("⚠️ الطلب غير موجود.")
         return
     pending[index]["app_pass"] = cleaned
@@ -2763,7 +2866,7 @@ async def prompt_admin_acceptance_choice(update: Update,
     """بعد اكتمال البيانات، دع الأدمن يختار مدة التعليق وطريقة القبول."""
     user_data = get_user(uid)
     pending = user_data.get("pending_requests", [])
-    if index >= len(pending):
+    if index is None or index >= len(pending):
         await update.effective_message.reply_text("⚠️ الطلب غير موجود.")
         return
 
@@ -2774,6 +2877,8 @@ async def prompt_admin_acceptance_choice(update: Update,
 
     context.user_data["admin_completing_uid"] = uid
     context.user_data["admin_completing_index"] = index
+    token = account_callback_token(request.get("email", ""))
+    context.user_data["admin_completing_token"] = token
     context.user_data["admin_approval_step"] = "waiting_acceptance_choice"
     await update.effective_message.reply_text(
         f"✅ تم استلام جميع المعلومات للحساب:\n"
@@ -2783,13 +2888,13 @@ async def prompt_admin_acceptance_choice(update: Update,
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(
                 "✅ قبول تلقائي — فحص الآن / تحرير بعد 24 ساعة",
-                callback_data=f"admin_accept_auto:{uid}:{index}")],
+                callback_data=f"admin_accept_auto:{uid}:{token}")],
             [InlineKeyboardButton(
                 "📹 قبول مع فيديو المغادرة — فحص الآن / تحرير بعد 48 ساعة",
-                callback_data=f"admin_accept_leave:{uid}:{index}")],
+                callback_data=f"admin_accept_leave:{uid}:{token}")],
             [InlineKeyboardButton(
                 "❌ إلغاء",
-                callback_data=f"admin_completion_cancel:{uid}:{index}")],
+                callback_data=f"admin_completion_cancel:{uid}:{token}")],
         ]))
 
 
@@ -2800,8 +2905,9 @@ async def admin_completion_cancel(update: Update, context: ContextTypes.DEFAULT_
         return
     parts = query.data.split(":")
     uid = int(parts[1])
-    index = int(parts[2])
-    for key in ("admin_completing_uid", "admin_completing_index", "admin_approval_step"):
+    token = parts[2]
+    for key in ("admin_completing_uid", "admin_completing_index",
+                "admin_completing_token", "admin_approval_step"):
         context.user_data.pop(key, None)
     await admin_request_detail(update, context)
 
@@ -2813,7 +2919,14 @@ async def admin_accept_completed(update: Update, context: ContextTypes.DEFAULT_T
         return
     parts = query.data.split(":")
     uid = int(parts[1])
-    index = int(parts[2])
+    token = parts[2]
+    match = find_pending_request(get_user(uid), token)
+    if match is None:
+        await query.edit_message_text(
+            "⚠️ الطلب غير موجود أو تمت معالجته.",
+            reply_markup=kb_single("🔙 الطلبات", "admin_requests:0"))
+        return
+    index, _ = match
     leave_video = query.data.startswith("admin_accept_leave:")
     hold_seconds = LEAVE_HOLD_48H_SECONDS if leave_video else LEAVE_HOLD_SECONDS
     await admin_verify_and_store(
@@ -2874,7 +2987,7 @@ async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_T
             f"⚠️ تم الاحتفاظ بالبيانات في الطلب. يمكنك إعادة المحاولة بعد التصحيح.",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=kb_single("🔙 تفاصيل الطلب",
-                                   f"admin_request_detail:{uid}:{index}"))
+                                   f"admin_request_detail:{uid}:{account_callback_token(email)}"))
         return
 
     original_amount = float(request.get("amount", 0.0))
@@ -2908,6 +3021,9 @@ async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_T
         "release_at": (approval_time + timedelta(seconds=hold_seconds)).isoformat(),
         "hold_seconds": hold_seconds,
         "acceptance_mode": "leave_video" if send_leave_video else "automatic",
+        "admin_bonus_status": (
+            "pending" if admin_id != OWNER_ID and admin_bonus > 0 else "not_applicable"
+        ),
         "extracted": False,
         "has_totp": True,
         "has_app_pass": True,
@@ -2945,17 +3061,17 @@ async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_T
 
     if admin_bonus > 0 and admin_id != OWNER_ID:
         admin_data = get_user(admin_id)
-        admin_data["balance"] = clamp_money(
-            float(admin_data.get("balance", 0.0)) + admin_bonus)
-        admin_data["total_credited_balance"] = clamp_money(
-            float(admin_data.get("total_credited_balance", 0.0) or 0.0) + admin_bonus)
-        add_transaction(admin_data, "admin_bonus", admin_bonus,
-                        f"مكافأة إكمال طلب {email}", email)
+        admin_data["admin_pending_balance"] = clamp_money(
+            float(admin_data.get("admin_pending_balance", 0.0)) + admin_bonus)
+        add_transaction(admin_data, "admin_bonus_pending", admin_bonus,
+                        f"مكافأة معلّقة حتى إعادة فحص {email}", email)
         save_user(admin_id, admin_data)
         try:
             await context.bot.send_message(
                 chat_id=admin_id,
-                text=f"💵 *مكافأة أدمن!*\n\n📧 `{email}`\n💰 +${admin_bonus:.2f}",
+                text=(f"💵 *مكافأة أدمن معلّقة!*\n\n📧 `{email}`\n"
+                      f"💰 ${admin_bonus:.2f}\n"
+                      f"⏳ تصل بعد نجاح الفحص الثاني."),
                 parse_mode=ParseMode.MARKDOWN)
         except Exception:
             pass
@@ -3248,7 +3364,7 @@ async def view_pending_requests(update: Update, context: ContextTypes.DEFAULT_TY
         email = req.get("email", "")
         email_display = email[:15] + "..." if len(email) > 15 else email
         return (f"{v_badge}{tier_icon} {email_display}",
-                f"pending_detail:{req['user_id']}:{req['index']}")
+                f"pending_detail:{req['user_id']}:{account_callback_token(email)}")
 
     buttons = paginate_buttons(pending, page, "view_pending", label)
     buttons.append(("🔙 الطلبات", "approval_requests"))
@@ -3267,14 +3383,16 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     parts = query.data.split(":")
     uid = int(parts[1])
-    index = int(parts[2])
+    token = parts[2]
     user_data = get_user(uid)
     pending = user_data.get("pending_requests", [])
-    if index >= len(pending):
+    match = find_pending_request(user_data, token)
+    if match is None:
         await query.edit_message_text("⚠️ هذا الطلب غير موجود أو تمت معالجته.",
                                       reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending:0"))
         return
-    request = pending[index]
+    index, request = match
+    request_token = account_callback_token(request.get("email", ""))
     email = request.get("email", "")
     tier_icon = "🟢" if request.get("has_app_pass") else "🟡" if request.get("has_totp") else "🔵"
     tier_text = "مكتمل" if request.get("has_app_pass") else "مع رمز المصادقة" if request.get("has_totp") else "باسورد فقط"
@@ -3319,16 +3437,16 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = []
     # ✅ زر عرض الكود إذا كان الطلب يحتوي على TOTP
     if request.get("has_totp", False) and request.get("totp"):
-        buttons.append(("🔢 عرض الكود", f"owner_show_code:{uid}:{index}"))
+        buttons.append(("🔢 عرض الكود", f"owner_show_code:{uid}:{request_token}"))
     if not request.get("has_totp", False) or not request.get("has_app_pass", False):
         buttons.append(("📝 إكمال المعلومات قبل القبول",
-                        f"complete_request_owner:{uid}:{index}"))
+                        f"complete_request_owner:{uid}:{request_token}"))
         if has_leave_video:
             buttons.append(("📝 إكمال ثم قبول مع فيديو المغادرة",
-                            f"complete_request_owner_with_leave:{uid}:{index}"))
-    buttons.append(("✅ قبول فوري", f"approve_request:{uid}:{index}"))
+                            f"complete_request_owner_with_leave:{uid}:{request_token}"))
+    buttons.append(("✅ قبول فوري", f"approve_request:{uid}:{request_token}"))
     if has_leave_video:
-        buttons.append(("📹 قبول مع فيديو المغادرة", f"approve_with_leave:{uid}:{index}"))
+        buttons.append(("📹 قبول مع فيديو المغادرة", f"approve_with_leave:{uid}:{request_token}"))
     if request.get("password") or request.get("app_pass"):
         if request.get("has_app_pass", False):
             verify_label = "🔍 تحقق تلقائي (App Password)"
@@ -3336,8 +3454,8 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
             verify_label = "🔍 تحقق تلقائي (IMAP + 2FA)"
         else:
             verify_label = "🔍 تحقق تلقائي (IMAP)"
-        buttons.append((verify_label, f"auto_verify:{uid}:{index}"))
-    buttons.append(("❌ رفض", f"reject_request:{uid}:{index}"))
+        buttons.append((verify_label, f"auto_verify:{uid}:{request_token}"))
+    buttons.append(("❌ رفض", f"reject_request:{uid}:{request_token}"))
     buttons.append(("🔙 الطلبات المنتظرة", "view_pending:0"))
     await query.edit_message_text(msg, parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
 
@@ -3357,17 +3475,18 @@ async def owner_show_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     try:
         uid = int(parts[1])
-        index = int(parts[2])
+        token = parts[2]
     except (ValueError, IndexError):
         await query.answer("⚠️ بيانات غير صحيحة.", show_alert=True)
         return
 
     user_data = get_user(uid)
     pending = user_data.get("pending_requests", [])
-    if index >= len(pending):
+    match = find_pending_request(user_data, token)
+    if match is None:
         await query.answer("⚠️ الطلب غير موجود.", show_alert=True)
         return
-    request = pending[index]
+    index, request = match
     email = request.get("email", "")
     totp_secret = request.get("totp", "")
 
@@ -3389,7 +3508,7 @@ async def owner_show_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             totp_secret=totp_secret,
             email=email,
             title="🔢 كود المصادقة الحالي (مالك)",
-            back_callback=f"owner_show_code:{uid}:{index}",
+            back_callback=f"owner_show_code:{uid}:{account_callback_token(email)}",
             auto_refresh=True,
         )
     except Exception as exc:
@@ -3399,8 +3518,8 @@ async def owner_show_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🔢 *الكود الحالي:* `{code}`\n\n⏰ صالح لمدة *{seconds}* ثانية",
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=kb_vertical([
-                    ("🔄 كود جديد", f"owner_show_code:{uid}:{index}"),
-                    ("🔙 تفاصيل الطلب", f"pending_detail:{uid}:{index}"),
+                    ("🔄 كود جديد", f"owner_show_code:{uid}:{account_callback_token(email)}"),
+                    ("🔙 تفاصيل الطلب", f"pending_detail:{uid}:{account_callback_token(email)}"),
                 ]))
         except Exception:
             await query.answer(f"🔢 الكود: {code} | ⏰ {seconds}s", show_alert=True)
@@ -3414,14 +3533,15 @@ async def auto_verify_account(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     parts = query.data.split(":")
     uid = int(parts[1])
-    index = int(parts[2])
+    token = parts[2]
     user_data = get_user(uid)
     pending = user_data.get("pending_requests", [])
-    if index >= len(pending):
+    match = find_pending_request(user_data, token)
+    if match is None:
         await query.edit_message_text("⚠️ هذا الطلب غير موجود.",
                                       reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending:0"))
         return
-    request = pending[index]
+    index, request = match
     email = request.get("email", "")
     password = request.get("password", "")
     app_pass = request.get("app_pass", "")
@@ -3444,7 +3564,7 @@ async def auto_verify_account(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         await query.edit_message_text(loading_text, parse_mode=ParseMode.HTML,
                                       reply_markup=kb_single("⏳ يرجى الانتظار",
-                                                             f"pending_detail:{uid}:{index}"))
+                                                             f"pending_detail:{uid}:{account_callback_token(email)}"))
     except Exception:
         pass
 
@@ -3508,14 +3628,16 @@ async def auto_verify_account(update: Update, context: ContextTypes.DEFAULT_TYPE
         result_msg += f"\n💡 {category_hint}\n"
     result_msg += f"\n<i>📌 هذا مجرد تقرير — لم يتم قبول أو رفض الطلب. القرار يبقى لك.</i>"
 
-    buttons = [("🔍 تحقق مرة أخرى", f"auto_verify:{uid}:{index}"),
-               ("✅ قبول فوري", f"approve_request:{uid}:{index}")]
+    request_token = account_callback_token(email)
+    buttons = [("🔍 تحقق مرة أخرى", f"auto_verify:{uid}:{request_token}"),
+               ("✅ قبول فوري", f"approve_request:{uid}:{request_token}")]
     config = load_config()
     has_leave_video = config.get("video_leave") and Path(config.get("video_leave", "")).exists()
     if has_leave_video:
-        buttons.append(("📹 قبول مع فيديو المغادرة", f"approve_with_leave:{uid}:{index}"))
-    buttons.append(("❌ رفض", f"reject_request:{uid}:{index}"))
-    buttons.append(("🔙 تفاصيل الطلب", f"pending_detail:{uid}:{index}"))
+        buttons.append(("📹 قبول مع فيديو المغادرة",
+                        f"approve_with_leave:{uid}:{request_token}"))
+    buttons.append(("❌ رفض", f"reject_request:{uid}:{request_token}"))
+    buttons.append(("🔙 تفاصيل الطلب", f"pending_detail:{uid}:{request_token}"))
     buttons.append(("🔙 الطلبات المنتظرة", "view_pending:0"))
 
     await query.edit_message_text(result_msg, parse_mode=ParseMode.HTML,
@@ -3602,7 +3724,7 @@ async def complete_approval(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     if with_leave:
         await send_leave_video_to_user(context, uid, email)
         await schedule_leave_check(context, uid, email, approved_request.get("release_at"))
-    for key in ("approval_uid", "approval_index", "approval_data",
+    for key in ("approval_uid", "approval_index", "approval_token", "approval_data",
                 "approval_step", "approval_with_leave"):
         context.user_data.pop(key, None)
 
@@ -3635,9 +3757,11 @@ async def start_owner_completion(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     approved_request = pending[index]
+    request_token = account_callback_token(approved_request.get("email", ""))
     display_email = tg_html_escape(approved_request.get("email", ""))
     context.user_data["approval_uid"] = uid
     context.user_data["approval_index"] = index
+    context.user_data["approval_token"] = request_token
     context.user_data["approval_data"] = approved_request
     context.user_data["approval_with_leave"] = with_leave
 
@@ -3647,7 +3771,7 @@ async def start_owner_completion(update: Update, context: ContextTypes.DEFAULT_T
             f"🔐 <b>إكمال الطلب</b>\n\n📧 <code>{display_email}</code>\n\n"
             f"📌 أرسل رمز المصادقة (32 حرفاً):\n\n<i>أو 'تخطي'</i>",
             parse_mode=ParseMode.HTML,
-            reply_markup=kb_single("🔙 إلغاء", f"pending_detail:{uid}:{index}"))
+            reply_markup=kb_single("🔙 إلغاء", f"pending_detail:{uid}:{request_token}"))
         return
 
     if not approved_request.get("has_app_pass", False):
@@ -3656,7 +3780,7 @@ async def start_owner_completion(update: Update, context: ContextTypes.DEFAULT_T
             f"🗝 <b>إكمال الطلب</b>\n\n📧 <code>{display_email}</code>\n\n"
             f"📌 أرسل كلمة مرور التطبيق (16 حرفاً):\n\n<i>أو 'تخطي'</i>",
             parse_mode=ParseMode.HTML,
-            reply_markup=kb_single("🔙 إلغاء", f"pending_detail:{uid}:{index}"))
+            reply_markup=kb_single("🔙 إلغاء", f"pending_detail:{uid}:{request_token}"))
         return
 
     await complete_approval(update, context, uid, index, approved_request, with_leave)
@@ -3668,8 +3792,13 @@ async def complete_request_owner(update: Update, context: ContextTypes.DEFAULT_T
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
     parts = query.data.split(":")
+    match = find_pending_request(get_user(int(parts[1])), parts[2])
+    if match is None:
+        await query.edit_message_text("⚠️ الطلب غير موجود.",
+                                      reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending:0"))
+        return
     await start_owner_completion(
-        update, context, int(parts[1]), int(parts[2]), with_leave=False)
+        update, context, int(parts[1]), match[0], with_leave=False)
 
 
 async def complete_request_owner_with_leave(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3678,8 +3807,13 @@ async def complete_request_owner_with_leave(update: Update, context: ContextType
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
     parts = query.data.split(":")
+    match = find_pending_request(get_user(int(parts[1])), parts[2])
+    if match is None:
+        await query.edit_message_text("⚠️ الطلب غير موجود.",
+                                      reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending:0"))
+        return
     await start_owner_completion(
-        update, context, int(parts[1]), int(parts[2]), with_leave=True)
+        update, context, int(parts[1]), match[0], with_leave=True)
 
 
 async def approve_request_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3689,14 +3823,15 @@ async def approve_request_owner(update: Update, context: ContextTypes.DEFAULT_TY
         return
     parts = query.data.split(":")
     uid = int(parts[1])
-    index = int(parts[2])
+    token = parts[2]
     user_data = get_user(uid)
     pending = user_data.get("pending_requests", [])
-    if index >= len(pending):
+    match = find_pending_request(user_data, token)
+    if match is None:
         await query.edit_message_text("⚠️ الطلب غير موجود.",
                                       reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending:0"))
         return
-    approved_request = pending[index]
+    index, approved_request = match
     display_email = tg_html_escape(approved_request.get("email", ""))
     await complete_approval(update, context, uid, index, approved_request, False)
     await query.edit_message_text(
@@ -3712,14 +3847,15 @@ async def approve_with_leave(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     parts = query.data.split(":")
     uid = int(parts[1])
-    index = int(parts[2])
+    token = parts[2]
     user_data = get_user(uid)
     pending = user_data.get("pending_requests", [])
-    if index >= len(pending):
+    match = find_pending_request(user_data, token)
+    if match is None:
         await query.edit_message_text("⚠️ الطلب غير موجود.",
                                       reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending:0"))
         return
-    approved_request = pending[index]
+    index, approved_request = match
     display_email = tg_html_escape(approved_request.get("email", ""))
     await complete_approval(update, context, uid, index, approved_request, True)
     await query.edit_message_text(
@@ -3737,33 +3873,36 @@ async def reject_request_reason(update: Update, context: ContextTypes.DEFAULT_TY
         return
     parts = query.data.split(":")
     uid = int(parts[1])
-    index = int(parts[2])
+    token = parts[2]
     user_data = get_user(uid)
     pending = user_data.get("pending_requests", [])
-    if not can_reject_pending_request(actor_id, user_data, index):
-        await query.answer("🚫 لا تملك صلاحية رفض هذا الطلب.", show_alert=True)
-        return
-    if index >= len(pending):
+    match = find_pending_request(user_data, token)
+    if match is None:
         await query.edit_message_text("⚠️ الطلب غير موجود.",
                                       reply_markup=kb_single(
                                           "🔙 العودة", rejection_list_callback(actor_id)))
         return
-    email = pending[index].get("email", "")
+    index, request = match
+    if not can_reject_pending_request(actor_id, user_data, index):
+        await query.answer("🚫 لا تملك صلاحية رفض هذا الطلب.", show_alert=True)
+        return
+    email = request.get("email", "")
+    request_token = account_callback_token(email)
     display_email = tg_html_escape(email)
     detail_callback = (
-        f"pending_detail:{uid}:{index}"
+        f"pending_detail:{uid}:{request_token}"
         if actor_id == OWNER_ID
-        else f"admin_request_detail:{uid}:{index}"
+        else f"admin_request_detail:{uid}:{request_token}"
     )
     context.user_data["reject_uid"] = uid
     context.user_data["reject_index"] = index
     buttons = [
-        ("📧 إيميل خطأ", f"reject_reason:email:{uid}:{index}"),
-        ("🔑 باسورد خطأ", f"reject_reason:password:{uid}:{index}"),
-        ("🔐 رمز مصادقة خطأ", f"reject_reason:totp:{uid}:{index}"),
-        ("🗝 كلمة مرور تطبيق خطأ", f"reject_reason:app_pass:{uid}:{index}"),
-        ("📱 يحتاج رقم هاتف", f"reject_reason:phone:{uid}:{index}"),
-        ("📝 خطأ آخر (اكتب السبب)", f"reject_reason:other:{uid}:{index}"),
+        ("📧 إيميل خطأ", f"reject_reason:email:{uid}:{request_token}"),
+        ("🔑 باسورد خطأ", f"reject_reason:password:{uid}:{request_token}"),
+        ("🔐 رمز مصادقة خطأ", f"reject_reason:totp:{uid}:{request_token}"),
+        ("🗝 كلمة مرور تطبيق خطأ", f"reject_reason:app_pass:{uid}:{request_token}"),
+        ("📱 يحتاج رقم هاتف", f"reject_reason:phone:{uid}:{request_token}"),
+        ("📝 خطأ آخر (اكتب السبب)", f"reject_reason:other:{uid}:{request_token}"),
         ("🔙 التفاصيل", detail_callback),
     ]
     await query.edit_message_text(
@@ -3780,24 +3919,26 @@ async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TY
     parts = query.data.split(":")
     reason_type = parts[1]
     uid = int(parts[2])
-    index = int(parts[3])
+    token = parts[3]
     user_data = get_user(uid)
     pending = user_data.get("pending_requests", [])
-    if not can_reject_pending_request(actor_id, user_data, index):
-        await query.answer("🚫 لا تملك صلاحية رفض هذا الطلب.", show_alert=True)
-        return
-    if index >= len(pending):
+    match = find_pending_request(user_data, token)
+    if match is None:
         await query.edit_message_text("⚠️ الطلب غير موجود.",
                                       reply_markup=kb_single(
                                           "🔙 العودة", rejection_list_callback(actor_id)))
         return
-    request = pending[index]
+    index, request = match
+    if not can_reject_pending_request(actor_id, user_data, index):
+        await query.answer("🚫 لا تملك صلاحية رفض هذا الطلب.", show_alert=True)
+        return
     email = request.get("email", "")
+    request_token = account_callback_token(email)
     display_email = tg_html_escape(email)
     detail_callback = (
-        f"pending_detail:{uid}:{index}"
+        f"pending_detail:{uid}:{request_token}"
         if actor_id == OWNER_ID
-        else f"admin_request_detail:{uid}:{index}"
+        else f"admin_request_detail:{uid}:{request_token}"
     )
 
     # For "other" we ask for custom text before removing
@@ -3891,6 +4032,7 @@ async def handle_approval_totp(update: Update, context: ContextTypes.DEFAULT_TYP
     text = update.message.text.strip()
     uid = context.user_data.get("approval_uid")
     index = context.user_data.get("approval_index")
+    token = context.user_data.get("approval_token")
     approved_request = context.user_data.get("approval_data")
     with_leave = context.user_data.get("approval_with_leave", False)
     if not uid or index is None or not approved_request:
@@ -3898,6 +4040,10 @@ async def handle_approval_totp(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     user_data = get_user(uid)
     pending = user_data.get("pending_requests", [])
+    if token:
+        match = find_pending_request(user_data, token)
+        if match is not None:
+            index, _ = match
     if index >= len(pending):
         await update.message.reply_text("⚠️ الطلب غير موجود.")
         return
@@ -3910,7 +4056,9 @@ async def handle_approval_totp(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text(
                 "✅ تم تخطي رمز المصادقة.\n\n🗝 *أرسل كلمة مرور التطبيق (16 حرفاً):*\n\n_أو 'تخطي'_",
                 parse_mode=ParseMode.MARKDOWN,
-                reply_markup=kb_single("🔙 إلغاء", f"pending_detail:{uid}:{index}"))
+                reply_markup=kb_single(
+                    "🔙 إلغاء",
+                    f"pending_detail:{uid}:{account_callback_token(approved_request.get('email', ''))}"))
         else:
             await complete_approval(update, context, uid, index, approved_request, with_leave)
         return
@@ -3931,7 +4079,9 @@ async def handle_approval_totp(update: Update, context: ContextTypes.DEFAULT_TYP
                 f"✅ رمز المصادقة صالح!\n🔐 *المفتاح:* `{formatted_secret}`\n🔢 *الكود:* `{code}`\n\n"
                 f"🗝 *أرسل كلمة مرور التطبيق (16 حرفاً):*\n\n_أو 'تخطي'_",
                 parse_mode=ParseMode.MARKDOWN,
-                reply_markup=kb_single("🔙 إلغاء", f"pending_detail:{uid}:{index}"))
+                reply_markup=kb_single(
+                    "🔙 إلغاء",
+                    f"pending_detail:{uid}:{account_callback_token(approved_request.get('email', ''))}"))
         else:
             await complete_approval(update, context, uid, index, approved_request, with_leave)
     except Exception as e:
@@ -3942,6 +4092,7 @@ async def handle_approval_app_pass(update: Update, context: ContextTypes.DEFAULT
     text = update.message.text.strip()
     uid = context.user_data.get("approval_uid")
     index = context.user_data.get("approval_index")
+    token = context.user_data.get("approval_token")
     approved_request = context.user_data.get("approval_data")
     with_leave = context.user_data.get("approval_with_leave", False)
     if not uid or index is None or not approved_request:
@@ -3949,6 +4100,10 @@ async def handle_approval_app_pass(update: Update, context: ContextTypes.DEFAULT
         return
     user_data = get_user(uid)
     pending = user_data.get("pending_requests", [])
+    if token:
+        match = find_pending_request(user_data, token)
+        if match is not None:
+            index, _ = match
     if index >= len(pending):
         await update.message.reply_text("⚠️ الطلب غير موجود.")
         return
@@ -4971,6 +5126,18 @@ async def my_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     query = update.callback_query
     user = get_user(query.from_user.id)
+    if is_admin(query.from_user.id):
+        balances = admin_balance_stats(user)
+        await query.edit_message_text(
+            f"💰 <b>أموالي — رصيد الأدمن</b>\n\n"
+            f"⏳ <b>قيد الانتظار:</b> ${balances['pending']:.2f}\n"
+            f"🔒 <b>المعلّق:</b> ${balances['hold']:.2f}\n"
+            f"🛠 <b>رصيد الأدمن المعلّق:</b> ${balances['admin_pending']:.2f}\n"
+            f"✅ <b>رصيد الأدمن الواصل:</b> ${balances['received']:.2f}\n"
+            f"📊 <b>الرصيد الكلي المملوك:</b> ${balances['total_owned']:.2f}",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        return
     await query.edit_message_text(
         f"💰 *أموالي*\n\n"
         f"⏳ قيد الانتظار: ${float(user.get('pending_balance', 0.0)):.2f}\n"
