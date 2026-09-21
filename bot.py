@@ -651,6 +651,27 @@ def move_request_to_rejected(user_data: dict, request: dict, reason: str, reason
     )
 
 
+def move_approved_account_to_rejected(
+    user_data: dict, account: dict, reason: str, reason_text: str = ""
+):
+    """ينقل حساباً مقبولاً إلى سجل المرفوضة دون لمس رصيد الطلبات المنتظرة."""
+    rejected_account = dict(account)
+    rejected_account["reject_reason"] = reason
+    rejected_account["rejected_from_approved"] = True
+    rejected_account["rejected_at"] = datetime.now(timezone.utc).isoformat()
+    if reason_text:
+        rejected_account["reject_reason_text"] = reason_text
+    user_data.setdefault("rejected_requests", []).append(rejected_account)
+
+    email = account.get("email", "")
+    rejected_emails = user_data.get("rejected_emails", [])
+    if not isinstance(rejected_emails, list):
+        rejected_emails = []
+    if not any(normalize_email(item) == normalize_email(email) for item in rejected_emails):
+        rejected_emails.append(email)
+    user_data["rejected_emails"] = rejected_emails
+
+
 def account_callback_token(email: Any) -> str:
     return hashlib.sha256(normalize_email(email).encode("utf-8")).hexdigest()[:12]
 
@@ -1164,7 +1185,8 @@ async def my_transactions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     kind_icons = {"credit": "➕", "debit": "➖", "hold": "🔒", "release": "🔓",
                   "referral": "🎁", "purchase": "🛒", "admin_bonus": "🛠",
-                  "admin_bonus_pending": "⏳", "admin_bonus_release": "✅"}
+                  "admin_bonus_pending": "⏳", "admin_bonus_release": "✅",
+                  "approved_rejection": "❌", "admin_bonus_reversal": "↩️"}
     lines = ["📜 <b>آخر 20 معاملة:</b>", ""]
     for tx in transactions[-20:][::-1]:
         icon = kind_icons.get(tx.get("kind", ""), "•")
@@ -4287,7 +4309,194 @@ async def approved_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         buttons = [("💰 خصم نقاط", f"deduct_points:{uid}:{account_token}"),
                    ("🔙 الطلبات المقبولة", "view_approved:0")]
+    if not account.get("rejected_at_24h"):
+        buttons.insert(0, ("❌ رفض الإيميل المقبول", f"reject_approved:{uid}:{account_token}"))
     await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
+
+
+async def reject_approved_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    parts = query.data.split(":")
+    uid = int(parts[1])
+    token = parts[2]
+    user_data = get_user(uid)
+    account_match = find_approved_account(user_data, token)
+    if account_match is None:
+        await query.edit_message_text(
+            "⚠️ هذا الحساب غير موجود.",
+            reply_markup=kb_single("🔙 الطلبات المقبولة", "view_approved:0"),
+        )
+        return
+    _, account = account_match
+    if account.get("rejected_at_24h"):
+        await query.answer("⚠️ هذا الإيميل مرفوض مسبقاً.", show_alert=True)
+        return
+
+    email = account.get("email", "")
+    display_email = tg_html_escape(email)
+    await query.edit_message_text(
+        f"⚠️ <b>رفض إيميل مقبول</b>\n\n"
+        f"📧 <code>{display_email}</code>\n"
+        "سيتم نقله إلى المرفوضة وإلغاء رصيده حسب حالته.\n\n"
+        "اختر سبب الرفض:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_vertical([
+            ("📧 إيميل خطأ", f"reject_approved_reason:email:{uid}:{account_callback_token(email)}"),
+            ("🔑 باسورد خطأ", f"reject_approved_reason:password:{uid}:{account_callback_token(email)}"),
+            ("🔐 رمز مصادقة خطأ", f"reject_approved_reason:totp:{uid}:{account_callback_token(email)}"),
+            ("🗝 كلمة مرور تطبيق خطأ", f"reject_approved_reason:app_pass:{uid}:{account_callback_token(email)}"),
+            ("📱 يحتاج رقم هاتف", f"reject_approved_reason:phone:{uid}:{account_callback_token(email)}"),
+            ("📝 خطأ آخر (اكتب السبب)", f"reject_approved_reason:other:{uid}:{account_callback_token(email)}"),
+            ("🔙 تفاصيل الحساب", f"approved_detail:{uid}:{account_callback_token(email)}"),
+        ]),
+    )
+
+
+async def execute_reject_approved_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    parts = query.data.split(":")
+    reason_type = parts[1]
+    uid = int(parts[2])
+    token = parts[3]
+    user_data = get_user(uid)
+    account_match = find_approved_account(user_data, token)
+    if account_match is None:
+        await query.edit_message_text(
+            "⚠️ هذا الحساب غير موجود.",
+            reply_markup=kb_single("🔙 الطلبات المقبولة", "view_approved:0"),
+        )
+        return
+    index, account = account_match
+    email = account.get("email", "")
+
+    if reason_type == "other":
+        context.user_data["reject_approved_uid"] = uid
+        context.user_data["reject_approved_token"] = token
+        context.user_data["step"] = "reject_approved_reason_text"
+        await query.edit_message_text(
+            f"📝 <b>اكتب سبب رفض الإيميل المقبول</b>\n\n"
+            f"📧 <code>{tg_html_escape(email)}</code>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_single("🔙 إلغاء", f"approved_detail:{uid}:{token}"),
+        )
+        return
+
+    await finalize_approved_rejection(
+        update, context, uid, index, account, reason_type
+    )
+
+
+async def finalize_approved_rejection(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    uid: int,
+    index: int,
+    account: dict,
+    reason: str,
+    reason_text: str = "",
+):
+    """يرفض حساباً مقبولاً ويعكس الرصيد والمكافأة المرتبطين به مرة واحدة."""
+    user_data = get_user(uid)
+    accounts = user_data.get("approved_accounts", [])
+    if index >= len(accounts) or accounts[index].get("email") != account.get("email"):
+        match = find_approved_account(user_data, account_callback_token(account.get("email", "")))
+        if match is None:
+            await update.effective_message.reply_text("⚠️ الحساب غير موجود أو تمت معالجته.")
+            return
+        index, account = match
+
+    account = dict(account)
+    email = account.get("email", "")
+    amount = clamp_money(account.get("amount", 0.0))
+    admin_bonus_status = account.get("admin_bonus_status")
+    was_released = bool(account.get("leave_confirmed")) and not account.get("rejected_at_24h")
+
+    accounts.pop(index)
+    user_data["approved_accounts"] = accounts
+    move_approved_account_to_rejected(user_data, account, reason, reason_text)
+    if admin_id := account.get("completed_by_admin"):
+        if account.get("admin_bonus", 0):
+            user_data["rejected_requests"][-1]["admin_bonus_status"] = "rejected"
+
+    if account.get("approved_with_leave") and not account.get("leave_confirmed"):
+        user_data["hold_balance"] = clamp_money(
+            float(user_data.get("hold_balance", 0.0)) - amount
+        )
+        add_transaction(user_data, "approved_rejection", amount,
+                        "رفض حساب مقبول وإلغاء الرصيد المعلّق", email)
+    elif was_released:
+        user_data["balance"] = clamp_money(
+            float(user_data.get("balance", 0.0)) - amount
+        )
+        user_data["spent_balance"] = clamp_money(
+            float(user_data.get("spent_balance", 0.0)) + amount
+        )
+        add_transaction(user_data, "debit", amount,
+                        "رفض حساب مقبول واسترداد المبلغ", email)
+    save_user(uid, user_data)
+
+    admin_bonus = clamp_money(account.get("admin_bonus", 0.0))
+    admin_data = None
+    if admin_id and admin_bonus > 0:
+        admin_data = get_user(int(admin_id))
+        if admin_bonus_status == "pending":
+            admin_data["admin_pending_balance"] = clamp_money(
+                float(admin_data.get("admin_pending_balance", 0.0)) - admin_bonus
+            )
+        elif admin_bonus_status == "released":
+            admin_data["admin_received_balance"] = clamp_money(
+                float(admin_data.get("admin_received_balance", 0.0)) - admin_bonus
+            )
+        add_transaction(admin_data, "admin_bonus_reversal", admin_bonus,
+                        f"إلغاء مكافأة رفض الحساب {email}", email)
+        account["admin_bonus_status"] = "rejected"
+        save_user(int(admin_id), admin_data)
+
+    reason_label = REJECT_REASON_LABELS.get(reason, reason)
+    try:
+        await context.bot.send_message(
+            chat_id=uid,
+            text=(
+                f"❌ *تم رفض إيميل مقبول*\n\n"
+                f"📧 `{email}`\n"
+                f"📝 السبب: {reason_text or reason_label}\n"
+                "تم نقل الإيميل إلى قائمة المرفوضة."
+            ),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    except Exception:
+        pass
+
+    for key in ("reject_approved_uid", "reject_approved_token", "step"):
+        context.user_data.pop(key, None)
+    await update.effective_message.reply_text(
+        f"✅ تم رفض الإيميل المقبول `{email}` ونقله إلى المرفوضة.",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_single("🔙 الطلبات المقبولة", "view_approved:0"),
+    )
+
+
+async def handle_reject_approved_reason_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = context.user_data.get("reject_approved_uid")
+    token = context.user_data.get("reject_approved_token")
+    if not uid or not token:
+        await update.message.reply_text("⚠️ حدث خطأ.")
+        return
+    user_data = get_user(uid)
+    match = find_approved_account(user_data, token)
+    if match is None:
+        await update.message.reply_text("⚠️ الحساب غير موجود أو تمت معالجته.")
+        return
+    index, account = match
+    await finalize_approved_rejection(
+        update, context, uid, index, account, "other", update.message.text.strip()
+    )
 
 
 async def new_totp_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5358,6 +5567,8 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     step = context.user_data.get("step")
     if step == "reject_reason_text":
         await handle_reject_reason_text(update, context); return
+    if step == "reject_approved_reason_text":
+        await handle_reject_approved_reason_text(update, context); return
     if step == "deduct_points_input":
         await handle_deduct_points_input(update, context); return
     if step == "give_points_input":
@@ -5735,6 +5946,10 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await auto_verify_account(update, context)
     elif data.startswith("approved_detail:"):
         await approved_detail(update, context)
+    elif data.startswith("reject_approved:"):
+        await reject_approved_start(update, context)
+    elif data.startswith("reject_approved_reason:"):
+        await execute_reject_approved_reason(update, context)
     elif data.startswith("new_totp_code:"):
         await new_totp_code(update, context)
     elif data.startswith("rejected_detail:"):
