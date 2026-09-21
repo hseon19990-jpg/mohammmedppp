@@ -2291,11 +2291,39 @@ def member_balance_stats(user_data: dict) -> dict:
             "total": round(total_balance, 2)}
 
 
-def admin_balance_stats(user_data: dict) -> dict:
+def calculate_member_hold_balance(user_data: dict) -> float:
+    """قيمة إيميلات العضو نفسه التي ما زالت داخل مدة التعليق."""
+    return clamp_money(sum(
+        float(account.get("amount", 0.0) or 0.0)
+        for account in user_data.get("approved_accounts", [])
+        if account.get("approved_with_leave")
+        and not account.get("leave_confirmed")
+    ))
+
+
+def calculate_admin_pending_balance(admin_id: int) -> float:
+    """مكافآت إكمال الأدمن فقط، من سجلات الإيميلات التي أكملها."""
+    total = 0.0
+    for encrypted_data in load_json(USERS_DB).values():
+        owner_data = decrypt_user_data(encrypted_data)
+        for account in owner_data.get("approved_accounts", []):
+            if (
+                str(account.get("completed_by_admin")) == str(admin_id)
+                and account.get("admin_bonus_status") == "pending"
+            ):
+                total += float(account.get("admin_bonus", 0.0) or 0.0)
+    return clamp_money(total)
+
+
+def admin_balance_stats(user_data: dict, admin_id: Optional[int] = None) -> dict:
     """أرصدة الأدمن مع فصل المعلّق عن المال الواصل والقابل للاستخدام."""
     pending = clamp_money(user_data.get("pending_balance", 0.0))
-    hold = clamp_money(user_data.get("hold_balance", 0.0))
-    admin_pending = clamp_money(user_data.get("admin_pending_balance", 0.0))
+    hold = calculate_member_hold_balance(user_data)
+    admin_pending = (
+        calculate_admin_pending_balance(admin_id)
+        if admin_id is not None
+        else clamp_money(user_data.get("admin_pending_balance", 0.0))
+    )
     received = clamp_money(user_data.get("admin_received_balance", 0.0))
 
     ordinary = clamp_money(user_data.get("balance", 0.0))
@@ -2350,7 +2378,11 @@ async def handle_member_check_input(update: Update, context: ContextTypes.DEFAUL
     totp_only = sum(1 for a in submitted_accounts if a.get("has_totp") and not a.get("has_app_pass"))
     app_password = sum(1 for a in submitted_accounts if a.get("has_totp") and a.get("has_app_pass"))
     balances = member_balance_stats(user_data)
-    admin_balances = admin_balance_stats(user_data) if is_admin(member_id) else None
+    admin_balances = (
+        admin_balance_stats(user_data, member_id)
+        if is_admin(member_id)
+        else None
+    )
     display_username = next(
         (r.get("user_username") for records in (approved, pending, rejected)
          for r in records if r.get("user_username")),
@@ -3005,7 +3037,8 @@ async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     original_amount = float(request.get("amount", 0.0))
-    full_price = ADMIN_TIER3_PRICE
+    # مكافأة الأدمن هي المتبقي من سعر المستوى الثالث الفعلي بعد سعر الطلب الأصلي.
+    full_price = get_tier_prices()["tier_3"]
     admin_bonus = round(full_price - original_amount, 2)
     if admin_bonus < 0:
         admin_bonus = 0.0
@@ -5142,7 +5175,7 @@ async def my_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = get_user(query.from_user.id)
     if is_admin(query.from_user.id):
-        balances = admin_balance_stats(user)
+        balances = admin_balance_stats(user, query.from_user.id)
         await query.edit_message_text(
             f"💰 <b>أموالي — رصيد الأدمن</b>\n\n"
             f"⏳ <b>طلبات بانتظار الموافقة:</b> ${balances['pending']:.2f}\n"
