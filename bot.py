@@ -2041,8 +2041,6 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
                 float(admin_data.get("admin_pending_balance", 0.0)) - admin_bonus)
             admin_data["admin_received_balance"] = clamp_money(
                 float(admin_data.get("admin_received_balance", 0.0)) + admin_bonus)
-            admin_data["balance"] = clamp_money(
-                float(admin_data.get("balance", 0.0)) + admin_bonus)
             admin_data["total_credited_balance"] = clamp_money(
                 float(admin_data.get("total_credited_balance", 0.0)) + admin_bonus)
             add_transaction(admin_data, "admin_bonus_release", admin_bonus,
@@ -2276,22 +2274,23 @@ def admin_balance_stats(user_data: dict) -> dict:
     admin_pending = clamp_money(user_data.get("admin_pending_balance", 0.0))
     received = clamp_money(user_data.get("admin_received_balance", 0.0))
 
-    # البيانات القديمة كانت تضيف مكافأة الأدمن مباشرة إلى balance.
-    # نقرأ معاملات المكافأة القديمة حتى لا يظهر رصيد الأدمن الواصل صفراً.
+    # لا تُعدّ مكافأة الأدمن واصلة إلا من سجل التحرير بعد الفحص الثاني.
+    # معاملات admin_bonus القديمة كانت تُسجل قبل الفحص، لذلك لا تدخل هنا.
     transaction_received = clamp_money(sum(
         float(tx.get("amount", 0.0) or 0.0)
         for tx in user_data.get("transactions", [])
-        if tx.get("kind") in {"admin_bonus", "admin_bonus_release"}
+        if tx.get("kind") == "admin_bonus_release"
     ))
     received = max(received, transaction_received)
 
-    current = clamp_money(user_data.get("balance", 0.0))
-    total_owned = clamp_money(current + admin_pending)
+    ordinary = clamp_money(user_data.get("balance", 0.0))
+    total_owned = clamp_money(ordinary + received)
     return {
         "pending": pending,
         "hold": hold,
         "admin_pending": admin_pending,
         "received": received,
+        "ordinary": ordinary,
         "total_owned": total_owned,
     }
 
