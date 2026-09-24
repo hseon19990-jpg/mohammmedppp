@@ -1075,6 +1075,25 @@ def normalize_forced_channel(value: str) -> str:
     return value
 
 
+def parse_forced_channel_input(value: str) -> Tuple[str, str]:
+    """Parse a public channel handle or a private channel ID and invite link."""
+    channel_value, separator, link_value = value.partition("|")
+    channel = normalize_forced_channel(channel_value)
+    invite_link = link_value.strip() if separator else ""
+    valid_handle = bool(re.fullmatch(r"@[A-Za-z0-9_]{5,32}", channel))
+    valid_chat_id = bool(re.fullmatch(r"-100\d+", channel))
+    valid_invite_link = not invite_link or bool(
+        re.fullmatch(
+            r"https?://t\.me/(?:\+[A-Za-z0-9_-]+|joinchat/[A-Za-z0-9_-]+)",
+            invite_link,
+            flags=re.IGNORECASE,
+        )
+    )
+    if not (valid_handle or valid_chat_id) or not valid_invite_link:
+        return "", ""
+    return channel, invite_link
+
+
 def get_configured_purchase_channels() -> Tuple[str, str]:
     config = load_config()
     channel_1 = str(config.get("purchase_channel_1") or PURCHASE_CHANNEL_1).strip()
@@ -1117,9 +1136,16 @@ async def check_forced_channel(update: Update, context: ContextTypes.DEFAULT_TYP
     user_id = update.effective_user.id
     if user_id == OWNER_ID:
         return True
+    # Reuse a successful check during this update when both the router and the
+    # destination handler enforce membership.
+    if context.user_data.get("_forced_channel_checked_update_id") == update.update_id:
+        return True
     try:
         member = await context.bot.get_chat_member(forced_channel, user_id)
-        if member.status in {"member", "administrator", "creator"}:
+        if member.status in {"member", "administrator", "creator"} or (
+            member.status == "restricted" and getattr(member, "is_member", False)
+        ):
+            context.user_data["_forced_channel_checked_update_id"] = update.update_id
             return True
     except Exception as exc:
         logger.warning("Forced-channel check failed for %s: %s", user_id, exc)
@@ -2514,13 +2540,14 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
     context.user_data.pop("step", None)
+    context.user_data.pop("store_action", None)
     buttons = [
         ("👥 الإدارية", "admin_management"),
         ("💰 أسعار المستويات", "set_tier_prices"),
         ("📋 الطلبات", "approval_requests"),
         ("📹 قسم الفيديوهات", "videos_section"),
         ("🛒 المبيعات", "store_section"),
-        ("📢 قناة إجبارية", "forced_channel"),
+        ("➕ إضافة قناة إجبارية", "forced_channel"),
         ("📨 كروبات إشعارات الشراء", "purchase_channels"),
         ("📊 جميع الحسابات المقبولة", "all_accounts_section"),
         ("❌ رفض إيميل مقبول بالعنوان", "reject_approved_by_email"),
@@ -5357,7 +5384,9 @@ async def forced_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = [("🗑️ إلغاء القناة", "remove_channel"), ("🔙 إعدادات المالك", "owner_panel")]
     await query.edit_message_text(
         f"📢 *القناة الإجبارية*\n\n📌 الحالية: `{current_channel or 'لا توجد'}`\n\n"
-        f"✏️ أرسل معرف القناة الجديدة:",
+        "أرسل معرف قناة عامة مثل `@channel` أو رابطها.\n"
+        "للقناة الخاصة أرسل المعرف الرقمي ورابط الدعوة بهذا الشكل:\n"
+        "`-1001234567890 | https://t.me/+invite`",
         parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
     context.user_data["store_action"] = "set_channel"
 
@@ -5369,7 +5398,9 @@ async def remove_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     config = load_config()
     config["forced_channel"] = ""
+    config.pop("forced_channel_link", None)
     save_config(config)
+    context.user_data.pop("store_action", None)
     await query.edit_message_text("✅ تم إلغاء القناة.",
                                   reply_markup=kb_single("🔙 إعدادات المالك", "owner_panel"))
 
@@ -5718,11 +5749,11 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     user_id = update.effective_user.id
 
-    if user_id in PENDING_PURCHASES:
-        await handle_purchase_message(update, context)
+    if not await check_forced_channel(update, context):
         return
 
-    if not await check_forced_channel(update, context):
+    if user_id in PENDING_PURCHASES:
+        await handle_purchase_message(update, context)
         return
 
     admin_approval_step = context.user_data.get("admin_approval_step")
@@ -5826,10 +5857,52 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data.pop("store_action", None)
         await main_menu(update, context)
     elif action == "set_channel":
+        channel, invite_link = parse_forced_channel_input(text)
+        if not channel:
+            await update.message.reply_text(
+                "⚠️ صيغة القناة غير صحيحة.\n"
+                "أرسل @username أو رابط قناة عامة. للقناة الخاصة أرسل:\n"
+                "-1001234567890 | https://t.me/+invite"
+            )
+            return
+
+        try:
+            chat = await context.bot.get_chat(channel)
+            if chat.type not in {"channel", "supergroup"}:
+                await update.message.reply_text("⚠️ المعرف لا يعود إلى قناة أو مجموعة.")
+                return
+
+            bot_user = await context.bot.get_me()
+            bot_member = await context.bot.get_chat_member(chat.id, bot_user.id)
+            if bot_member.status not in {"administrator", "creator"}:
+                await update.message.reply_text(
+                    "⚠️ أضف البوت مشرفاً في القناة أولاً، ثم أعد إرسال بياناتها."
+                )
+                return
+        except Exception:
+            logger.exception("Could not validate the forced channel")
+            await update.message.reply_text(
+                "⚠️ تعذر الوصول إلى القناة. تأكد من صحة المعرف وأن البوت مشرف فيها."
+            )
+            return
+
+        join_link = invite_link or (
+            f"https://t.me/{chat.username}" if getattr(chat, "username", None) else ""
+        )
+        if not join_link:
+            await update.message.reply_text(
+                "⚠️ هذه قناة خاصة. أرسل المعرف الرقمي مع رابط الدعوة، مفصولين بعلامة |."
+            )
+            return
+
         config = load_config()
-        config["forced_channel"] = normalize_forced_channel(text)
+        config["forced_channel"] = str(chat.id)
+        config["forced_channel_link"] = join_link
         save_config(config)
-        await update.message.reply_text(f"✅ تم تعيين القناة: {config['forced_channel']}")
+        await update.message.reply_text(
+            f"✅ تمت إضافة القناة الإجبارية: {chat.title}\n"
+            "يجب على الأعضاء الانضمام إليها قبل استخدام البوت."
+        )
         context.user_data.pop("store_action", None)
         await main_menu(update, context)
     elif action in {"set_purchase_channel_1", "set_purchase_channel_2"}:
@@ -6022,6 +6095,8 @@ async def handle_referral(update: Update, context: ContextTypes.DEFAULT_TYPE, re
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_forced_channel(update, context):
+        return
     clear_edit_state(context)
     SESSIONS.pop(update.effective_user.id, None)
     save_sessions()
@@ -6047,6 +6122,8 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         return
     await query.answer()
+    if not await check_forced_channel(update, context):
+        return
 
     if data == "main_menu":
         await main_menu(update, context)
@@ -6249,6 +6326,8 @@ async def placeholder(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== COMMANDS ====================
 async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_forced_channel(update, context):
+        return
     user_id = update.effective_user.id
     admins = load_admins()
     await update.message.reply_text(
@@ -6270,7 +6349,7 @@ async def owner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                ("📋 الطلبات", "approval_requests"),
                ("📹 قسم الفيديوهات", "videos_section"),
                ("🛒 المبيعات", "store_section"),
-               ("📢 قناة إجبارية", "forced_channel"),
+               ("➕ إضافة قناة إجبارية", "forced_channel"),
                ("📊 جميع الحسابات المقبولة", "all_accounts_section"),
                ("📈 إحصائيات المستخدمين", "owner_stats"),
                ("🔎 فحص عضو", "check_member"),
@@ -6282,6 +6361,8 @@ async def owner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_forced_channel(update, context):
+        return
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("🚫 هذا الأمر للأدمن فقط.")
         return
