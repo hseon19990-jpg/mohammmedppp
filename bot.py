@@ -1,8 +1,9 @@
 """
-Advanced Telegram Account Manager Bot - v5.3
+Advanced Telegram Account Manager Bot - v5.4
 - FIXED: Session conflict between add_account flow and other steps
 - FIXED: Email step incorrectly triggering TOTP validation
 - FIXED: Stale sessions not cleared when starting new add_account
+- FIXED: Warning message now shown ONLY when member clicks "استلام $0.10"
 - Owner-triggered IMAP verification
 - AUTO IMAP verification on submit (full 4-field accounts only)
 - 24-hour hold + re-verification before releasing points
@@ -1610,26 +1611,21 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-        warning_text = (
-            "⚠️ *تنبيه مهم قبل المتابعة*\n\n"
-            "لقد أدخلت الإيميل والباسورد فقط.\n\n"
-            "🚨 *في حال إرسال الحساب الآن:*\n"
-            f"• سيتم ربح *${prices['tier_1']:.2f}* فقط\n"
-            "• احتمال كبير للرفض\n"
-            "• قبول بطيء (مراجعة يدوية من المالك)\n\n"
-            "✅ *ننصحك بإكمال البيانات:*\n"
-            "• إيميل + باسورد + رمز مصادقة + كلمة مرور التطبيق\n"
-            f"• سعر أعلى (*${prices['tier_3']:.2f}*)\n"
-            "• *تحقق تلقائي فوري* وقبول سريع\n\n"
+        # ✅ عرض الخيارات مباشرة بدون تحذير
+        # التحذير يظهر فقط عند ضغط العضو على زر "استلام tier_1"
+        options_text = (
+            "✅ *تم حفظ الإيميل والباسورد*\n\n"
+            f"💰 *السعر الحالي:* ${prices['tier_1']:.2f} (إيميل + باسورد)\n"
+            f"💰 *السعر الكامل:* ${prices['tier_3']:.2f} (مع رمز المصادقة + كلمة مرور التطبيق)\n\n"
             "📌 ماذا تريد أن تفعل؟"
         )
         buttons = [
             ("✅ إكمال العملية (موصى به)", f"continue_full:{uid}"),
-            (f"⚠️ تأكيد وإرسال بـ ${prices['tier_1']:.2f}", f"submit_tier_1:{uid}"),
+            (f"💰 استلام ${prices['tier_1']:.2f}", f"prompt_tier_1:{uid}"),
             ("❌ إلغاء", "cancel"),
         ]
         await update.message.reply_text(
-            warning_text, parse_mode=ParseMode.MARKDOWN,
+            options_text, parse_mode=ParseMode.MARKDOWN,
             reply_markup=kb_vertical(buttons))
 
     elif session.step == "totp":
@@ -1902,6 +1898,53 @@ async def continue_full_process(update: Update, context: ContextTypes.DEFAULT_TY
         f"💰 *الكامل (مع كلمة مرور التطبيق):* ${prices['tier_3']:.2f}\n\n"
         f"📌 أرسل الآن مفتاح المصادقة للمتابعة إلى الخطوة 4/4",
         parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
+
+
+# ==================== TIER 1 WARNING (NEW) ====================
+async def prompt_tier_1_warning(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    ✅ يعرض التحذير فقط عند ضغط العضو على زر 'استلام $tier_1'.
+    بعد التحذير، يمكن للعضو:
+      - تأكيد الإرسال → submit_tier_1
+      - الرجوع وإكمال البيانات → continue_full_process
+      - الإلغاء → cancel
+    """
+    query = update.callback_query
+    uid = int(query.data.split(":")[1])
+
+    # ✅ تحقق أن المستخدم هو صاحب الجلسة
+    if query.from_user.id != uid:
+        await query.answer("⚠️ غير مصرح.", show_alert=True)
+        return
+
+    session = SESSIONS.get(uid)
+    if not session or not session.email or not session.password:
+        await query.answer("⚠️ الجلسة منتهية، حاول مرة أخرى.", show_alert=True)
+        return
+
+    prices = get_tier_prices()
+    warning_text = (
+        "⚠️ *تنبيه مهم قبل المتابعة*\n\n"
+        "لقد أدخلت الإيميل والباسورد فقط.\n\n"
+        "🚨 *في حال إرسال الحساب الآن:*\n"
+        f"• سيتم ربح *${prices['tier_1']:.2f}* فقط\n"
+        "• احتمال كبير للرفض\n"
+        "• قبول بطيء (مراجعة يدوية من المالك)\n\n"
+        "✅ *ننصحك بإكمال البيانات:*\n"
+        "• إيميل + باسورد + رمز مصادقة + كلمة مرور التطبيق\n"
+        f"• سعر أعلى (*${prices['tier_3']:.2f}*)\n"
+        "• *تحقق تلقائي فوري* وقبول سريع\n\n"
+        "📌 هل أنت متأكد من الإرسال بـ "
+        f"*${prices['tier_1']:.2f}* فقط؟"
+    )
+    buttons = [
+        ("✅ نعم، أرسل الآن", f"submit_tier_1:{uid}"),
+        ("🔙 رجوع (سأكمل البيانات)", f"continue_full:{uid}"),
+        ("❌ إلغاء", "cancel"),
+    ]
+    await query.edit_message_text(
+        warning_text, parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_vertical(buttons))
 
 
 async def submit_tier_1(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -6176,6 +6219,8 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await add_account_cancel(update, context)
     elif data.startswith("continue_full:"):
         await continue_full_process(update, context)
+    elif data.startswith("prompt_tier_1:"):
+        await prompt_tier_1_warning(update, context)
     elif data.startswith("submit_tier_1:"):
         await submit_tier_1(update, context)
     elif data.startswith("submit_tier_2:"):
