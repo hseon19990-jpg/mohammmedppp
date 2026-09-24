@@ -16,6 +16,23 @@ messages) and set both `PURCHASE_CHANNEL_1` and `PURCHASE_CHANNEL_2`. The bot
 uses escaped HTML formatting so user-entered names and service text cannot
 break Telegram message delivery.
 
+## Mandatory channel
+
+The owner can open **➕ إضافة قناة إجبارية** from the owner panel and set one
+channel that members must join before using the bot. The bot must be an
+administrator in that channel so Telegram can verify each member.
+
+For a public channel, send its `@username` or `https://t.me/username`. For a
+private channel, send its numeric ID and invite link separated by `|`, for
+example:
+
+```text
+-1001234567890 | https://t.me/+invite
+```
+
+The owner is exempt from the membership check. Members who have not joined see
+a join button and can retry the check after joining.
+
 The bot stores users, balances, requests, settings, and uploaded videos in this
 directory. It also writes a `.bak` copy of each JSON file and saves changes
 atomically, so restarts and interrupted writes do not erase the data.
@@ -31,5 +48,5 @@ new persistent directory is empty. Do not delete the volume.
 python -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt
-python main.py
+python bot.py
 ```
