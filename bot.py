@@ -1,11 +1,14 @@
 """
-Advanced Telegram Account Manager Bot - v5.2
+Advanced Telegram Account Manager Bot - v5.3
+- FIXED: Session conflict between add_account flow and other steps
+- FIXED: Email step incorrectly triggering TOTP validation
+- FIXED: Stale sessions not cleared when starting new add_account
 - Owner-triggered IMAP verification
 - AUTO IMAP verification on submit (full 4-field accounts only)
 - 24-hour hold + re-verification before releasing points
 - Rejected-after-24h accounts stay in records
 - Admin panel: complete tier1/tier2 requests to tier3, earn bonus
-- Show TOTP code button for admin & owner (tier_2 requests) [FIXED]
+- Show TOTP code button for admin & owner (tier_2 requests)
 - Reject reason: "Needs phone number" added
 - Encryption at rest (Fernet)
 - Session & pending-purchase persistence
@@ -707,12 +710,16 @@ def find_approved_account(user_data: dict, token: str) -> Optional[Tuple[int, di
 
 
 def get_active_account_status(email: str) -> Optional[str]:
+    """✅ FIXED: يتجاهل الحسابات المرفوضة بعد 24 ساعة."""
     normalized_email = normalize_email(email)
     if not normalized_email:
         return None
     users = load_json(USERS_DB)
     for user_data in users.values():
         for account in user_data.get("approved_accounts", []):
+            # تجاهل الحسابات المرفوضة بعد 24 ساعة
+            if account.get("rejected_at_24h"):
+                continue
             if normalize_email(dec(account.get("email", ""))) == normalized_email:
                 return "approved"
     for user_data in users.values():
@@ -723,6 +730,7 @@ def get_active_account_status(email: str) -> Optional[str]:
 
 
 def has_active_app_password(password: str) -> bool:
+    """✅ FIXED: يتجاهل كلمات المرور في الطلبات المرفوضة."""
     cleaned_password = str(password or "").replace(" ", "").upper()
     if not cleaned_password:
         return False
@@ -730,6 +738,9 @@ def has_active_app_password(password: str) -> bool:
     for user_data in users.values():
         for collection_name in ("approved_accounts", "pending_requests"):
             for record in user_data.get(collection_name, []):
+                # تجاهل الحسابات المرفوضة
+                if record.get("rejected_at_24h"):
+                    continue
                 stored = str(dec(record.get("app_pass", "")) or "").replace(" ", "").upper()
                 if stored == cleaned_password:
                     return True
@@ -744,6 +755,9 @@ def has_active_account_password(password: str) -> bool:
     for user_data in users.values():
         for collection_name in ("approved_accounts", "pending_requests"):
             for record in user_data.get(collection_name, []):
+                # تجاهل الحسابات المرفوضة
+                if record.get("rejected_at_24h"):
+                    continue
                 stored = str(dec(record.get("password", "")) or "").strip()
                 if stored and stored == candidate:
                     return True
@@ -1136,8 +1150,6 @@ async def check_forced_channel(update: Update, context: ContextTypes.DEFAULT_TYP
     user_id = update.effective_user.id
     if user_id == OWNER_ID:
         return True
-    # Reuse a successful check during this update when both the router and the
-    # destination handler enforce membership.
     if context.user_data.get("_forced_channel_checked_update_id") == update.update_id:
         return True
     try:
@@ -1453,12 +1465,31 @@ async def handle_edit_field_input(update: Update, context: ContextTypes.DEFAULT_
 
 # ==================== ADD ACCOUNT FLOW ====================
 async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """✅ FIXED: تنظيف شامل للجلسات والخطوات القديمة قبل البدء."""
     if not await check_forced_channel(update, context):
         return
     uid = update.effective_user.id
+    
+    # ✅ تنظيف شامل لأي جلسة أو خطوة قديمة
+    SESSIONS.pop(uid, None)
+    save_sessions()
     clear_edit_state(context)
+    
+    # ✅ حذف أي مفاتيح قديمة قد تسبب تداخل
+    for key in ("step", "editing_field", "editing_uid", "editing_index",
+                "admin_completing_uid", "admin_completing_index", 
+                "admin_completing_token", "admin_approval_step",
+                "approval_uid", "approval_index", "approval_token",
+                "approval_data", "approval_step", "approval_with_leave",
+                "reject_uid", "reject_index", "reject_reason",
+                "deduct_uid", "deduct_token", "give_uid", "give_index",
+                "mode", "store_action", "setting_tier", "pending_video_type"):
+        context.user_data.pop(key, None)
+    
+    # ✅ الآن أنشئ جلسة جديدة نظيفة
     SESSIONS[uid] = Session(step="email")
     save_sessions()
+    
     config = load_config()
     prices = get_tier_prices()
     has_email_video = config.get("video_email") and Path(config.get("video_email", "")).exists()
@@ -1506,33 +1537,51 @@ async def add_account_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """✅ FIXED: التحقق من الجلسة الصالحة قبل المعالجة."""
     uid = update.effective_user.id
     text = update.message.text.strip()
+    
+    # ✅ التحقق من وجود جلسة صالحة
     session = SESSIONS.get(uid)
     if not session or not session.step:
+        # لا توجد جلسة نشطة - تجاهل الرسالة
         return
+    
+    # ✅ إذا كان المستخدم في وضع تعديل حقل، اذهب لدالة التعديل
     if context.user_data.get("step") == "editing_field":
         await handle_edit_field_input(update, context)
         return
+    
     config = load_config()
     prices = get_tier_prices()
 
     if session.step == "email":
         email = normalize_email(text)
         if not re.match(r"[^@]+@[^@]+\.[^@]+", email):
-            await update.message.reply_text("❌ إيميل غير صالح.")
+            await update.message.reply_text("❌ إيميل غير صالح. أرسل إيميلاً صحيحاً:")
             return
         active_status = get_active_account_status(email)
+        # إذا كان الإيميل مقبولاً، امنعه
         if active_status == "approved":
             await update.message.reply_text("❌ هذا الإيميل مقبول مسبقاً! لا يمكنك إعادة إرساله.",
                                             reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
             SESSIONS.pop(uid, None); save_sessions()
             return
+        # إذا كان الإيميل قيد الانتظار، اسمح للمستخدم بحذف الطلب القديم وإعادة الإرسال
         if active_status == "pending":
-            await update.message.reply_text("⏳ هذا الإيميل قيد الانتظار بالفعل! انتظر موافقة المالك.",
-                                            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
-            SESSIONS.pop(uid, None); save_sessions()
-            return
+            user_data = get_user(uid)
+            pending = user_data.get("pending_requests", [])
+            # احذف أي طلب سابق لنفس الإيميل
+            old_amounts = [float(r.get("amount", 0.0)) for r in pending
+                           if normalize_email(r.get("email", "")) == email]
+            new_pending = [r for r in pending
+                           if normalize_email(r.get("email", "")) != email]
+            if len(new_pending) != len(pending):
+                user_data["pending_requests"] = new_pending
+                user_data["pending_balance"] = clamp_money(
+                    float(user_data.get("pending_balance", 0.0)) - sum(old_amounts)
+                )
+                save_user(uid, user_data)
         session.email = email
         session.step = "password"
         save_sessions()
@@ -1584,6 +1633,14 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=kb_vertical(buttons))
 
     elif session.step == "totp":
+        # ✅ تحقق أن المستخدم قد أكمل الخطوات السابقة
+        if not session.email or not session.password:
+            await update.message.reply_text(
+                "⚠️ حدث خطأ في الجلسة. يرجى البدء من جديد.",
+                reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+            SESSIONS.pop(uid, None)
+            save_sessions()
+            return
         try:
             cleaned = text.replace(" ", "").upper()
             if len(cleaned) != 32:
@@ -2025,8 +2082,6 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
     price = float(account.get("amount", 0.0))
     hold_hours = max(1, int(account.get("hold_seconds", LEAVE_HOLD_SECONDS)) // 3600)
 
-    # الحسابات التي أكملها الأدمن أو تحققت تلقائياً يجب إعادة فحص IMAP
-    # قبل تحرير الرصيد؛ نجاح الفحص الأول لا يكفي بعد مرور فترة التعليق.
     requires_release_recheck = (
         account.get("auto_verified", False)
         or bool(account.get("completed_by_admin"))
@@ -2341,7 +2396,6 @@ def member_balance_stats(user_data: dict) -> dict:
 
 
 def calculate_member_hold_balance(user_data: dict) -> float:
-    """قيمة إيميلات العضو نفسه التي ما زالت داخل مدة التعليق."""
     return clamp_money(sum(
         float(account.get("amount", 0.0) or 0.0)
         for account in user_data.get("approved_accounts", [])
@@ -2351,7 +2405,6 @@ def calculate_member_hold_balance(user_data: dict) -> float:
 
 
 def calculate_admin_ledger(admin_id: int) -> dict:
-    """يقرأ مكافآت الأدمن الحالية والقديمة من سجلات الإيميلات نفسها."""
     pending_cents = 0
     released_cents = 0
     legacy_released_cents = 0
@@ -2377,18 +2430,14 @@ def calculate_admin_ledger(admin_id: int) -> dict:
                 released_cents += bonus_cents
                 released_count += 1
             elif account.get("approved_with_leave") and not account.get("leave_confirmed"):
-                # سجل قديم لم يكن يحتوي admin_bonus_status.
                 pending_cents += bonus_cents
                 pending_count += 1
             else:
-                # سجل قديم وصل بعد انتهاء مدة التعليق.
                 legacy_released_cents += bonus_cents
                 released_count += 1
 
     released_total_cents = released_cents + legacy_released_cents
     if released_total_cents <= 0:
-        # توافق إضافي مع النسخ الأقدم التي كانت تسجل المكافأة كـ admin_bonus
-        # قبل إضافة حقل admin_bonus_status إلى سجل الحساب.
         released_total_cents = sum(
             money_to_cents(tx.get("amount", 0.0))
             for raw_uid, encrypted_data in load_json(USERS_DB).items()
@@ -2407,7 +2456,6 @@ def calculate_admin_ledger(admin_id: int) -> dict:
 
 
 def admin_balance_stats(user_data: dict, admin_id: Optional[int] = None) -> dict:
-    """أرصدة الأدمن مع فصل المعلّق عن المال الواصل والقابل للاستخدام."""
     pending = clamp_money(user_data.get("pending_balance", 0.0))
     hold = calculate_member_hold_balance(user_data)
     admin_ledger = (
@@ -2793,7 +2841,6 @@ async def admin_request_detail(update: Update, context: ContextTypes.DEFAULT_TYP
     msg += f"💵 <b>مكافأتك عند الإكمال:</b> ${admin_bonus:.2f}\n"
 
     buttons = []
-    # ✅ زر عرض الكود إذا كان الطلب يحتوي على TOTP
     if has_totp and request.get("totp"):
         buttons.append(("🔢 عرض الكود", f"admin_show_code:{uid}:{account_callback_token(email)}"))
     if not has_totp and not has_app_pass:
@@ -2808,10 +2855,6 @@ async def admin_request_detail(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def admin_show_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    زر عرض كود TOTP الحالي للأدمن.
-    [FIXED] يُرسل الكود كرسالة عادية (وليس alert) لضمان الوصول.
-    """
     query = update.callback_query
     if not is_admin(query.from_user.id):
         await query.answer("🚫 أدمن فقط.", show_alert=True)
@@ -2846,7 +2889,6 @@ async def admin_show_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer(f"⚠️ {err}", show_alert=True)
         return
 
-    # ✅ إرسال الكود كرسالة جديدة (وليس alert) لضمان الوصول
     await query.answer("✅ تم إرسال الكود إليك.", show_alert=False)
     try:
         await send_totp_code_message(
@@ -3020,7 +3062,6 @@ async def handle_admin_app_pass_input(update: Update, context: ContextTypes.DEFA
 async def prompt_admin_acceptance_choice(update: Update,
                                           context: ContextTypes.DEFAULT_TYPE,
                                           uid: int, index: int):
-    """بعد اكتمال البيانات، دع الأدمن يختار مدة التعليق وطريقة القبول."""
     user_data = get_user(uid)
     pending = user_data.get("pending_requests", [])
     if index is None or index >= len(pending):
@@ -3097,7 +3138,6 @@ async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_T
                                   uid: int, index: int,
                                   hold_seconds: int = LEAVE_HOLD_SECONDS,
                                   send_leave_video: bool = False):
-    """تحقق IMAP فوراً ثم اعتمد الطلب بمدة التعليق التي اختارها الأدمن."""
     admin_id = update.effective_user.id
     reply_target = update.effective_message
     user_data = get_user(uid)
@@ -3148,7 +3188,6 @@ async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     original_amount_cents = money_to_cents(request.get("amount", 0.0))
-    # مكافأة الأدمن هي المتبقي من سعر المستوى الثالث الفعلي بعد سعر الطلب الأصلي.
     full_price_cents = money_to_cents(get_tier_prices()["tier_3"])
     original_amount = cents_to_money(original_amount_cents)
     admin_bonus = cents_to_money(max(0, full_price_cents - original_amount_cents))
@@ -3592,7 +3631,6 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_config()
     has_leave_video = config.get("video_leave") and Path(config.get("video_leave", "")).exists()
     buttons = []
-    # ✅ زر عرض الكود إذا كان الطلب يحتوي على TOTP
     if request.get("has_totp", False) and request.get("totp"):
         buttons.append(("🔢 عرض الكود", f"owner_show_code:{uid}:{request_token}"))
     if not request.get("has_totp", False) or not request.get("has_app_pass", False):
@@ -3618,10 +3656,6 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def owner_show_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    زر عرض كود TOTP الحالي للمالك.
-    [FIXED] يُرسل الكود كرسالة عادية (وليس alert) لضمان الوصول.
-    """
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
@@ -3656,7 +3690,6 @@ async def owner_show_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer(f"⚠️ {err}", show_alert=True)
         return
 
-    # ✅ إرسال الكود كرسالة جديدة (وليس alert)
     await query.answer("✅ تم إرسال الكود إليك.", show_alert=False)
     try:
         await send_totp_code_message(
@@ -3888,7 +3921,6 @@ async def complete_approval(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
 # ==================== APPROVE / REJECT ====================
 def can_reject_pending_request(actor_id: int, user_data: dict, index: int) -> bool:
-    """المالك والأدمن يستطيعان رفض أي طلب معلق ظاهر في قائمتهما."""
     if actor_id == OWNER_ID:
         return True
     if not is_admin(actor_id):
@@ -3903,7 +3935,6 @@ def rejection_list_callback(actor_id: int) -> str:
 
 async def start_owner_completion(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                  uid: int, index: int, with_leave: bool = False):
-    """ابدأ إكمال الحقول الناقصة فقط عند طلب المالك ذلك صراحةً."""
     query = update.callback_query
     user_data = get_user(uid)
     pending = user_data.get("pending_requests", [])
@@ -4098,7 +4129,6 @@ async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TY
         else f"admin_request_detail:{uid}:{request_token}"
     )
 
-    # For "other" we ask for custom text before removing
     if reason_type == "other":
         context.user_data["reject_uid"] = uid
         context.user_data["reject_index"] = index
@@ -4110,7 +4140,6 @@ async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data["step"] = "reject_reason_text"
         return
 
-    # All other reasons (email, password, totp, app_pass, phone): reject immediately
     pending.pop(index)
     move_request_to_rejected(user_data, request, reason_type)
     user_data["pending_requests"] = pending
@@ -4118,7 +4147,6 @@ async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TY
 
     reason = REJECT_REASON_MESSAGES.get(reason_type, "❌ تم رفض طلبك.")
 
-    # Send rejection video if available
     config = load_config()
     video_key = REJECT_REASON_VIDEO_KEY.get(reason_type)
     video_path = config.get(video_key) if video_key else None
@@ -4600,7 +4628,6 @@ async def finalize_approved_rejection(
     reason: str,
     reason_text: str = "",
 ):
-    """يرفض حساباً مقبولاً ويعكس الرصيد والمكافأة المرتبطين به مرة واحدة."""
     user_data = get_user(uid)
     accounts = user_data.get("approved_accounts", [])
     if index >= len(accounts) or accounts[index].get("email") != account.get("email"):
@@ -5746,11 +5773,24 @@ async def referral_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== TEXT INPUT ROUTER ====================
 async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """✅ FIXED: أولوية للجلسة النشطة لمنع التداخل."""
     text = update.message.text.strip()
     user_id = update.effective_user.id
 
     if not await check_forced_channel(update, context):
         return
+
+    # ✅ أولوية قصوى: إذا كان المستخدم في جلسة إضافة حساب، اذهب مباشرة لها
+    session = SESSIONS.get(user_id)
+    if session and session.step:
+        # تأكد من عدم وجود خطوات إدارية عالقة
+        admin_steps = ("admin_approval_step", "step", "mode", "store_action")
+        has_admin_step = any(context.user_data.get(k) for k in admin_steps)
+        
+        # إذا لم يكن هناك خطوة إدارية، اذهب لجلسة الإضافة
+        if not has_admin_step:
+            await add_account_step(update, context)
+            return
 
     if user_id in PENDING_PURCHASES:
         await handle_purchase_message(update, context)
@@ -5836,7 +5876,10 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("store_action"):
         await handle_store_input(update, context); return
 
-    await add_account_step(update, context)
+    # ✅ إذا لم يتم التعرف على أي خطوة، ولا توجد جلسة نشطة، تجاهل
+    if session and session.step:
+        await add_account_step(update, context)
+        return
 
 
 async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
