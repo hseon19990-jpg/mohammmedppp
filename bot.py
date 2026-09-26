@@ -1,5 +1,7 @@
 """
-Advanced Telegram Account Manager Bot - v5.4
+Advanced Telegram Account Manager Bot - v5.5
+- NEW: Owner "Check Email" tool — full history lookup (pending/approved/rejected)
+- NEW: Track "who rejected" across all rejection paths
 - FIXED: Session conflict between add_account flow and other steps
 - FIXED: Email step incorrectly triggering TOTP validation
 - FIXED: Stale sessions not cleared when starting new add_account
@@ -2624,6 +2626,340 @@ async def handle_member_check_input(update: Update, context: ContextTypes.DEFAUL
                                                               ("🔙 لوحة المالك", "owner_panel")]))
 
 
+# ==================== CHECK EMAIL BY ADDRESS (OWNER) ====================
+def _search_email_in_all_records(email: str) -> List[dict]:
+    """يبحث عن الإيميل في جميع سجلات المستخدمين (منتظرة، مقبولة، مرفوضة)."""
+    normalized = normalize_email(email)
+    if not normalized:
+        return []
+    results: List[dict] = []
+    users = load_json(USERS_DB)
+    for raw_uid, encrypted_data in users.items():
+        try:
+            uid = int(raw_uid)
+        except (TypeError, ValueError):
+            continue
+        user_data = decrypt_user_data(encrypted_data)
+        for idx, acc in enumerate(user_data.get("approved_accounts", []) or []):
+            if normalize_email(acc.get("email", "")) == normalized:
+                results.append({"record_type": "approved", "user_id": uid,
+                                "index": idx, "data": acc, "user_data": user_data})
+        for idx, req in enumerate(user_data.get("pending_requests", []) or []):
+            if normalize_email(req.get("email", "")) == normalized:
+                results.append({"record_type": "pending", "user_id": uid,
+                                "index": idx, "data": req, "user_data": user_data})
+        for idx, rej in enumerate(user_data.get("rejected_requests", []) or []):
+            if normalize_email(rej.get("email", "")) == normalized:
+                results.append({"record_type": "rejected", "user_id": uid,
+                                "index": idx, "data": rej, "user_data": user_data})
+    return results
+
+
+def _format_record_status(record_type: str, rec: dict) -> str:
+    if record_type == "pending":
+        return "⏳ قيد الانتظار (مراجعة)"
+    if record_type == "approved":
+        if rec.get("rejected_at_24h"):
+            return "🔴 مرفوض بعد فحص 24 ساعة"
+        if rec.get("approved_with_leave") and not rec.get("leave_confirmed"):
+            return "🟡 مقبول — رصيد معلّق (24 ساعة)"
+        if rec.get("approved_with_leave") and rec.get("leave_confirmed"):
+            return "🟢 مقبول — تم تحويل الرصيد"
+        return "🟢 مقبول"
+    reason = rec.get("reject_reason", "unknown")
+    return f"❌ مرفوض — {REJECT_REASON_LABELS.get(reason, reason)}"
+
+
+def _format_iso_time(value: Any) -> str:
+    if not value or not isinstance(value, str):
+        return ""
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+    except Exception:
+        return value[:19]
+
+
+def _build_email_record_report(match: dict, position: int, total: int) -> str:
+    record_type = match["record_type"]
+    uid = match["user_id"]
+    rec = match["data"]
+    user_data = match["user_data"]
+
+    lines: List[str] = []
+    lines.append(f"<b>━━━ سجل {position}/{total} ━━━</b>")
+    lines.append(f"<b>الحالة:</b> {_format_record_status(record_type, rec)}")
+    lines.append(f"<b>نوع السجل:</b> <code>{record_type}</code>")
+
+    display_name = rec.get("user_name") or user_data.get("user_name") or "غير معروف"
+    display_username = rec.get("user_username") or user_data.get("user_username") or "لا يوجد"
+    lines.append("")
+    lines.append("<b>👤 بيانات البائع (من أرسله):</b>")
+    lines.append(f"  • الاسم: {tg_html_escape(display_name)}")
+    lines.append(f"  • اليوزر: @{tg_html_escape(display_username)}")
+    lines.append(f"  • معرف: <code>{uid}</code>")
+
+    lines.append("")
+    lines.append("<b>📧 بيانات الحساب:</b>")
+    lines.append(f"  • الإيميل: <code>{tg_html_escape(rec.get('email', ''))}</code>")
+    password = rec.get("password", "")
+    if password:
+        lines.append(f"  • الباسورد: <code>{tg_html_escape(password)}</code>")
+    else:
+        lines.append("  • الباسورد: ❌ غير موجود")
+    totp = rec.get("totp", "")
+    if totp:
+        lines.append(f"  • TOTP: <code>{tg_html_escape(totp)}</code>")
+        try:
+            current_code = pyotp.TOTP(totp).now()
+            seconds_left = 30 - (int(time.time()) % 30)
+            lines.append(f"  • الكود الحالي: <code>{current_code}</code> (⏰ {seconds_left}s)")
+        except Exception:
+            lines.append("  • الكود الحالي: ⚠️ تعذّر توليده")
+    else:
+        lines.append("  • TOTP: ❌ غير موجود")
+    app_pass = rec.get("app_pass", "")
+    if app_pass:
+        lines.append(f"  • App Password: <code>{tg_html_escape(format_app_password(app_pass))}</code>")
+    else:
+        lines.append("  • App Password: ❌ غير موجود")
+
+    if rec.get("has_app_pass") and rec.get("has_totp"):
+        tier = "🟢 كامل (إيميل+باسورد+TOTP+App Pass)"
+    elif rec.get("has_totp"):
+        tier = "🟡 (إيميل+باسورد+TOTP)"
+    else:
+        tier = "🔵 (إيميل+باسورد فقط)"
+    lines.append(f"  • المستوى: {tier}")
+
+    amount = rec.get("amount")
+    requested = rec.get("requested_amount")
+    if amount is not None or requested is not None:
+        lines.append("")
+        lines.append("<b>💰 المبالغ:</b>")
+        if amount is not None:
+            try:
+                lines.append(f"  • المبلغ: <code>${float(amount):.2f}</code>")
+            except (TypeError, ValueError):
+                lines.append(f"  • المبلغ: <code>{tg_html_escape(str(amount))}</code>")
+        if requested is not None:
+            try:
+                lines.append(f"  • المبلغ المطلوب: <code>${float(requested):.2f}</code>")
+            except (TypeError, ValueError):
+                pass
+
+    ts_entries = [
+        ("وقت الإرسال", rec.get("timestamp")),
+        ("وقت القبول", rec.get("approval_time")),
+        ("موعد التحرير", rec.get("release_at")),
+        ("وقت الرفض", rec.get("rejected_at")),
+    ]
+    rendered = [(label, _format_iso_time(v)) for label, v in ts_entries if v]
+    if rendered:
+        lines.append("")
+        lines.append("<b>🕐 الأوقات:</b>")
+        for label, v in rendered:
+            lines.append(f"  • {label}: <code>{tg_html_escape(v)}</code>")
+
+    if record_type == "approved":
+        lines.append("")
+        lines.append("<b>📌 حالة المغادرة/التحويل:</b>")
+        if rec.get("leave_confirmed"):
+            lines.append("  • ✅ تم التأكيد والتحويل")
+        elif rec.get("approved_with_leave"):
+            lines.append("  • ⏳ معلّق — لم يؤكد بعد")
+        else:
+            lines.append("  • ➖ لا ينطبق (قبول فوري)")
+        if rec.get("auto_confirmed"):
+            lines.append("  • 🤖 تأكيد تلقائي: نعم")
+        if rec.get("rejected_at_24h"):
+            lines.append("  • ❌ مرفوض بعد إعادة الفحص")
+        if rec.get("rejection_reason"):
+            lines.append(f"  • سبب الرفض (24h): {tg_html_escape(rec.get('rejection_reason'))}")
+
+    if rec.get("completed_by_admin"):
+        lines.append("")
+        lines.append("<b>🛠 من قبله/أكمله:</b>")
+        lines.append(f"  • معرف الأدمن: <code>{rec.get('completed_by_admin')}</code>")
+        if rec.get("completed_by_admin_name"):
+            lines.append(f"  • الاسم: {tg_html_escape(rec.get('completed_by_admin_name'))}")
+        if rec.get("completed_by_admin_username"):
+            lines.append(f"  • اليوزر: @{tg_html_escape(rec.get('completed_by_admin_username'))}")
+        if rec.get("completed_at"):
+            lines.append(f"  • وقت الإكمال: <code>{tg_html_escape(_format_iso_time(rec.get('completed_at')))}</code>")
+        if rec.get("acceptance_mode"):
+            mode_map = {"leave_video": "📹 مع فيديو المغادرة", "automatic": "✅ تلقائي"}
+            lines.append(f"  • طريقة القبول: {mode_map.get(rec.get('acceptance_mode'), rec.get('acceptance_mode'))}")
+        if rec.get("admin_bonus") is not None:
+            try:
+                lines.append(f"  • مكافأة الأدمن: <code>${float(rec.get('admin_bonus', 0)):.2f}</code>")
+            except (TypeError, ValueError):
+                pass
+        if rec.get("admin_bonus_status"):
+            status_map = {"pending": "⏳ معلّقة", "released": "✅ واصلة",
+                          "rejected": "❌ ملغاة", "not_applicable": "➖ لا ينطبق"}
+            lines.append(f"  • حالة المكافأة: {status_map.get(rec.get('admin_bonus_status'), rec.get('admin_bonus_status'))}")
+
+    if rec.get("rejected_by"):
+        lines.append("")
+        lines.append("<b>❌ من رفضه:</b>")
+        lines.append(f"  • معرف: <code>{rec.get('rejected_by')}</code>")
+        if rec.get("rejected_by_name"):
+            lines.append(f"  • الاسم: {tg_html_escape(rec.get('rejected_by_name'))}")
+        if rec.get("rejected_by_username"):
+            lines.append(f"  • اليوزر: @{tg_html_escape(rec.get('rejected_by_username'))}")
+        if rec.get("rejected_at"):
+            lines.append(f"  • وقت الرفض: <code>{tg_html_escape(_format_iso_time(rec.get('rejected_at')))}</code>")
+
+    if record_type == "rejected" or rec.get("reject_reason"):
+        reason = rec.get("reject_reason")
+        if reason:
+            lines.append("")
+            lines.append("<b>📝 تفاصيل الرفض:</b>")
+            lines.append(f"  • السبب: {REJECT_REASON_LABELS.get(reason, reason)}")
+            if rec.get("reject_reason_text"):
+                lines.append(f"  • نص السبب: {tg_html_escape(rec.get('reject_reason_text'))}")
+            if rec.get("rejected_from_approved"):
+                lines.append("  • 📌 مرفوض من سجل المقبولة")
+            if rec.get("rejected_at"):
+                lines.append(f"  • وقت: <code>{tg_html_escape(_format_iso_time(rec.get('rejected_at')))}</code>")
+
+    verification = rec.get("verification") or {}
+    if verification:
+        lines.append("")
+        lines.append("<b>🔍 التحقق الأولي:</b>")
+        level = verification.get("level", "unknown")
+        level_text = {"verified": "🟢 كامل", "partial": "🟡 جزئي",
+                      "failed": "🔴 فشل", "unknown": "⚪ غير معروف"}.get(level, level)
+        lines.append(f"  • المستوى: {level_text}")
+        if verification.get("imap_ok") is not None:
+            lines.append(f"  • IMAP: {'✅' if verification.get('imap_ok') else '❌'}")
+        if verification.get("totp_ok") is not None:
+            lines.append(f"  • TOTP: {'✅' if verification.get('totp_ok') else '❌'}")
+        if verification.get("verified_by"):
+            lines.append(f"  • بواسطة: <code>{tg_html_escape(verification.get('verified_by'))}</code>")
+        if verification.get("verified_at"):
+            lines.append(f"  • وقت: <code>{tg_html_escape(_format_iso_time(verification.get('verified_at')))}</code>")
+        if verification.get("message"):
+            lines.append(f"  • الرسالة: {tg_html_escape(verification.get('message'))}")
+
+    verification_24h = rec.get("verification_24h") or {}
+    if verification_24h:
+        lines.append("")
+        lines.append("<b>🔍 إعادة فحص 24 ساعة:</b>")
+        level = verification_24h.get("level", "unknown")
+        level_text = {"verified": "🟢 كامل", "partial": "🟡 جزئي",
+                      "failed": "🔴 فشل", "unknown": "⚪ غير معروف"}.get(level, level)
+        lines.append(f"  • المستوى: {level_text}")
+        if verification_24h.get("verified_at"):
+            lines.append(f"  • وقت: <code>{tg_html_escape(_format_iso_time(verification_24h.get('verified_at')))}</code>")
+        if verification_24h.get("message"):
+            lines.append(f"  • الرسالة: {tg_html_escape(verification_24h.get('message'))}")
+
+    if rec.get("extracted"):
+        lines.append("")
+        lines.append("📤 <b>مستخرج:</b> ✅ نعم")
+
+    return "\n".join(lines)
+
+
+async def check_email_by_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    context.user_data["step"] = "check_email_input"
+    await query.edit_message_text(
+        "🔍 <b>فحص إيميل</b>\n\n"
+        "أرسل عنوان الإيميل الذي تريد فحصه بالكامل:\n"
+        "مثال: <code>user@example.com</code>\n\n"
+        "سيتم عرض جميع السجلات المتعلقة به (منتظر / مقبول / مرفوض) "
+        "مع من أرسله، من قبله، من رفضه، وكل التفاصيل الكاملة.\n\n"
+        "أو أرسل «إلغاء» للعودة.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_single("🔙 لوحة المالك", "owner_panel"))
+
+
+async def handle_check_email_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        return
+    text = (update.message.text or "").strip()
+    if text.casefold() in {"إلغاء", "الغاء", "cancel"}:
+        context.user_data.pop("step", None)
+        await update.message.reply_text(
+            "❌ تم الإلغاء.",
+            reply_markup=kb_single("🔙 لوحة المالك", "owner_panel"))
+        return
+
+    email = text
+    if "@" not in email or len(email) < 5:
+        await update.message.reply_text("⚠️ أرسل عنوان إيميل صحيحاً.")
+        return
+
+    matches = _search_email_in_all_records(email)
+    context.user_data.pop("step", None)
+
+    if not matches:
+        await update.message.reply_text(
+            f"📭 <b>لا توجد نتائج</b>\n\n"
+            f"📧 <code>{tg_html_escape(email)}</code>\n\n"
+            f"لم يتم العثور على هذا الإيميل في أي سجل (منتظر/مقبول/مرفوض).",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_vertical([
+                ("🔍 فحص إيميل آخر", "check_email_by_address"),
+                ("🔙 لوحة المالك", "owner_panel"),
+            ]))
+        return
+
+    await update.message.reply_text(
+        f"🔍 <b>تقرير فحص الإيميل</b>\n\n"
+        f"📧 <code>{tg_html_escape(email)}</code>\n"
+        f"📊 عدد السجلات المطابقة: <b>{len(matches)}</b>\n\n"
+        f"سيتم إرسال كل سجل بتفاصيله الكاملة…",
+        parse_mode=ParseMode.HTML)
+
+    for i, match in enumerate(matches, 1):
+        report = _build_email_record_report(match, i, len(matches))
+        if len(report) > 4000:
+            report = report[:3900] + "\n\n<i>… (تم اقتصاص التقرير)</i>"
+        try:
+            await update.message.reply_text(report, parse_mode=ParseMode.HTML)
+        except Exception:
+            logger.exception("Failed to send email record report")
+            plain = re.sub(r"<[^>]+>", "", report)
+            await update.message.reply_text(plain[:4000])
+
+    unique_users = sorted({m["user_id"] for m in matches})
+    footer_lines = ["<b>📌 ملخص سريع</b>"]
+    footer_lines.append(f"• عدد السجلات: <b>{len(matches)}</b>")
+    footer_lines.append(f"• عدد البائعين المختلفين: <b>{len(unique_users)}</b>")
+    approved_ct = sum(1 for m in matches if m["record_type"] == "approved")
+    pending_ct = sum(1 for m in matches if m["record_type"] == "pending")
+    rejected_ct = sum(1 for m in matches if m["record_type"] == "rejected")
+    footer_lines.append(f"• ✅ مقبولة: {approved_ct}")
+    footer_lines.append(f"• ⏳ منتظرة: {pending_ct}")
+    footer_lines.append(f"• ❌ مرفوضة: {rejected_ct}")
+    if len(unique_users) == 1:
+        uid = unique_users[0]
+        u = get_user(uid)
+        stats = member_balance_stats(u)
+        footer_lines.append("")
+        footer_lines.append(f"<b>💰 رصيد البائع (<code>{uid}</code>):</b>")
+        footer_lines.append(f"  • الحالي: <code>${stats['current']:.2f}</code>")
+        footer_lines.append(f"  • قيد الانتظار: <code>${stats['pending']:.2f}</code>")
+        footer_lines.append(f"  • معلّق: <code>${stats['hold']:.2f}</code>")
+        footer_lines.append(f"  • المستهلك: <code>${stats['spent']:.2f}</code>")
+        footer_lines.append(f"  • الكلي: <code>${stats['total']:.2f}</code>")
+
+    await update.message.reply_text(
+        "\n".join(footer_lines),
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_vertical([
+            ("🔍 فحص إيميل آخر", "check_email_by_address"),
+            ("🔙 لوحة المالك", "owner_panel"),
+        ]))
+
+
 # ==================== OWNER PANEL ====================
 async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -2644,6 +2980,7 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ("❌ رفض إيميل مقبول بالعنوان", "reject_approved_by_email"),
         ("📈 إحصائيات المستخدمين", "owner_stats"),
         ("🔎 فحص عضو", "check_member"),
+        ("🔍 فحص إيميل", "check_email_by_address"),
         ("🔗 نظام الإحالة", "referral_settings"),
         ("💰 خصم/منح نقاط", "points_management"),
         ("🔙 القائمة الرئيسية", "main_menu")
@@ -4186,6 +4523,14 @@ async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TY
     pending.pop(index)
     move_request_to_rejected(user_data, request, reason_type)
     user_data["pending_requests"] = pending
+    # ▼ NEW: سجّل من قام بالرفض ▼
+    actor = update.effective_user
+    if user_data.get("rejected_requests"):
+        user_data["rejected_requests"][-1]["rejected_by"] = actor_id
+        user_data["rejected_requests"][-1]["rejected_by_name"] = actor.full_name or "غير معروف"
+        user_data["rejected_requests"][-1]["rejected_by_username"] = actor.username or ""
+        user_data["rejected_requests"][-1]["rejected_at"] = datetime.now(timezone.utc).isoformat()
+    # ▲ NEW ▲
     save_user(uid, user_data)
 
     reason = REJECT_REASON_MESSAGES.get(reason_type, "❌ تم رفض طلبك.")
@@ -4241,6 +4586,14 @@ async def handle_reject_reason_text(update: Update, context: ContextTypes.DEFAUL
     pending.pop(index)
     move_request_to_rejected(user_data, request, "other", text)
     user_data["pending_requests"] = pending
+    # ▼ NEW: سجّل من قام بالرفض ▼
+    actor = update.effective_user
+    if user_data.get("rejected_requests"):
+        user_data["rejected_requests"][-1]["rejected_by"] = actor_id
+        user_data["rejected_requests"][-1]["rejected_by_name"] = actor.full_name or "غير معروف"
+        user_data["rejected_requests"][-1]["rejected_by_username"] = actor.username or ""
+        user_data["rejected_requests"][-1]["rejected_at"] = datetime.now(timezone.utc).isoformat()
+    # ▲ NEW ▲
     save_user(uid, user_data)
     try:
         await context.bot.send_message(
@@ -4689,6 +5042,13 @@ async def finalize_approved_rejection(
     accounts.pop(index)
     user_data["approved_accounts"] = accounts
     move_approved_account_to_rejected(user_data, account, reason, reason_text)
+    # ▼ NEW: سجّل من قام بالرفض ▼
+    actor = update.effective_user
+    if user_data.get("rejected_requests"):
+        user_data["rejected_requests"][-1]["rejected_by"] = actor.id
+        user_data["rejected_requests"][-1]["rejected_by_name"] = actor.full_name or "غير معروف"
+        user_data["rejected_requests"][-1]["rejected_by_username"] = actor.username or ""
+    # ▲ NEW ▲
     if admin_id := account.get("completed_by_admin"):
         if account.get("admin_bonus", 0):
             user_data["rejected_requests"][-1]["admin_bonus_status"] = "rejected"
@@ -5855,6 +6215,8 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_add_admin_input(update, context); return
 
     step = context.user_data.get("step")
+    if step == "check_email_input":
+        await handle_check_email_input(update, context); return
     if step == "reject_reason_text":
         await handle_reject_reason_text(update, context); return
     if step == "reject_approved_email_input":
@@ -6267,6 +6629,8 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await admin_show_code(update, context)
     elif data == "check_member":
         await check_member(update, context)
+    elif data == "check_email_by_address":
+        await check_email_by_address(update, context)
     elif data == "set_tier_prices":
         await set_tier_prices(update, context)
     elif data.startswith("set_tier:"):
@@ -6441,6 +6805,7 @@ async def owner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                ("📊 جميع الحسابات المقبولة", "all_accounts_section"),
                ("📈 إحصائيات المستخدمين", "owner_stats"),
                ("🔎 فحص عضو", "check_member"),
+               ("🔍 فحص إيميل", "check_email_by_address"),
                ("🔗 نظام الإحالة", "referral_settings"),
                ("💰 خصم/منح نقاط", "points_management"),
                ("🔙 القائمة الرئيسية", "main_menu")]
