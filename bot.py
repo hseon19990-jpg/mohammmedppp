@@ -1,24 +1,12 @@
 """
-Advanced Telegram Account Manager Bot - v5.5
-- NEW: Owner "Check Email" tool — full history lookup (pending/approved/rejected)
-- NEW: Track "who rejected" across all rejection paths
-- FIXED: Session conflict between add_account flow and other steps
-- FIXED: Email step incorrectly triggering TOTP validation
-- FIXED: Stale sessions not cleared when starting new add_account
-- FIXED: Warning message now shown ONLY when member clicks "استلام $0.10"
-- Owner-triggered IMAP verification
-- AUTO IMAP verification on submit (full 4-field accounts only)
-- 24-hour hold + re-verification before releasing points
-- Rejected-after-24h accounts stay in records
-- Admin panel: complete tier1/tier2 requests to tier3, earn bonus
-- Show TOTP code button for admin & owner (tier_2 requests)
-- Reject reason: "Needs phone number" added
-- Encryption at rest (Fernet)
-- Session & pending-purchase persistence
-- Config cache with TTL
-- Transaction history
-- IMAP rate limiting (60s per email)
-- Daily auto backup
+Advanced Telegram Account Manager Bot - v5.6
+- NEW: "🏆 الأكثر بيعاً" for members & owner (top 10 sellers incl. rejected)
+- NEW: Contest system for owner (target emails / max winners / reward per winner)
+- NEW: Contest stats: Total sales + Contest-period sales
+- NEW: Auto-award when seller reaches target during contest window
+- FIXED: Rejected/Approved sorted newest-first; Pending sorted oldest-first
+- Reports show WHO rejected (id/name/username) in owner email search
+- (all prior fixes retained)
 """
 
 import asyncio
@@ -107,7 +95,6 @@ def clamp_money(value: Any) -> float:
 
 
 def spendable_balance_cents(user_data: dict) -> int:
-    """الرصيد القابل للاستخدام = الرصيد العادي + مكافآت الأدمن الواصلة."""
     return (
         money_to_cents(user_data.get("balance", 0))
         + money_to_cents(user_data.get("admin_received_balance", 0))
@@ -115,15 +102,12 @@ def spendable_balance_cents(user_data: dict) -> int:
 
 
 def debit_spendable_balance(user_data: dict, amount_cents: int) -> bool:
-    """يخصم من الرصيد العادي أولاً ثم من أموال الأدمن الواصلة."""
     if amount_cents < 0 or spendable_balance_cents(user_data) < amount_cents:
         return False
-
     regular_cents = money_to_cents(user_data.get("balance", 0))
     admin_cents = money_to_cents(user_data.get("admin_received_balance", 0))
     regular_debit = min(regular_cents, amount_cents)
     admin_debit = amount_cents - regular_debit
-
     user_data["balance"] = cents_to_money(regular_cents - regular_debit)
     user_data["admin_received_balance"] = cents_to_money(admin_cents - admin_debit)
     user_data["spent_balance"] = cents_to_money(
@@ -455,6 +439,7 @@ DEFAULT_USER_FIELDS = {
     "pending_purchases": [],
     "used_app_passwords": [],
     "transactions": [],
+    "contest_wins": [],
 }
 
 
@@ -661,7 +646,6 @@ def move_request_to_rejected(user_data: dict, request: dict, reason: str, reason
 def move_approved_account_to_rejected(
     user_data: dict, account: dict, reason: str, reason_text: str = ""
 ):
-    """ينقل حساباً مقبولاً إلى سجل المرفوضة دون لمس رصيد الطلبات المنتظرة."""
     rejected_account = dict(account)
     rejected_account["reject_reason"] = reason
     rejected_account["rejected_from_approved"] = True
@@ -684,7 +668,6 @@ def account_callback_token(email: Any) -> str:
 
 
 def find_pending_request(user_data: dict, token: str) -> Optional[Tuple[int, dict]]:
-    """ابحث بالإيميل الثابت، مع دعم أزرار الفهارس القديمة."""
     pending = user_data.get("pending_requests", [])
     if not isinstance(pending, list):
         return None
@@ -713,14 +696,12 @@ def find_approved_account(user_data: dict, token: str) -> Optional[Tuple[int, di
 
 
 def get_active_account_status(email: str) -> Optional[str]:
-    """✅ FIXED: يتجاهل الحسابات المرفوضة بعد 24 ساعة."""
     normalized_email = normalize_email(email)
     if not normalized_email:
         return None
     users = load_json(USERS_DB)
     for user_data in users.values():
         for account in user_data.get("approved_accounts", []):
-            # تجاهل الحسابات المرفوضة بعد 24 ساعة
             if account.get("rejected_at_24h"):
                 continue
             if normalize_email(dec(account.get("email", ""))) == normalized_email:
@@ -733,7 +714,6 @@ def get_active_account_status(email: str) -> Optional[str]:
 
 
 def has_active_app_password(password: str) -> bool:
-    """✅ FIXED: يتجاهل كلمات المرور في الطلبات المرفوضة."""
     cleaned_password = str(password or "").replace(" ", "").upper()
     if not cleaned_password:
         return False
@@ -741,7 +721,6 @@ def has_active_app_password(password: str) -> bool:
     for user_data in users.values():
         for collection_name in ("approved_accounts", "pending_requests"):
             for record in user_data.get(collection_name, []):
-                # تجاهل الحسابات المرفوضة
                 if record.get("rejected_at_24h"):
                     continue
                 stored = str(dec(record.get("app_pass", "")) or "").replace(" ", "").upper()
@@ -758,7 +737,6 @@ def has_active_account_password(password: str) -> bool:
     for user_data in users.values():
         for collection_name in ("approved_accounts", "pending_requests"):
             for record in user_data.get(collection_name, []):
-                # تجاهل الحسابات المرفوضة
                 if record.get("rejected_at_24h"):
                     continue
                 stored = str(dec(record.get("password", "")) or "").strip()
@@ -1006,10 +984,6 @@ def imap_rate_mark(email: str):
 
 # ==================== TOTP CODE GENERATION ====================
 def generate_totp_code_info(totp_secret: str) -> Tuple[bool, str, str, int]:
-    """
-    Generate current TOTP code.
-    Returns: (success, code, error_message, seconds_remaining)
-    """
     if not totp_secret:
         return False, "", "لا يوجد رمز مصادقة لهذا الطلب.", 0
     cleaned = totp_secret.replace(" ", "").upper()
@@ -1038,7 +1012,6 @@ async def send_totp_code_message(
     back_callback: str = "",
     auto_refresh: bool = False,
 ):
-    """Send TOTP code as a normal message (more reliable than alert)."""
     ok, code, err, seconds = generate_totp_code_info(totp_secret)
     if not ok:
         await context.bot.send_message(
@@ -1093,7 +1066,6 @@ def normalize_forced_channel(value: str) -> str:
 
 
 def parse_forced_channel_input(value: str) -> Tuple[str, str]:
-    """Parse a public channel handle or a private channel ID and invite link."""
     channel_value, separator, link_value = value.partition("|")
     channel = normalize_forced_channel(channel_value)
     invite_link = link_value.strip() if separator else ""
@@ -1181,6 +1153,365 @@ async def check_forced_channel_callback(update: Update, context: ContextTypes.DE
         await main_menu(update, context)
 
 
+# ==================== SORT HELPERS ====================
+def _record_sort_key(record: dict) -> str:
+    """مفتاح زمني موحّد للترتيب (ISO string)."""
+    return str(
+        record.get("timestamp")
+        or record.get("approval_time")
+        or record.get("rejected_at")
+        or record.get("completed_at")
+        or record.get("confirmed_at")
+        or ""
+    )
+
+
+def sort_records_newest_first(records: List[dict]) -> List[dict]:
+    """ترتيب الأحدث أولاً (للمقبولة والمرفوضة)."""
+    if not isinstance(records, list):
+        return []
+    try:
+        return sorted(records, key=_record_sort_key, reverse=True)
+    except Exception:
+        return list(records)
+
+
+def sort_records_oldest_first(records: List[dict]) -> List[dict]:
+    """ترتيب الأقدم أولاً (للمنتظرة)."""
+    if not isinstance(records, list):
+        return []
+    try:
+        return sorted(records, key=_record_sort_key)
+    except Exception:
+        return list(records)
+
+
+# ==================== TOP SELLERS & SALES STATS ====================
+def compute_top_sellers(limit: int = 10) -> List[dict]:
+    """
+    أعلى الأعضاء بيعاً (مجموع السجلات: مقبولة + منتظرة + مرفوضة).
+    """
+    users = load_json(USERS_DB)
+    rows = []
+    for raw_uid, encrypted_data in users.items():
+        try:
+            uid = int(raw_uid)
+        except (TypeError, ValueError):
+            continue
+        user_data = decrypt_user_data(encrypted_data)
+        total = (
+            len(user_data.get("approved_accounts", []) or [])
+            + len(user_data.get("pending_requests", []) or [])
+            + len(user_data.get("rejected_requests", []) or [])
+        )
+        if total <= 0:
+            continue
+        approved = len(user_data.get("approved_accounts", []) or [])
+        rejected = len(user_data.get("rejected_requests", []) or [])
+        pending = len(user_data.get("pending_requests", []) or [])
+        display_name = user_data.get("user_name") or ""
+        display_username = user_data.get("user_username") or ""
+        if not display_name or not display_username:
+            for collection in ("approved_accounts", "pending_requests", "rejected_requests"):
+                for rec in user_data.get(collection, []) or []:
+                    if not display_name and rec.get("user_name"):
+                        display_name = rec.get("user_name")
+                    if not display_username and rec.get("user_username"):
+                        display_username = rec.get("user_username")
+                    if display_name and display_username:
+                        break
+                if display_name and display_username:
+                    break
+        rows.append({
+            "user_id": uid,
+            "total": total,
+            "approved": approved,
+            "pending": pending,
+            "rejected": rejected,
+            "name": display_name or "غير معروف",
+            "username": display_username or "",
+        })
+    rows.sort(key=lambda r: (-r["total"], r["user_id"]))
+    return rows[:limit]
+
+
+def compute_sales_stats(since_iso: Optional[str] = None) -> dict:
+    """
+    إحصائيات البيع الكلية أو خلال فترة زمنية (المسابقة).
+    - since_iso=None: كل السجلات.
+    - since_iso="...": فقط السجلات بعد هذا الوقت.
+    """
+    start_dt = None
+    if since_iso:
+        try:
+            start_dt = datetime.fromisoformat(since_iso)
+            if start_dt.tzinfo is None:
+                start_dt = start_dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            start_dt = None
+
+    users = load_json(USERS_DB)
+    total_accounts = 0
+    approved_ct = 0
+    pending_ct = 0
+    rejected_ct = 0
+    per_user: Dict[int, dict] = {}
+
+    def _record_in_window(rec: dict) -> bool:
+        if start_dt is None:
+            return True
+        t = _record_sort_key(rec)
+        if not t:
+            return False
+        try:
+            dt = datetime.fromisoformat(t)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return False
+        return dt >= start_dt
+
+    for raw_uid, encrypted_data in users.items():
+        try:
+            uid = int(raw_uid)
+        except (TypeError, ValueError):
+            continue
+        ud = decrypt_user_data(encrypted_data)
+        counts = {"total": 0, "approved": 0, "pending": 0, "rejected": 0}
+        for key, coll in (
+            ("approved", "approved_accounts"),
+            ("pending", "pending_requests"),
+            ("rejected", "rejected_requests"),
+        ):
+            for rec in ud.get(coll, []) or []:
+                if not _record_in_window(rec):
+                    continue
+                counts[key] += 1
+                counts["total"] += 1
+        if counts["total"] > 0:
+            per_user[uid] = counts
+            total_accounts += counts["total"]
+            approved_ct += counts["approved"]
+            pending_ct += counts["pending"]
+            rejected_ct += counts["rejected"]
+
+    top = sorted(per_user.items(), key=lambda x: (-x[1]["total"], x[0]))[:10]
+    top_list = []
+    for uid, counts in top:
+        u = get_user(uid)
+        name = u.get("user_name") or "غير معروف"
+        username = u.get("user_username") or ""
+        if not name or name == "غير معروف" or not username:
+            for collection in ("approved_accounts", "pending_requests", "rejected_requests"):
+                for rec in u.get(collection, []) or []:
+                    if (not name or name == "غير معروف") and rec.get("user_name"):
+                        name = rec.get("user_name")
+                    if not username and rec.get("user_username"):
+                        username = rec.get("user_username")
+                    if name and username:
+                        break
+                if name and username:
+                    break
+        top_list.append({
+            "user_id": uid,
+            "name": name,
+            "username": username,
+            **counts,
+        })
+    return {
+        "total_accounts": total_accounts,
+        "approved": approved_ct,
+        "pending": pending_ct,
+        "rejected": rejected_ct,
+        "top": top_list,
+        "since": since_iso,
+    }
+
+
+# ==================== CONTEST SYSTEM ====================
+def get_contest() -> dict:
+    config = load_config()
+    contest = config.get("contest")
+    if not isinstance(contest, dict):
+        return {}
+    return contest
+
+
+def save_contest(contest: dict):
+    config = load_config()
+    config["contest"] = contest
+    save_config(config)
+
+
+def _count_approved_in_window(user_data: dict, start_iso: Optional[str]) -> int:
+    if not start_iso:
+        return 0
+    try:
+        start_dt = datetime.fromisoformat(start_iso)
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return 0
+    count = 0
+    for acc in user_data.get("approved_accounts", []) or []:
+        if acc.get("rejected_at_24h"):
+            continue
+        t = _record_sort_key(acc)
+        if not t:
+            continue
+        try:
+            dt = datetime.fromisoformat(t)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        if dt >= start_dt:
+            count += 1
+    return count
+
+
+def contest_summary_lines(contest: dict) -> List[str]:
+    if not contest:
+        return ["📭 لا توجد مسابقة حالياً."]
+    active = bool(contest.get("active"))
+    started_at = contest.get("started_at")
+    target = int(contest.get("target_emails", 0) or 0)
+    max_winners = int(contest.get("max_winners", 0) or 0)
+    reward = float(contest.get("reward_per_winner", 0) or 0)
+    winners = contest.get("winners", []) or []
+    total_pts = float(contest.get("total_points_awarded", 0) or 0)
+    total_emails_delivered = int(contest.get("total_emails_delivered", 0) or 0)
+    lines = []
+    lines.append(f"📌 <b>الحالة:</b> {'🟢 نشطة' if active else '🔴 متوقفة'}")
+    if started_at:
+        lines.append(f"🕐 <b>بدأت:</b> <code>{tg_html_escape(_format_iso_time(started_at))}</code>")
+    lines.append(f"🎯 <b>الهدف لكل فائز:</b> <code>{target}</code> إيميل")
+    lines.append(f"🏅 <b>الحد الأقصى للفائزين:</b> <code>{max_winners}</code>")
+    lines.append(f"💰 <b>مكافأة كل فائز:</b> <code>${reward:.2f}</code>")
+    lines.append("")
+    lines.append(f"✅ <b>عدد الفائزين الحالي:</b> <code>{len(winners)}</code> / <code>{max_winners}</code>")
+    lines.append(f"📨 <b>عدد الإيميلات الواصلة (خلال المسابقة):</b> <code>{total_emails_delivered}</code>")
+    lines.append(f"💵 <b>النقاط الممنوحة:</b> <code>${total_pts:.2f}</code>")
+    return lines
+
+
+async def check_contest_award(context: ContextTypes.DEFAULT_TYPE, uid: int):
+    """
+    يُستدعى بعد كل قبول ناجح. يتحقق إن وصل البائع للهدف خلال فترة المسابقة.
+    """
+    contest = get_contest()
+    if not contest or not contest.get("active"):
+        return
+    started_at = contest.get("started_at")
+    if not started_at:
+        return
+    target = int(contest.get("target_emails", 0) or 0)
+    max_winners = int(contest.get("max_winners", 0) or 0)
+    reward = float(contest.get("reward_per_winner", 0) or 0)
+    if target <= 0 or max_winners <= 0 or reward <= 0:
+        return
+
+    winners = contest.get("winners", []) or []
+    winner_ids = {int(w.get("user_id", 0)) for w in winners if w.get("user_id")}
+    if uid in winner_ids:
+        return
+    if len(winners) >= max_winners:
+        return
+
+    user_data = get_user(uid)
+    if uid in {int(w) for w in (user_data.get("contest_wins", []) or [])}:
+        return
+
+    count = _count_approved_in_window(user_data, started_at)
+    # حدّث عدّاد الإيميلات الواصلة الكلي
+    contest["total_emails_delivered"] = int(contest.get("total_emails_delivered", 0) or 0) + 1
+    save_contest(contest)
+    if count < target:
+        return
+
+    # منح الجائزة
+    user_data["balance"] = clamp_money(float(user_data.get("balance", 0.0)) + reward)
+    user_data["total_credited_balance"] = clamp_money(
+        float(user_data.get("total_credited_balance", 0.0) or 0.0) + reward
+    )
+    add_transaction(user_data, "credit", reward, "جائزة المسابقة 🎉", "")
+    wins = user_data.get("contest_wins", []) or []
+    wins.append({
+        "contest_started_at": started_at,
+        "awarded_at": datetime.now(timezone.utc).isoformat(),
+        "emails_count": count,
+        "reward": reward,
+    })
+    user_data["contest_wins"] = wins
+    save_user(uid, user_data)
+
+    winners.append({
+        "user_id": uid,
+        "awarded_at": datetime.now(timezone.utc).isoformat(),
+        "emails_count": count,
+        "reward": reward,
+    })
+    contest["winners"] = winners
+    contest["total_points_awarded"] = float(contest.get("total_points_awarded", 0) or 0) + reward
+    save_contest(contest)
+
+    try:
+        await context.bot.send_message(
+            chat_id=uid,
+            text=(
+                "🎉 <b>مبروك! فزت في المسابقة</b>\n\n"
+                f"✅ <b>عدد الإيميلات التي وصلت:</b> <code>{count}</code>\n"
+                f"💰 <b>المكافأة:</b> <code>${reward:.2f}</code>\n\n"
+                "تم إضافة المكافأة إلى رصيدك مباشرة."
+            ),
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception:
+        pass
+    try:
+        await context.bot.send_message(
+            chat_id=OWNER_ID,
+            text=(
+                "🎉 <b>فائز جديد في المسابقة</b>\n\n"
+                f"👤 المستخدم: <code>{uid}</code>\n"
+                f"✅ الإيميلات: <code>{count}</code>\n"
+                f"💰 المكافأة: <code>${reward:.2f}</code>\n"
+                f"🏅 عدد الفائزين الآن: <code>{len(winners)}</code>"
+            ),
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception:
+        pass
+
+
+def get_contest_live_stats() -> dict:
+    """إحصائيات حيّة للمسابقة."""
+    contest = get_contest()
+    if not contest:
+        return {"active": False}
+    started_at = contest.get("started_at")
+    result = compute_sales_stats(since_iso=started_at) if started_at else compute_sales_stats()
+    # عدد الإيميلات الواصلة خلال المسابقة
+    delivered = 0
+    users = load_json(USERS_DB)
+    for encrypted_data in users.values():
+        ud = decrypt_user_data(encrypted_data)
+        delivered += _count_approved_in_window(ud, started_at)
+    winners = contest.get("winners", []) or []
+    total_pts = float(contest.get("total_points_awarded", 0) or 0)
+    return {
+        "active": bool(contest.get("active")),
+        "started_at": started_at,
+        "target_emails": int(contest.get("target_emails", 0) or 0),
+        "max_winners": int(contest.get("max_winners", 0) or 0),
+        "reward_per_winner": float(contest.get("reward_per_winner", 0) or 0),
+        "winners_count": len(winners),
+        "delivered_emails": delivered,
+        "total_points_awarded": total_pts,
+        "sales": result,
+    }
+
+
 # ==================== MAIN MENU ====================
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
@@ -1194,6 +1525,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ("💰 أموالي", "my_wallet"),
         ("📜 سجل معاملاتي", "my_transactions"),
         ("📋 حساباتي", "my_accounts"),
+        ("🏆 الأكثر بيعاً", "top_sellers"),
         ("📧 الإيميلات المرفوضة", "rejected_emails"),
         ("📺 تعليم", "tutorials"),
         ("🛒 سحب", "withdraw_store"),
@@ -1212,6 +1544,38 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.callback_query.message.reply_text(text, reply_markup=kb_vertical(buttons))
     else:
         await update.message.reply_text(text, reply_markup=kb_vertical(buttons))
+
+
+# ==================== TOP SELLERS VIEW ====================
+async def top_sellers_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_forced_channel(update, context):
+        return
+    query = update.callback_query
+    top = compute_top_sellers(limit=10)
+    back_btn = ("🔙 إعدادات المالك", "owner_panel") if (
+        update.effective_user.id == OWNER_ID and query.data == "top_sellers_owner"
+    ) else ("🔙 القائمة الرئيسية", "main_menu")
+    if not top:
+        await query.edit_message_text(
+            "📭 لا توجد بيانات بيع بعد.",
+            reply_markup=kb_vertical([back_btn]),
+        )
+        return
+    lines = ["🏆 <b>الأكثر بيعاً</b>", ""]
+    for idx, item in enumerate(top, 1):
+        username_part = f" (@{tg_html_escape(item['username'])})" if item.get("username") else ""
+        lines.append(
+            f"{idx}- ID <code>{item['user_id']}</code> بيع <b>{item['total']}</b>"
+            f"{username_part}"
+        )
+        lines.append(
+            f"   ✅ {item['approved']} | ⏳ {item['pending']} | ❌ {item['rejected']}"
+        )
+    await query.edit_message_text(
+        "\n".join(lines),
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_vertical([back_btn]),
+    )
 
 
 # ==================== TRANSACTIONS LOG ====================
@@ -1249,16 +1613,16 @@ async def my_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     query = update.callback_query
     user_data = get_user(query.from_user.id)
-    approved = user_data.get("approved_accounts", [])
-    pending = user_data.get("pending_requests", [])
-    rejected = user_data.get("rejected_requests", [])
+    approved = sort_records_newest_first(user_data.get("approved_accounts", []) or [])
+    pending = sort_records_oldest_first(user_data.get("pending_requests", []) or [])
+    rejected = sort_records_newest_first(user_data.get("rejected_requests", []) or [])
     if not approved and not pending and not rejected:
         await query.edit_message_text("📭 لا توجد حسابات لديك.",
                                       reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
         return
     msg = "📋 *جميع حساباتي:*\n\n"
     if approved:
-        msg += "✅ *مقبولة:*\n"
+        msg += "✅ *مقبولة (الأحدث أولاً):*\n"
         for idx, acc in enumerate(approved, 1):
             leave_status = ""
             if acc.get("rejected_at_24h"):
@@ -1270,12 +1634,12 @@ async def my_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg += f"  {idx}. 📧 `{acc.get('email', '')}` ✅{leave_status}\n"
         msg += "\n"
     if pending:
-        msg += "⏳ *منتظرة:*\n"
+        msg += "⏳ *منتظرة (الأقدم أولاً):*\n"
         for idx, req in enumerate(pending, 1):
             msg += f"  {idx}. 📧 `{req.get('email', '')}` ⏳\n"
         msg += "\n"
     if rejected:
-        msg += "❌ *مرفوضة:*\n"
+        msg += "❌ *مرفوضة (الأحدث أولاً):*\n"
         for idx, rej in enumerate(rejected, 1):
             reason = rej.get('reject_reason', 'غير معروف')
             reason_text = REJECT_REASON_LABELS.get(reason, reason)
@@ -1291,10 +1655,10 @@ async def view_member_rejected_emails(update: Update, context: ContextTypes.DEFA
         return
     query = update.callback_query
     user_data = get_user(query.from_user.id)
-    rejected = user_data.get("rejected_requests", [])
+    rejected = sort_records_newest_first(user_data.get("rejected_requests", []) or [])
     if not rejected:
         rejected = [{"email": email, "reject_reason": "unknown"}
-                    for email in user_data.get("rejected_emails", [])]
+                    for email in (user_data.get("rejected_emails", []) or [])]
     if not rejected:
         await query.edit_message_text("📭 لا توجد لديك إيميلات مرفوضة حاليًا.",
                                       reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
@@ -1309,7 +1673,7 @@ async def view_member_rejected_emails(update: Update, context: ContextTypes.DEFA
         "custom": "سبب مخصص",
         "unknown": "غير معروف",
     }
-    lines = ["❌ <b>الإيميلات المرفوضة</b>", ""]
+    lines = ["❌ <b>الإيميلات المرفوضة (الأحدث أولاً)</b>", ""]
     for index, request in enumerate(rejected, 1):
         email = tg_html_escape(str(request.get("email", "غير معروف")))
         password = tg_html_escape(str(request.get("password", "") or "")) or "❌ غير مرسل"
@@ -1468,31 +1832,24 @@ async def handle_edit_field_input(update: Update, context: ContextTypes.DEFAULT_
 
 # ==================== ADD ACCOUNT FLOW ====================
 async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """✅ FIXED: تنظيف شامل للجلسات والخطوات القديمة قبل البدء."""
     if not await check_forced_channel(update, context):
         return
     uid = update.effective_user.id
-    
-    # ✅ تنظيف شامل لأي جلسة أو خطوة قديمة
     SESSIONS.pop(uid, None)
     save_sessions()
     clear_edit_state(context)
-    
-    # ✅ حذف أي مفاتيح قديمة قد تسبب تداخل
     for key in ("step", "editing_field", "editing_uid", "editing_index",
-                "admin_completing_uid", "admin_completing_index", 
+                "admin_completing_uid", "admin_completing_index",
                 "admin_completing_token", "admin_approval_step",
                 "approval_uid", "approval_index", "approval_token",
                 "approval_data", "approval_step", "approval_with_leave",
                 "reject_uid", "reject_index", "reject_reason",
                 "deduct_uid", "deduct_token", "give_uid", "give_index",
-                "mode", "store_action", "setting_tier", "pending_video_type"):
+                "mode", "store_action", "setting_tier", "pending_video_type",
+                "contest_create_field", "contest_create_data"):
         context.user_data.pop(key, None)
-    
-    # ✅ الآن أنشئ جلسة جديدة نظيفة
     SESSIONS[uid] = Session(step="email")
     save_sessions()
-    
     config = load_config()
     prices = get_tier_prices()
     has_email_video = config.get("video_email") and Path(config.get("video_email", "")).exists()
@@ -1540,21 +1897,14 @@ async def add_account_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """✅ FIXED: التحقق من الجلسة الصالحة قبل المعالجة."""
     uid = update.effective_user.id
     text = update.message.text.strip()
-    
-    # ✅ التحقق من وجود جلسة صالحة
     session = SESSIONS.get(uid)
     if not session or not session.step:
-        # لا توجد جلسة نشطة - تجاهل الرسالة
         return
-    
-    # ✅ إذا كان المستخدم في وضع تعديل حقل، اذهب لدالة التعديل
     if context.user_data.get("step") == "editing_field":
         await handle_edit_field_input(update, context)
         return
-    
     config = load_config()
     prices = get_tier_prices()
 
@@ -1564,17 +1914,14 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ إيميل غير صالح. أرسل إيميلاً صحيحاً:")
             return
         active_status = get_active_account_status(email)
-        # إذا كان الإيميل مقبولاً، امنعه
         if active_status == "approved":
             await update.message.reply_text("❌ هذا الإيميل مقبول مسبقاً! لا يمكنك إعادة إرساله.",
                                             reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
             SESSIONS.pop(uid, None); save_sessions()
             return
-        # إذا كان الإيميل قيد الانتظار، اسمح للمستخدم بحذف الطلب القديم وإعادة الإرسال
         if active_status == "pending":
             user_data = get_user(uid)
             pending = user_data.get("pending_requests", [])
-            # احذف أي طلب سابق لنفس الإيميل
             old_amounts = [float(r.get("amount", 0.0)) for r in pending
                            if normalize_email(r.get("email", "")) == email]
             new_pending = [r for r in pending
@@ -1612,9 +1959,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.delete()
         except Exception:
             pass
-
-        # ✅ عرض الخيارات مباشرة بدون تحذير
-        # التحذير يظهر فقط عند ضغط العضو على زر "استلام tier_1"
         options_text = (
             "✅ *تم حفظ الإيميل والباسورد*\n\n"
             f"💰 *السعر الحالي:* ${prices['tier_1']:.2f} (إيميل + باسورد)\n"
@@ -1631,7 +1975,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=kb_vertical(buttons))
 
     elif session.step == "totp":
-        # ✅ تحقق أن المستخدم قد أكمل الخطوات السابقة
         if not session.email or not session.password:
             await update.message.reply_text(
                 "⚠️ حدث خطأ في الجلسة. يرجى البدء من جديد.",
@@ -1793,11 +2136,19 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_data["total_credited_balance"] = clamp_money(
                 float(user_data.get("total_credited_balance", 0.0) or 0.0) + final_price)
             user_data["total_approved_emails"] = int(user_data.get("total_approved_emails", 0)) + 1
+            user_data["user_name"] = user_full_name
+            user_data["user_username"] = user_username
             add_transaction(user_data, "hold", final_price,
                             "تحقق تلقائي - معلق 24 ساعة", session.email)
             save_user(uid, user_data)
             SESSIONS.pop(uid, None)
             save_sessions()
+
+            # ✅ فحص المسابقة بعد القبول
+            try:
+                await check_contest_award(context, uid)
+            except Exception:
+                logger.exception("Contest check failed")
 
             await schedule_leave_check(context, uid, session.email,
                                         account_record["release_at"])
@@ -1864,6 +2215,8 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data["pending_balance"] = clamp_money(
             float(user_data.get("pending_balance", 0.0)) + final_price
         )
+        user_data["user_name"] = user_full_name
+        user_data["user_username"] = user_username
         add_transaction(user_data, "hold", final_price, "طلب جديد قيد الانتظار", session.email)
         save_user(uid, user_data)
         SESSIONS.pop(uid, None)
@@ -1902,28 +2255,17 @@ async def continue_full_process(update: Update, context: ContextTypes.DEFAULT_TY
         parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
 
 
-# ==================== TIER 1 WARNING (NEW) ====================
+# ==================== TIER 1 WARNING ====================
 async def prompt_tier_1_warning(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    ✅ يعرض التحذير فقط عند ضغط العضو على زر 'استلام $tier_1'.
-    بعد التحذير، يمكن للعضو:
-      - تأكيد الإرسال → submit_tier_1
-      - الرجوع وإكمال البيانات → continue_full_process
-      - الإلغاء → cancel
-    """
     query = update.callback_query
     uid = int(query.data.split(":")[1])
-
-    # ✅ تحقق أن المستخدم هو صاحب الجلسة
     if query.from_user.id != uid:
         await query.answer("⚠️ غير مصرح.", show_alert=True)
         return
-
     session = SESSIONS.get(uid)
     if not session or not session.email or not session.password:
         await query.answer("⚠️ الجلسة منتهية، حاول مرة أخرى.", show_alert=True)
         return
-
     prices = get_tier_prices()
     warning_text = (
         "⚠️ *تنبيه مهم قبل المتابعة*\n\n"
@@ -1990,6 +2332,8 @@ async def submit_tier_1(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "user_name": user_full_name, "user_username": user_username,
     })
     user_data["pending_balance"] = clamp_money(float(user_data.get("pending_balance", 0.0)) + price)
+    user_data["user_name"] = user_full_name
+    user_data["user_username"] = user_username
     add_transaction(user_data, "hold", price, "طلب (باسورد فقط)", session.email)
     save_user(uid, user_data)
     SESSIONS.pop(uid, None); save_sessions()
@@ -2041,6 +2385,8 @@ async def submit_tier_2(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "user_name": user_full_name, "user_username": user_username,
     })
     user_data["pending_balance"] = clamp_money(float(user_data.get("pending_balance", 0.0)) + price)
+    user_data["user_name"] = user_full_name
+    user_data["user_username"] = user_username
     add_transaction(user_data, "hold", price, "طلب (مع 2FA)", session.email)
     save_user(uid, user_data)
     SESSIONS.pop(uid, None); save_sessions()
@@ -2089,6 +2435,16 @@ def parse_iso_datetime(value: Any) -> Optional[datetime]:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed
+
+
+def _format_iso_time(value: Any) -> str:
+    if not value or not isinstance(value, str):
+        return ""
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+    except Exception:
+        return value[:19]
 
 
 async def schedule_leave_check(context: ContextTypes.DEFAULT_TYPE, user_id: int,
@@ -2628,7 +2984,6 @@ async def handle_member_check_input(update: Update, context: ContextTypes.DEFAUL
 
 # ==================== CHECK EMAIL BY ADDRESS (OWNER) ====================
 def _search_email_in_all_records(email: str) -> List[dict]:
-    """يبحث عن الإيميل في جميع سجلات المستخدمين (منتظرة، مقبولة، مرفوضة)."""
     normalized = normalize_email(email)
     if not normalized:
         return []
@@ -2652,7 +3007,18 @@ def _search_email_in_all_records(email: str) -> List[dict]:
             if normalize_email(rej.get("email", "")) == normalized:
                 results.append({"record_type": "rejected", "user_id": uid,
                                 "index": idx, "data": rej, "user_data": user_data})
-    return results
+    # ترتيب: المقبولة/المرفوضة الأحدث أولاً، المنتظرة الأقدم أولاً
+    def _sort_key(item):
+        t = _record_sort_key(item["data"])
+        # نجمع المفتاح مع رتبة للفصل بين الأنواع
+        return (item["record_type"], t)
+    approved = [i for i in results if i["record_type"] == "approved"]
+    pending = [i for i in results if i["record_type"] == "pending"]
+    rejected = [i for i in results if i["record_type"] == "rejected"]
+    approved.sort(key=lambda i: _record_sort_key(i["data"]), reverse=True)
+    rejected.sort(key=lambda i: _record_sort_key(i["data"]), reverse=True)
+    pending.sort(key=lambda i: _record_sort_key(i["data"]))
+    return approved + pending + rejected
 
 
 def _format_record_status(record_type: str, rec: dict) -> str:
@@ -2668,16 +3034,6 @@ def _format_record_status(record_type: str, rec: dict) -> str:
         return "🟢 مقبول"
     reason = rec.get("reject_reason", "unknown")
     return f"❌ مرفوض — {REJECT_REASON_LABELS.get(reason, reason)}"
-
-
-def _format_iso_time(value: Any) -> str:
-    if not value or not isinstance(value, str):
-        return ""
-    try:
-        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
-    except Exception:
-        return value[:19]
 
 
 def _build_email_record_report(match: dict, position: int, total: int) -> str:
@@ -2968,10 +3324,14 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     context.user_data.pop("step", None)
     context.user_data.pop("store_action", None)
+    context.user_data.pop("contest_create_field", None)
+    context.user_data.pop("contest_create_data", None)
     buttons = [
         ("👥 الإدارية", "admin_management"),
         ("💰 أسعار المستويات", "set_tier_prices"),
         ("📋 الطلبات", "approval_requests"),
+        ("🎯 إدارة المسابقة", "contest_menu"),
+        ("🏆 الأكثر بيعاً", "top_sellers_owner"),
         ("📹 قسم الفيديوهات", "videos_section"),
         ("🛒 المبيعات", "store_section"),
         ("➕ إضافة قناة إجبارية", "forced_channel"),
@@ -2987,6 +3347,236 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     await query.edit_message_text("⚙️ *لوحة تحكم المالك*\n\nاختر الإعداد الذي تريد تعديله:",
                                   parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
+
+
+# ==================== CONTEST MENU ====================
+async def contest_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    context.user_data.pop("contest_create_field", None)
+    context.user_data.pop("contest_create_data", None)
+    contest = get_contest()
+    header = "🎯 *إدارة المسابقة*\n\n" + "\n".join(contest_summary_lines(contest))
+    buttons = []
+    if contest and contest.get("active"):
+        buttons.append(("🛑 إيقاف المسابقة", "contest_stop"))
+        buttons.append(("📊 إحصائيات المسابقة", "contest_stats"))
+    else:
+        buttons.append(("🆕 إنشاء مسابقة جديدة", "contest_create_start"))
+        if contest:
+            buttons.append(("📊 إحصائيات المسابقة (القديمة)", "contest_stats"))
+    buttons.append(("📈 البيع الكلي", "sales_total"))
+    buttons.append(("📈 البيع أثناء المسابقة", "sales_during_contest"))
+    buttons.append(("🔙 إعدادات المالك", "owner_panel"))
+    await query.edit_message_text(
+        header, parse_mode=ParseMode.HTML,
+        reply_markup=kb_vertical(buttons))
+
+
+async def contest_create_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    context.user_data["contest_create_data"] = {}
+    context.user_data["contest_create_field"] = "target_emails"
+    await query.edit_message_text(
+        "🆕 *إنشاء مسابقة جديدة*\n\n"
+        "📌 *الخطوة 1/3*: أرسل عدد الإيميلات المطلوبة لكل فائز.\n"
+        "مثال: `10`\n\n"
+        "_أو 'إلغاء'_",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_single("🔙 إلغاء", "contest_menu"))
+
+
+async def handle_contest_create_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        return
+    text = update.message.text.strip()
+    if text.casefold() in {"إلغاء", "الغاء", "cancel"}:
+        context.user_data.pop("contest_create_field", None)
+        context.user_data.pop("contest_create_data", None)
+        await update.message.reply_text(
+            "❌ تم الإلغاء.",
+            reply_markup=kb_single("🔙 إدارة المسابقة", "contest_menu"))
+        return
+    field = context.user_data.get("contest_create_field")
+    data = context.user_data.get("contest_create_data") or {}
+
+    if field == "target_emails":
+        try:
+            v = int(float(text))
+            if v <= 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("⚠️ أرسل رقماً صحيحاً أكبر من صفر.")
+            return
+        data["target_emails"] = v
+        context.user_data["contest_create_data"] = data
+        context.user_data["contest_create_field"] = "max_winners"
+        await update.message.reply_text(
+            f"✅ الهدف: <code>{v}</code> إيميل\n\n"
+            f"📌 *الخطوة 2/3*: أرسل الحد الأقصى لعدد الفائزين.\n"
+            f"مثال: `2000`\n\n_أو 'إلغاء'_",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_single("🔙 إلغاء", "contest_menu"))
+        return
+
+    if field == "max_winners":
+        try:
+            v = int(float(text))
+            if v <= 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("⚠️ أرسل رقماً صحيحاً أكبر من صفر.")
+            return
+        data["max_winners"] = v
+        context.user_data["contest_create_data"] = data
+        context.user_data["contest_create_field"] = "reward_per_winner"
+        await update.message.reply_text(
+            f"✅ الحد الأقصى للفائزين: <code>{v}</code>\n\n"
+            f"📌 *الخطوة 3/3*: أرسل مكافأة كل فائز (بالدولار).\n"
+            f"مثال: `3` أو `0.5`\n\n_أو 'إلغاء'_",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_single("🔙 إلغاء", "contest_menu"))
+        return
+
+    if field == "reward_per_winner":
+        try:
+            v = float(text)
+            if v <= 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("⚠️ أرسل رقماً صحيحاً أكبر من صفر.")
+            return
+        data["reward_per_winner"] = round(v, 2)
+        context.user_data.pop("contest_create_field", None)
+        context.user_data.pop("contest_create_data", None)
+
+        contest = {
+            "active": True,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "target_emails": int(data["target_emails"]),
+            "max_winners": int(data["max_winners"]),
+            "reward_per_winner": float(data["reward_per_winner"]),
+            "winners": [],
+            "total_emails_delivered": 0,
+            "total_points_awarded": 0.0,
+        }
+        save_contest(contest)
+        await update.message.reply_text(
+            "🎉 <b>تم إنشاء المسابقة وتفعيلها</b>\n\n" + "\n".join(contest_summary_lines(contest)),
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_single("🔙 إدارة المسابقة", "contest_menu"))
+        return
+
+
+async def contest_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    contest = get_contest()
+    if not contest:
+        await query.answer("⚠️ لا توجد مسابقة.", show_alert=True)
+        return
+    contest["active"] = False
+    contest["stopped_at"] = datetime.now(timezone.utc).isoformat()
+    save_contest(contest)
+    await query.edit_message_text(
+        "🛑 <b>تم إيقاف المسابقة</b>\n\n" + "\n".join(contest_summary_lines(contest)),
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_single("🔙 إدارة المسابقة", "contest_menu"))
+
+
+async def contest_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    stats = get_contest_live_stats()
+    if not stats or not stats.get("active") and not stats.get("started_at"):
+        await query.edit_message_text(
+            "📭 لا توجد مسابقة.",
+            reply_markup=kb_single("🔙 إدارة المسابقة", "contest_menu"))
+        return
+    lines = ["📊 <b>إحصائيات المسابقة</b>", ""]
+    lines.append(f"📌 <b>الحالة:</b> {'🟢 نشطة' if stats['active'] else '🔴 متوقفة'}")
+    if stats.get("started_at"):
+        lines.append(f"🕐 <b>البداية:</b> <code>{tg_html_escape(_format_iso_time(stats['started_at']))}</code>")
+    lines.append(f"🎯 <b>الهدف:</b> <code>{stats.get('target_emails', 0)}</code> إيميل")
+    lines.append(f"🏅 <b>الحد الأقصى للفائزين:</b> <code>{stats.get('max_winners', 0)}</code>")
+    lines.append(f"💰 <b>مكافأة كل فائز:</b> <code>${stats.get('reward_per_winner', 0):.2f}</code>")
+    lines.append("")
+    lines.append(f"✅ <b>عدد الفائزين:</b> <code>{stats.get('winners_count', 0)}</code>")
+    lines.append(f"📨 <b>عدد الإيميلات الواصلة:</b> <code>{stats.get('delivered_emails', 0)}</code>")
+    lines.append(f"💵 <b>النقاط الممنوحة:</b> <code>${stats.get('total_points_awarded', 0):.2f}</code>")
+    await query.edit_message_text(
+        "\n".join(lines), parse_mode=ParseMode.HTML,
+        reply_markup=kb_single("🔙 إدارة المسابقة", "contest_menu"))
+
+
+async def sales_total_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    stats = compute_sales_stats(since_iso=None)
+    lines = ["📈 <b>البيع الكلي (كل الفترات)</b>", ""]
+    lines.append(f"📦 <b>إجمالي الحسابات:</b> <code>{stats['total_accounts']}</code>")
+    lines.append(f"✅ <b>مقبولة:</b> <code>{stats['approved']}</code>")
+    lines.append(f"⏳ <b>منتظرة:</b> <code>{stats['pending']}</code>")
+    lines.append(f"❌ <b>مرفوضة:</b> <code>{stats['rejected']}</code>")
+    lines.append("")
+    lines.append("🏆 <b>أعلى 10 أعضاء بيعاً:</b>")
+    if not stats["top"]:
+        lines.append("_لا توجد بيانات._")
+    for idx, item in enumerate(stats["top"], 1):
+        username = f" (@{tg_html_escape(item['username'])})" if item.get("username") else ""
+        lines.append(
+            f"{idx}- ID <code>{item['user_id']}</code> بيع <b>{item['total']}</b>{username}\n"
+            f"   ✅ {item['approved']} | ⏳ {item['pending']} | ❌ {item['rejected']}"
+        )
+    await query.edit_message_text(
+        "\n".join(lines), parse_mode=ParseMode.HTML,
+        reply_markup=kb_single("🔙 إدارة المسابقة", "contest_menu"))
+
+
+async def sales_during_contest_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    contest = get_contest()
+    started_at = contest.get("started_at") if contest else None
+    if not started_at:
+        await query.edit_message_text(
+            "📭 لا توجد مسابقة نشطة أو سابقة.",
+            reply_markup=kb_single("🔙 إدارة المسابقة", "contest_menu"))
+        return
+    stats = compute_sales_stats(since_iso=started_at)
+    lines = ["📈 <b>البيع أثناء المسابقة</b>", ""]
+    lines.append(f"🕐 <b>من:</b> <code>{tg_html_escape(_format_iso_time(started_at))}</code>")
+    lines.append("")
+    lines.append(f"📦 <b>إجمالي الحسابات:</b> <code>{stats['total_accounts']}</code>")
+    lines.append(f"✅ <b>مقبولة:</b> <code>{stats['approved']}</code>")
+    lines.append(f"⏳ <b>منتظرة:</b> <code>{stats['pending']}</code>")
+    lines.append(f"❌ <b>مرفوضة:</b> <code>{stats['rejected']}</code>")
+    lines.append("")
+    lines.append("🏆 <b>أعلى 10 أعضاء بيعاً خلال المسابقة:</b>")
+    if not stats["top"]:
+        lines.append("_لا توجد بيانات._")
+    for idx, item in enumerate(stats["top"], 1):
+        username = f" (@{tg_html_escape(item['username'])})" if item.get("username") else ""
+        lines.append(
+            f"{idx}- ID <code>{item['user_id']}</code> بيع <b>{item['total']}</b>{username}\n"
+            f"   ✅ {item['approved']} | ⏳ {item['pending']} | ❌ {item['rejected']}"
+        )
+    await query.edit_message_text(
+        "\n".join(lines), parse_mode=ParseMode.HTML,
+        reply_markup=kb_single("🔙 إدارة المسابقة", "contest_menu"))
 
 
 # ==================== ADMIN MANAGEMENT (OWNER) ====================
@@ -3139,6 +3729,11 @@ def _collect_admin_requests() -> List[dict]:
             copy["user_id"] = uid
             copy["index"] = idx
             items.append(copy)
+    # المنتظرة: الأقدم أولاً
+    try:
+        items.sort(key=_record_sort_key)
+    except Exception:
+        pass
     return items
 
 
@@ -3251,7 +3846,6 @@ async def admin_show_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user_data = get_user(uid)
-    pending = user_data.get("pending_requests", [])
     match = find_pending_request(user_data, token)
     if match is None:
         await query.answer("⚠️ الطلب غير موجود.", show_alert=True)
@@ -3303,7 +3897,6 @@ async def admin_complete_start(update: Update, context: ContextTypes.DEFAULT_TYP
     uid = int(parts[1])
     token = parts[2]
     user_data = get_user(uid)
-    pending = user_data.get("pending_requests", [])
     match = find_pending_request(user_data, token)
     if match is None:
         await query.edit_message_text("⚠️ الطلب غير موجود.",
@@ -3481,9 +4074,6 @@ async def admin_completion_cancel(update: Update, context: ContextTypes.DEFAULT_
     if not is_admin(query.from_user.id):
         await query.answer("🚫 أدمن فقط.", show_alert=True)
         return
-    parts = query.data.split(":")
-    uid = int(parts[1])
-    token = parts[2]
     for key in ("admin_completing_uid", "admin_completing_index",
                 "admin_completing_token", "admin_approval_step"):
         context.user_data.pop(key, None)
@@ -3634,6 +4224,12 @@ async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_T
     add_transaction(user_data, "hold", original_amount,
                     f"أكمله الأدمن {admin_id} - معلق {hold_hours} ساعة", email)
     save_user(uid, user_data)
+
+    # ✅ فحص المسابقة بعد القبول
+    try:
+        await check_contest_award(context, uid)
+    except Exception:
+        logger.exception("Contest check failed")
 
     if admin_bonus > 0 and admin_id != OWNER_ID:
         admin_data = get_user(admin_id)
@@ -3881,7 +4477,13 @@ async def approval_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                   reply_markup=kb_vertical(buttons))
 
 
-def _collect_all(items_field: str) -> List[dict]:
+def _collect_all(items_field: str, sort_order: str = "newest") -> List[dict]:
+    """
+    sort_order:
+      - "newest": الأحدث أولاً (المقبولة والمرفوضة)
+      - "oldest": الأقدم أولاً (المنتظرة)
+    يحتفظ بالحقل "index" كالفهرس الأصلي في التخزين.
+    """
     users = load_json(USERS_DB)
     items = []
     for uid, encrypted_data in users.items():
@@ -3891,6 +4493,13 @@ def _collect_all(items_field: str) -> List[dict]:
             copy["user_id"] = uid
             copy["index"] = idx
             items.append(copy)
+    try:
+        if sort_order == "oldest":
+            items.sort(key=_record_sort_key)
+        else:
+            items.sort(key=_record_sort_key, reverse=True)
+    except Exception:
+        pass
     return items
 
 
@@ -3923,7 +4532,7 @@ async def view_pending_requests(update: Update, context: ContextTypes.DEFAULT_TY
         page = int(query.data.split(":")[1])
     except (IndexError, ValueError):
         page = 0
-    pending = _collect_all("pending_requests")
+    pending = _collect_all("pending_requests", sort_order="oldest")
     if not pending:
         await query.edit_message_text("📭 لا توجد طلبات منتظرة.",
                                       reply_markup=kb_single("🔙 الطلبات", "approval_requests"))
@@ -3945,7 +4554,7 @@ async def view_pending_requests(update: Update, context: ContextTypes.DEFAULT_TY
     buttons = paginate_buttons(pending, page, "view_pending", label)
     buttons.append(("🔙 الطلبات", "approval_requests"))
     await query.edit_message_text(
-        f"⏳ *الطلبات المنتظرة ({len(pending)})*\n"
+        f"⏳ *الطلبات المنتظرة ({len(pending)}) — الأقدم أولاً*\n"
         f"🟢 مكتمل | 🟡 مع 2FA | 🔵 باسورد فقط\n"
         f"⚪ لم يُتحقق | 🟢 تحقق كامل | 🟡 جزئي | 🔴 فشل\n\n"
         f"اختر الإيميل:",
@@ -4052,7 +4661,6 @@ async def owner_show_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user_data = get_user(uid)
-    pending = user_data.get("pending_requests", [])
     match = find_pending_request(user_data, token)
     if match is None:
         await query.answer("⚠️ الطلب غير موجود.", show_alert=True)
@@ -4239,7 +4847,14 @@ async def complete_approval(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     if with_leave:
         approval_time = datetime.now(timezone.utc)
         approved_request["approval_time"] = approval_time.isoformat()
+        approved_request["timestamp"] = approval_time.isoformat()
         approved_request["release_at"] = (approval_time + timedelta(seconds=LEAVE_HOLD_SECONDS)).isoformat()
+    else:
+        approval_time = datetime.now(timezone.utc)
+        if not approved_request.get("approval_time"):
+            approved_request["approval_time"] = approval_time.isoformat()
+        if not approved_request.get("timestamp"):
+            approved_request["timestamp"] = approval_time.isoformat()
     user_data.setdefault("approved_accounts", []).append(approved_request)
     user_data["pending_balance"] = clamp_money(float(user_data.get("pending_balance", 0.0)) - price)
     if with_leave:
@@ -4256,6 +4871,13 @@ async def complete_approval(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     user_data["pending_requests"] = pending
     user_data["total_approved_emails"] = int(user_data.get("total_approved_emails", 0)) + 1
     save_user(uid, user_data)
+
+    # ✅ فحص المسابقة بعد القبول
+    try:
+        await check_contest_award(context, uid)
+    except Exception:
+        logger.exception("Contest check failed")
+
     referred_by = user_data.get("referred_by")
     if referred_by:
         referral_bonus = float(config.get("referral_bonus", 0.0))
@@ -4393,7 +5015,6 @@ async def approve_request_owner(update: Update, context: ContextTypes.DEFAULT_TY
     uid = int(parts[1])
     token = parts[2]
     user_data = get_user(uid)
-    pending = user_data.get("pending_requests", [])
     match = find_pending_request(user_data, token)
     if match is None:
         await query.edit_message_text("⚠️ الطلب غير موجود.",
@@ -4417,7 +5038,6 @@ async def approve_with_leave(update: Update, context: ContextTypes.DEFAULT_TYPE)
     uid = int(parts[1])
     token = parts[2]
     user_data = get_user(uid)
-    pending = user_data.get("pending_requests", [])
     match = find_pending_request(user_data, token)
     if match is None:
         await query.edit_message_text("⚠️ الطلب غير موجود.",
@@ -4443,7 +5063,6 @@ async def reject_request_reason(update: Update, context: ContextTypes.DEFAULT_TY
     uid = int(parts[1])
     token = parts[2]
     user_data = get_user(uid)
-    pending = user_data.get("pending_requests", [])
     match = find_pending_request(user_data, token)
     if match is None:
         await query.edit_message_text("⚠️ الطلب غير موجود.",
@@ -4489,7 +5108,6 @@ async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TY
     uid = int(parts[2])
     token = parts[3]
     user_data = get_user(uid)
-    pending = user_data.get("pending_requests", [])
     match = find_pending_request(user_data, token)
     if match is None:
         await query.edit_message_text("⚠️ الطلب غير موجود.",
@@ -4523,14 +5141,12 @@ async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TY
     pending.pop(index)
     move_request_to_rejected(user_data, request, reason_type)
     user_data["pending_requests"] = pending
-    # ▼ NEW: سجّل من قام بالرفض ▼
     actor = update.effective_user
     if user_data.get("rejected_requests"):
         user_data["rejected_requests"][-1]["rejected_by"] = actor_id
         user_data["rejected_requests"][-1]["rejected_by_name"] = actor.full_name or "غير معروف"
         user_data["rejected_requests"][-1]["rejected_by_username"] = actor.username or ""
         user_data["rejected_requests"][-1]["rejected_at"] = datetime.now(timezone.utc).isoformat()
-    # ▲ NEW ▲
     save_user(uid, user_data)
 
     reason = REJECT_REASON_MESSAGES.get(reason_type, "❌ تم رفض طلبك.")
@@ -4586,14 +5202,12 @@ async def handle_reject_reason_text(update: Update, context: ContextTypes.DEFAUL
     pending.pop(index)
     move_request_to_rejected(user_data, request, "other", text)
     user_data["pending_requests"] = pending
-    # ▼ NEW: سجّل من قام بالرفض ▼
     actor = update.effective_user
     if user_data.get("rejected_requests"):
         user_data["rejected_requests"][-1]["rejected_by"] = actor_id
         user_data["rejected_requests"][-1]["rejected_by_name"] = actor.full_name or "غير معروف"
         user_data["rejected_requests"][-1]["rejected_by_username"] = actor.username or ""
         user_data["rejected_requests"][-1]["rejected_at"] = datetime.now(timezone.utc).isoformat()
-    # ▲ NEW ▲
     save_user(uid, user_data)
     try:
         await context.bot.send_message(
@@ -4721,7 +5335,7 @@ async def view_approved_requests(update: Update, context: ContextTypes.DEFAULT_T
         page = int(query.data.split(":")[1])
     except (IndexError, ValueError):
         page = 0
-    approved = _collect_all("approved_accounts")
+    approved = _collect_all("approved_accounts", sort_order="newest")
     if not approved:
         await query.edit_message_text("📭 لا توجد طلبات مقبولة.",
                                       reply_markup=kb_single("🔙 الطلبات", "approval_requests"))
@@ -4746,7 +5360,7 @@ async def view_approved_requests(update: Update, context: ContextTypes.DEFAULT_T
     buttons = paginate_buttons(approved, page, "view_approved", label)
     buttons.append(("🔙 الطلبات", "approval_requests"))
     await query.edit_message_text(
-        f"✅ *الطلبات المقبولة ({len(approved)})*\n\nاختر الإيميل:",
+        f"✅ *الطلبات المقبولة ({len(approved)}) — الأحدث أولاً*\n\nاختر الإيميل:",
         parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
 
 
@@ -5042,13 +5656,11 @@ async def finalize_approved_rejection(
     accounts.pop(index)
     user_data["approved_accounts"] = accounts
     move_approved_account_to_rejected(user_data, account, reason, reason_text)
-    # ▼ NEW: سجّل من قام بالرفض ▼
     actor = update.effective_user
     if user_data.get("rejected_requests"):
         user_data["rejected_requests"][-1]["rejected_by"] = actor.id
         user_data["rejected_requests"][-1]["rejected_by_name"] = actor.full_name or "غير معروف"
         user_data["rejected_requests"][-1]["rejected_by_username"] = actor.username or ""
-    # ▲ NEW ▲
     if admin_id := account.get("completed_by_admin"):
         if account.get("admin_bonus", 0):
             user_data["rejected_requests"][-1]["admin_bonus_status"] = "rejected"
@@ -5252,7 +5864,7 @@ async def view_rejected_requests(update: Update, context: ContextTypes.DEFAULT_T
         page = int(query.data.split(":")[1])
     except (IndexError, ValueError):
         page = 0
-    rejected = _collect_all("rejected_requests")
+    rejected = _collect_all("rejected_requests", sort_order="newest")
     if not rejected:
         await query.edit_message_text("📭 لا توجد طلبات مرفوضة.",
                                       reply_markup=kb_single("🔙 الطلبات", "approval_requests"))
@@ -5271,7 +5883,7 @@ async def view_rejected_requests(update: Update, context: ContextTypes.DEFAULT_T
     buttons = paginate_buttons(rejected, page, "view_rejected", label)
     buttons.append(("🔙 الطلبات", "approval_requests"))
     await query.edit_message_text(
-        f"❌ *الطلبات المرفوضة ({len(rejected)})*\n\nاختر الإيميل:",
+        f"❌ *الطلبات المرفوضة ({len(rejected)}) — الأحدث أولاً*\n\nاختر الإيميل:",
         parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
 
 
@@ -5315,8 +5927,16 @@ async def rejected_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg += f"📦 *المستوى:* {tier_icon} {tier_text}\n"
     msg += f"👤 *المستخدم:* `{uid}`\n"
     msg += f"💰 *السعر:* ${request.get('amount', 0):.2f}\n"
-    msg += f"📝 *سبب الرفض:* {tg_html_escape(str(reason_text))}\n\n"
-    msg += f"📌 *هل تريد إعطاء نقاط للمستخدم رغم الرفض؟*"
+    msg += f"📝 *سبب الرفض:* {tg_html_escape(str(reason_text))}\n"
+    # عرض من رفض
+    if request.get("rejected_by"):
+        msg += f"\n❌ *من رفضه:*\n"
+        msg += f"  • معرف: `{request.get('rejected_by')}`\n"
+        if request.get("rejected_by_name"):
+            msg += f"  • الاسم: {tg_html_escape(request.get('rejected_by_name'))}\n"
+        if request.get("rejected_by_username"):
+            msg += f"  • اليوزر: @{tg_html_escape(request.get('rejected_by_username'))}\n"
+    msg += f"\n📌 *هل تريد إعطاء نقاط للمستخدم رغم الرفض؟*"
     buttons = [("💰 إعطاء نقاط", f"give_points:{uid}:{index}"),
                ("🔙 الطلبات المرفوضة", "view_rejected:0")]
     await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
@@ -5531,6 +6151,8 @@ async def hold_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 copy = dict(acc)
                 copy["user_id"] = uid
                 hold_list.append(copy)
+    # الأحدث أولاً
+    hold_list = sort_records_newest_first(hold_list)
     if not hold_list:
         await query.edit_message_text("✅ لا توجد حسابات معلقة.",
                                       reply_markup=kb_single("🔙 جميع الحسابات", "all_accounts_section"))
@@ -5572,12 +6194,13 @@ async def all_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
             copy = dict(acc)
             copy["user_id"] = uid
             all_accs.append(copy)
+    all_accs = sort_records_newest_first(all_accs)
     if not all_accs:
         await query.edit_message_text("📭 لا توجد حسابات.",
                                       reply_markup=kb_single("🔙 جميع الحسابات", "all_accounts_section"))
         return
     total = len(all_accs)
-    msg = f"📊 *إجمالي: {total}*\n\n"
+    msg = f"📊 *إجمالي: {total} — الأحدث أولاً*\n\n"
     for idx, acc in enumerate(all_accs[:10], 1):
         if acc.get("rejected_at_24h"):
             leave_status = " 🔴"
@@ -5622,12 +6245,13 @@ async def unextracted_accounts(update: Update, context: ContextTypes.DEFAULT_TYP
                 copy["user_id"] = uid
                 copy["index"] = idx
                 unextracted.append(copy)
+    unextracted = sort_records_newest_first(unextracted)
     if not unextracted:
         await query.edit_message_text("✅ لا توجد حسابات غير مستخرجة.",
                                       reply_markup=kb_single("🔙 جميع الحسابات", "all_accounts_section"))
         return
     total = len(unextracted)
-    msg = f"🆕 *غير مستخرجة: {total}*\n\n"
+    msg = f"🆕 *غير مستخرجة: {total} — الأحدث أولاً*\n\n"
     for idx, acc in enumerate(unextracted[:10], 1):
         if acc.get("rejected_at_24h"):
             tier_icon = "🔴"
@@ -6176,21 +6800,24 @@ async def referral_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== TEXT INPUT ROUTER ====================
 async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """✅ FIXED: أولوية للجلسة النشطة لمنع التداخل."""
     text = update.message.text.strip()
     user_id = update.effective_user.id
 
     if not await check_forced_channel(update, context):
         return
 
-    # ✅ أولوية قصوى: إذا كان المستخدم في جلسة إضافة حساب، اذهب مباشرة لها
+    # مسابقة
+    if context.user_data.get("contest_create_field"):
+        if user_id != OWNER_ID:
+            return
+        await handle_contest_create_input(update, context)
+        return
+
     session = SESSIONS.get(user_id)
     if session and session.step:
-        # تأكد من عدم وجود خطوات إدارية عالقة
-        admin_steps = ("admin_approval_step", "step", "mode", "store_action")
+        admin_steps = ("admin_approval_step", "step", "mode", "store_action",
+                       "contest_create_field")
         has_admin_step = any(context.user_data.get(k) for k in admin_steps)
-        
-        # إذا لم يكن هناك خطوة إدارية، اذهب لجلسة الإضافة
         if not has_admin_step:
             await add_account_step(update, context)
             return
@@ -6281,7 +6908,6 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("store_action"):
         await handle_store_input(update, context); return
 
-    # ✅ إذا لم يتم التعرف على أي خطوة، ولا توجد جلسة نشطة، تجاهل
     if session and session.step:
         await add_account_step(update, context)
         return
@@ -6593,6 +7219,8 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await my_transactions(update, context)
     elif data == "my_accounts":
         await my_accounts(update, context)
+    elif data == "top_sellers" or data == "top_sellers_owner":
+        await top_sellers_view(update, context)
     elif data == "rejected_emails":
         await view_member_rejected_emails(update, context)
     elif data == "tutorials":
@@ -6603,6 +7231,18 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_video_in_add(update, context)
     elif data == "owner_panel":
         await owner_panel(update, context)
+    elif data == "contest_menu":
+        await contest_menu(update, context)
+    elif data == "contest_create_start":
+        await contest_create_start(update, context)
+    elif data == "contest_stop":
+        await contest_stop(update, context)
+    elif data == "contest_stats":
+        await contest_stats(update, context)
+    elif data == "sales_total":
+        await sales_total_view(update, context)
+    elif data == "sales_during_contest":
+        await sales_during_contest_view(update, context)
     elif data == "admin_management":
         await admin_management(update, context)
     elif data == "add_admin":
@@ -6799,6 +7439,8 @@ async def owner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = [("👥 الإدارية", "admin_management"),
                ("💰 أسعار المستويات", "set_tier_prices"),
                ("📋 الطلبات", "approval_requests"),
+               ("🎯 إدارة المسابقة", "contest_menu"),
+               ("🏆 الأكثر بيعاً", "top_sellers_owner"),
                ("📹 قسم الفيديوهات", "videos_section"),
                ("🛒 المبيعات", "store_section"),
                ("➕ إضافة قناة إجبارية", "forced_channel"),
