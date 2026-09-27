@@ -1,11 +1,9 @@
 """
-Advanced Telegram Account Manager Bot - v5.6
-- NEW: "🏆 الأكثر بيعاً" for members & owner (top 10 sellers incl. rejected)
-- NEW: Contest system for owner (target emails / max winners / reward per winner)
-- NEW: Contest stats: Total sales + Contest-period sales
-- NEW: Auto-award when seller reaches target during contest window
-- FIXED: Rejected/Approved sorted newest-first; Pending sorted oldest-first
-- Reports show WHO rejected (id/name/username) in owner email search
+Advanced Telegram Account Manager Bot - v5.7
+- NEW: Contest supports MULTIPLE prize tiers (milestone-based, cumulative)
+       Example: 100→$3, 120→$5, 150→$8, 190→$12 (each awarded once per seller)
+- Top sellers / Sales stats show ONLY: rank + ID + total sales (no breakdown, no username)
+- Owner can create contest with: max winners per tier, then add N tiers (emails+reward)
 - (all prior fixes retained)
 """
 
@@ -1155,7 +1153,6 @@ async def check_forced_channel_callback(update: Update, context: ContextTypes.DE
 
 # ==================== SORT HELPERS ====================
 def _record_sort_key(record: dict) -> str:
-    """مفتاح زمني موحّد للترتيب (ISO string)."""
     return str(
         record.get("timestamp")
         or record.get("approval_time")
@@ -1167,7 +1164,6 @@ def _record_sort_key(record: dict) -> str:
 
 
 def sort_records_newest_first(records: List[dict]) -> List[dict]:
-    """ترتيب الأحدث أولاً (للمقبولة والمرفوضة)."""
     if not isinstance(records, list):
         return []
     try:
@@ -1177,7 +1173,6 @@ def sort_records_newest_first(records: List[dict]) -> List[dict]:
 
 
 def sort_records_oldest_first(records: List[dict]) -> List[dict]:
-    """ترتيب الأقدم أولاً (للمنتظرة)."""
     if not isinstance(records, list):
         return []
     try:
@@ -1188,9 +1183,6 @@ def sort_records_oldest_first(records: List[dict]) -> List[dict]:
 
 # ==================== TOP SELLERS & SALES STATS ====================
 def compute_top_sellers(limit: int = 10) -> List[dict]:
-    """
-    أعلى الأعضاء بيعاً (مجموع السجلات: مقبولة + منتظرة + مرفوضة).
-    """
     users = load_json(USERS_DB)
     rows = []
     for raw_uid, encrypted_data in users.items():
@@ -1206,41 +1198,12 @@ def compute_top_sellers(limit: int = 10) -> List[dict]:
         )
         if total <= 0:
             continue
-        approved = len(user_data.get("approved_accounts", []) or [])
-        rejected = len(user_data.get("rejected_requests", []) or [])
-        pending = len(user_data.get("pending_requests", []) or [])
-        display_name = user_data.get("user_name") or ""
-        display_username = user_data.get("user_username") or ""
-        if not display_name or not display_username:
-            for collection in ("approved_accounts", "pending_requests", "rejected_requests"):
-                for rec in user_data.get(collection, []) or []:
-                    if not display_name and rec.get("user_name"):
-                        display_name = rec.get("user_name")
-                    if not display_username and rec.get("user_username"):
-                        display_username = rec.get("user_username")
-                    if display_name and display_username:
-                        break
-                if display_name and display_username:
-                    break
-        rows.append({
-            "user_id": uid,
-            "total": total,
-            "approved": approved,
-            "pending": pending,
-            "rejected": rejected,
-            "name": display_name or "غير معروف",
-            "username": display_username or "",
-        })
+        rows.append({"user_id": uid, "total": total})
     rows.sort(key=lambda r: (-r["total"], r["user_id"]))
     return rows[:limit]
 
 
 def compute_sales_stats(since_iso: Optional[str] = None) -> dict:
-    """
-    إحصائيات البيع الكلية أو خلال فترة زمنية (المسابقة).
-    - since_iso=None: كل السجلات.
-    - since_iso="...": فقط السجلات بعد هذا الوقت.
-    """
     start_dt = None
     if since_iso:
         try:
@@ -1252,10 +1215,7 @@ def compute_sales_stats(since_iso: Optional[str] = None) -> dict:
 
     users = load_json(USERS_DB)
     total_accounts = 0
-    approved_ct = 0
-    pending_ct = 0
-    rejected_ct = 0
-    per_user: Dict[int, dict] = {}
+    per_user: Dict[int, int] = {}
 
     def _record_in_window(rec: dict) -> bool:
         if start_dt is None:
@@ -1277,63 +1237,44 @@ def compute_sales_stats(since_iso: Optional[str] = None) -> dict:
         except (TypeError, ValueError):
             continue
         ud = decrypt_user_data(encrypted_data)
-        counts = {"total": 0, "approved": 0, "pending": 0, "rejected": 0}
-        for key, coll in (
-            ("approved", "approved_accounts"),
-            ("pending", "pending_requests"),
-            ("rejected", "rejected_requests"),
-        ):
+        count = 0
+        for coll in ("approved_accounts", "pending_requests", "rejected_requests"):
             for rec in ud.get(coll, []) or []:
-                if not _record_in_window(rec):
-                    continue
-                counts[key] += 1
-                counts["total"] += 1
-        if counts["total"] > 0:
-            per_user[uid] = counts
-            total_accounts += counts["total"]
-            approved_ct += counts["approved"]
-            pending_ct += counts["pending"]
-            rejected_ct += counts["rejected"]
+                if _record_in_window(rec):
+                    count += 1
+        if count > 0:
+            per_user[uid] = count
+            total_accounts += count
 
-    top = sorted(per_user.items(), key=lambda x: (-x[1]["total"], x[0]))[:10]
-    top_list = []
-    for uid, counts in top:
-        u = get_user(uid)
-        name = u.get("user_name") or "غير معروف"
-        username = u.get("user_username") or ""
-        if not name or name == "غير معروف" or not username:
-            for collection in ("approved_accounts", "pending_requests", "rejected_requests"):
-                for rec in u.get(collection, []) or []:
-                    if (not name or name == "غير معروف") and rec.get("user_name"):
-                        name = rec.get("user_name")
-                    if not username and rec.get("user_username"):
-                        username = rec.get("user_username")
-                    if name and username:
-                        break
-                if name and username:
-                    break
-        top_list.append({
-            "user_id": uid,
-            "name": name,
-            "username": username,
-            **counts,
-        })
-    return {
-        "total_accounts": total_accounts,
-        "approved": approved_ct,
-        "pending": pending_ct,
-        "rejected": rejected_ct,
-        "top": top_list,
-        "since": since_iso,
-    }
+    top = sorted(per_user.items(), key=lambda x: (-x[1], x[0]))[:10]
+    top_list = [{"user_id": uid, "total": c} for uid, c in top]
+    return {"total_accounts": total_accounts, "top": top_list, "since": since_iso}
 
 
-# ==================== CONTEST SYSTEM ====================
+# ==================== CONTEST SYSTEM (MULTI-TIER) ====================
 def get_contest() -> dict:
     config = load_config()
     contest = config.get("contest")
     if not isinstance(contest, dict):
         return {}
+    # Migration from single-tier format
+    if "tiers" not in contest:
+        old_target = int(contest.get("target_emails", 0) or 0)
+        old_reward = float(contest.get("reward_per_winner", 0) or 0)
+        if old_target > 0 and old_reward > 0:
+            contest["tiers"] = [{"emails": old_target, "reward": old_reward}]
+            # Migrate old winners to tier_index 0
+            migrated = []
+            for w in contest.get("winners", []) or []:
+                w2 = dict(w)
+                w2.setdefault("tier_index", 0)
+                w2.setdefault("tier_emails", old_target)
+                migrated.append(w2)
+            contest["winners"] = migrated
+        else:
+            contest["tiers"] = []
+    if "max_winners" not in contest:
+        contest["max_winners"] = 0
     return contest
 
 
@@ -1375,9 +1316,8 @@ def contest_summary_lines(contest: dict) -> List[str]:
         return ["📭 لا توجد مسابقة حالياً."]
     active = bool(contest.get("active"))
     started_at = contest.get("started_at")
-    target = int(contest.get("target_emails", 0) or 0)
     max_winners = int(contest.get("max_winners", 0) or 0)
-    reward = float(contest.get("reward_per_winner", 0) or 0)
+    tiers = contest.get("tiers", []) or []
     winners = contest.get("winners", []) or []
     total_pts = float(contest.get("total_points_awarded", 0) or 0)
     total_emails_delivered = int(contest.get("total_emails_delivered", 0) or 0)
@@ -1385,83 +1325,113 @@ def contest_summary_lines(contest: dict) -> List[str]:
     lines.append(f"📌 <b>الحالة:</b> {'🟢 نشطة' if active else '🔴 متوقفة'}")
     if started_at:
         lines.append(f"🕐 <b>بدأت:</b> <code>{tg_html_escape(_format_iso_time(started_at))}</code>")
-    lines.append(f"🎯 <b>الهدف لكل فائز:</b> <code>{target}</code> إيميل")
-    lines.append(f"🏅 <b>الحد الأقصى للفائزين:</b> <code>{max_winners}</code>")
-    lines.append(f"💰 <b>مكافأة كل فائز:</b> <code>${reward:.2f}</code>")
+    lines.append(f"🏅 <b>الحد الأقصى للفائزين (لكل جائزة):</b> <code>{max_winners}</code>")
     lines.append("")
-    lines.append(f"✅ <b>عدد الفائزين الحالي:</b> <code>{len(winners)}</code> / <code>{max_winners}</code>")
+    lines.append("🎁 <b>الجوائز:</b>")
+    if not tiers:
+        lines.append("_لا توجد جوائز._")
+    for i, tier in enumerate(tiers, 1):
+        emails = int(tier.get("emails", 0) or 0)
+        reward = float(tier.get("reward", 0) or 0)
+        lines.append(f"  {i}. عند <b>{emails}</b> إيميل → <code>${reward:.2f}</code>")
+    lines.append("")
+    lines.append(f"✅ <b>عدد الفائزين الحالي:</b> <code>{len(winners)}</code>")
     lines.append(f"📨 <b>عدد الإيميلات الواصلة (خلال المسابقة):</b> <code>{total_emails_delivered}</code>")
     lines.append(f"💵 <b>النقاط الممنوحة:</b> <code>${total_pts:.2f}</code>")
     return lines
 
 
 async def check_contest_award(context: ContextTypes.DEFAULT_TYPE, uid: int):
-    """
-    يُستدعى بعد كل قبول ناجح. يتحقق إن وصل البائع للهدف خلال فترة المسابقة.
-    """
+    """يمنح كل الجوائز المؤهلة مرة واحدة لكل فائز عند كل قبول."""
     contest = get_contest()
     if not contest or not contest.get("active"):
         return
     started_at = contest.get("started_at")
     if not started_at:
         return
-    target = int(contest.get("target_emails", 0) or 0)
+    tiers = contest.get("tiers", []) or []
     max_winners = int(contest.get("max_winners", 0) or 0)
-    reward = float(contest.get("reward_per_winner", 0) or 0)
-    if target <= 0 or max_winners <= 0 or reward <= 0:
-        return
-
-    winners = contest.get("winners", []) or []
-    winner_ids = {int(w.get("user_id", 0)) for w in winners if w.get("user_id")}
-    if uid in winner_ids:
-        return
-    if len(winners) >= max_winners:
+    if not tiers or max_winners <= 0:
         return
 
     user_data = get_user(uid)
-    if uid in {int(w) for w in (user_data.get("contest_wins", []) or [])}:
-        return
-
     count = _count_approved_in_window(user_data, started_at)
-    # حدّث عدّاد الإيميلات الواصلة الكلي
+
+    # عدّاد الإيميلات الواصلة الكلي (يزيد عند كل قبول)
     contest["total_emails_delivered"] = int(contest.get("total_emails_delivered", 0) or 0) + 1
     save_contest(contest)
-    if count < target:
+
+    winners = contest.get("winners", []) or []
+    awarded_now: List[Tuple[int, float]] = []
+
+    for tier_index, tier in enumerate(tiers):
+        tier_emails = int(tier.get("emails", 0) or 0)
+        tier_reward = float(tier.get("reward", 0) or 0)
+        if tier_emails <= 0 or tier_reward <= 0:
+            continue
+        # لم يصل بعد
+        if count < tier_emails:
+            continue
+        # فاز بهذه الجائزة مسبقًا؟
+        already_won = any(
+            int(w.get("user_id", 0)) == uid and int(w.get("tier_index", -1)) == tier_index
+            for w in winners
+        )
+        if already_won:
+            continue
+        # اكتمل عدد الفائزين لهذه الجائزة؟
+        tier_winners_count = sum(
+            1 for w in winners if int(w.get("tier_index", -1)) == tier_index
+        )
+        if tier_winners_count >= max_winners:
+            continue
+
+        # منح الجائزة
+        user_data["balance"] = clamp_money(
+            float(user_data.get("balance", 0.0)) + tier_reward)
+        user_data["total_credited_balance"] = clamp_money(
+            float(user_data.get("total_credited_balance", 0.0) or 0.0) + tier_reward)
+        add_transaction(user_data, "credit", tier_reward,
+                        f"جائزة المسابقة (هدف {tier_emails} إيميل)", "")
+        winners.append({
+            "user_id": uid,
+            "tier_index": tier_index,
+            "tier_emails": tier_emails,
+            "reward": tier_reward,
+            "awarded_at": datetime.now(timezone.utc).isoformat(),
+        })
+        awarded_now.append((tier_emails, tier_reward))
+
+    if not awarded_now:
         return
 
-    # منح الجائزة
-    user_data["balance"] = clamp_money(float(user_data.get("balance", 0.0)) + reward)
-    user_data["total_credited_balance"] = clamp_money(
-        float(user_data.get("total_credited_balance", 0.0) or 0.0) + reward
-    )
-    add_transaction(user_data, "credit", reward, "جائزة المسابقة 🎉", "")
     wins = user_data.get("contest_wins", []) or []
-    wins.append({
-        "contest_started_at": started_at,
-        "awarded_at": datetime.now(timezone.utc).isoformat(),
-        "emails_count": count,
-        "reward": reward,
-    })
+    for tier_emails, tier_reward in awarded_now:
+        wins.append({
+            "contest_started_at": started_at,
+            "awarded_at": datetime.now(timezone.utc).isoformat(),
+            "tier_emails": tier_emails,
+            "reward": tier_reward,
+        })
     user_data["contest_wins"] = wins
     save_user(uid, user_data)
 
-    winners.append({
-        "user_id": uid,
-        "awarded_at": datetime.now(timezone.utc).isoformat(),
-        "emails_count": count,
-        "reward": reward,
-    })
     contest["winners"] = winners
-    contest["total_points_awarded"] = float(contest.get("total_points_awarded", 0) or 0) + reward
+    total_now = sum(r for _, r in awarded_now)
+    contest["total_points_awarded"] = float(
+        contest.get("total_points_awarded", 0) or 0) + total_now
     save_contest(contest)
 
+    tiers_lines = "\n".join(
+        [f"  • عند {e} إيميل → <code>${r:.2f}</code>" for e, r in awarded_now])
     try:
         await context.bot.send_message(
             chat_id=uid,
             text=(
                 "🎉 <b>مبروك! فزت في المسابقة</b>\n\n"
-                f"✅ <b>عدد الإيميلات التي وصلت:</b> <code>{count}</code>\n"
-                f"💰 <b>المكافأة:</b> <code>${reward:.2f}</code>\n\n"
+                f"✅ <b>عدد الإيميلات الحالية:</b> <code>{count}</code>\n"
+                f"💰 <b>المكافآت المكتسبة:</b>\n{tiers_lines}\n\n"
+                f"💵 <b>الإجمالي الممنوح الآن:</b> <code>${total_now:.2f}</code>\n"
                 "تم إضافة المكافأة إلى رصيدك مباشرة."
             ),
             parse_mode=ParseMode.HTML,
@@ -1474,42 +1444,14 @@ async def check_contest_award(context: ContextTypes.DEFAULT_TYPE, uid: int):
             text=(
                 "🎉 <b>فائز جديد في المسابقة</b>\n\n"
                 f"👤 المستخدم: <code>{uid}</code>\n"
-                f"✅ الإيميلات: <code>{count}</code>\n"
-                f"💰 المكافأة: <code>${reward:.2f}</code>\n"
-                f"🏅 عدد الفائزين الآن: <code>{len(winners)}</code>"
+                f"✅ الإيميلات الحالية: <code>{count}</code>\n"
+                f"💵 إجمالي الممنوح: <code>${total_now:.2f}</code>\n"
+                f"🎁 مكافآت: <code>{len(awarded_now)}</code>"
             ),
             parse_mode=ParseMode.HTML,
         )
     except Exception:
         pass
-
-
-def get_contest_live_stats() -> dict:
-    """إحصائيات حيّة للمسابقة."""
-    contest = get_contest()
-    if not contest:
-        return {"active": False}
-    started_at = contest.get("started_at")
-    result = compute_sales_stats(since_iso=started_at) if started_at else compute_sales_stats()
-    # عدد الإيميلات الواصلة خلال المسابقة
-    delivered = 0
-    users = load_json(USERS_DB)
-    for encrypted_data in users.values():
-        ud = decrypt_user_data(encrypted_data)
-        delivered += _count_approved_in_window(ud, started_at)
-    winners = contest.get("winners", []) or []
-    total_pts = float(contest.get("total_points_awarded", 0) or 0)
-    return {
-        "active": bool(contest.get("active")),
-        "started_at": started_at,
-        "target_emails": int(contest.get("target_emails", 0) or 0),
-        "max_winners": int(contest.get("max_winners", 0) or 0),
-        "reward_per_winner": float(contest.get("reward_per_winner", 0) or 0),
-        "winners_count": len(winners),
-        "delivered_emails": delivered,
-        "total_points_awarded": total_pts,
-        "sales": result,
-    }
 
 
 # ==================== MAIN MENU ====================
@@ -1563,14 +1505,7 @@ async def top_sellers_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     lines = ["🏆 <b>الأكثر بيعاً</b>", ""]
     for idx, item in enumerate(top, 1):
-        username_part = f" (@{tg_html_escape(item['username'])})" if item.get("username") else ""
-        lines.append(
-            f"{idx}- ID <code>{item['user_id']}</code> بيع <b>{item['total']}</b>"
-            f"{username_part}"
-        )
-        lines.append(
-            f"   ✅ {item['approved']} | ⏳ {item['pending']} | ❌ {item['rejected']}"
-        )
+        lines.append(f"{idx}- ID <code>{item['user_id']}</code> بيع <b>{item['total']}</b>")
     await query.edit_message_text(
         "\n".join(lines),
         parse_mode=ParseMode.HTML,
@@ -1846,7 +1781,7 @@ async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "reject_uid", "reject_index", "reject_reason",
                 "deduct_uid", "deduct_token", "give_uid", "give_index",
                 "mode", "store_action", "setting_tier", "pending_video_type",
-                "contest_create_field", "contest_create_data"):
+                "contest_build", "contest_build_step"):
         context.user_data.pop(key, None)
     SESSIONS[uid] = Session(step="email")
     save_sessions()
@@ -2144,7 +2079,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             SESSIONS.pop(uid, None)
             save_sessions()
 
-            # ✅ فحص المسابقة بعد القبول
             try:
                 await check_contest_award(context, uid)
             except Exception:
@@ -3007,11 +2941,6 @@ def _search_email_in_all_records(email: str) -> List[dict]:
             if normalize_email(rej.get("email", "")) == normalized:
                 results.append({"record_type": "rejected", "user_id": uid,
                                 "index": idx, "data": rej, "user_data": user_data})
-    # ترتيب: المقبولة/المرفوضة الأحدث أولاً، المنتظرة الأقدم أولاً
-    def _sort_key(item):
-        t = _record_sort_key(item["data"])
-        # نجمع المفتاح مع رتبة للفصل بين الأنواع
-        return (item["record_type"], t)
     approved = [i for i in results if i["record_type"] == "approved"]
     pending = [i for i in results if i["record_type"] == "pending"]
     rejected = [i for i in results if i["record_type"] == "rejected"]
@@ -3324,8 +3253,8 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     context.user_data.pop("step", None)
     context.user_data.pop("store_action", None)
-    context.user_data.pop("contest_create_field", None)
-    context.user_data.pop("contest_create_data", None)
+    context.user_data.pop("contest_build", None)
+    context.user_data.pop("contest_build_step", None)
     buttons = [
         ("👥 الإدارية", "admin_management"),
         ("💰 أسعار المستويات", "set_tier_prices"),
@@ -3355,8 +3284,8 @@ async def contest_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
-    context.user_data.pop("contest_create_field", None)
-    context.user_data.pop("contest_create_data", None)
+    context.user_data.pop("contest_build", None)
+    context.user_data.pop("contest_build_step", None)
     contest = get_contest()
     header = "🎯 *إدارة المسابقة*\n\n" + "\n".join(contest_summary_lines(contest))
     buttons = []
@@ -3380,32 +3309,79 @@ async def contest_create_start(update: Update, context: ContextTypes.DEFAULT_TYP
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
-    context.user_data["contest_create_data"] = {}
-    context.user_data["contest_create_field"] = "target_emails"
+    context.user_data["contest_build"] = {"tiers": []}
+    context.user_data["contest_build_step"] = "max_winners"
     await query.edit_message_text(
         "🆕 *إنشاء مسابقة جديدة*\n\n"
-        "📌 *الخطوة 1/3*: أرسل عدد الإيميلات المطلوبة لكل فائز.\n"
-        "مثال: `10`\n\n"
-        "_أو 'إلغاء'_",
+        "📌 *الخطوة 1*: أرسل الحد الأقصى لعدد الفائزين لكل جائزة.\n"
+        "مثال: `2000`\n\n_أو 'إلغاء'_",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=kb_single("🔙 إلغاء", "contest_menu"))
 
 
-async def handle_contest_create_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def contest_add_tier(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    build = context.user_data.get("contest_build") or {}
+    if not build:
+        await query.answer("⚠️ لا توجد مسابقة قيد الإنشاء.", show_alert=True)
+        return
+    context.user_data["contest_build_step"] = "tier_emails"
+    tier_num = len(build.get("tiers", [])) + 1
+    await query.edit_message_text(
+        f"🎁 *الجائزة رقم {tier_num}*\n\n"
+        f"📌 أرسل عدد الإيميلات المطلوبة للفوز بهذه الجائزة.\n"
+        f"مثال: `100`\n\n_أو 'إلغاء'_",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_single("🔙 إلغاء", "contest_menu"))
+
+
+async def contest_finalize(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    build = context.user_data.get("contest_build") or {}
+    tiers = build.get("tiers", [])
+    max_winners = int(build.get("max_winners", 0) or 0)
+    if not tiers or max_winners <= 0:
+        await query.answer("⚠️ لم يتم استكمال بيانات المسابقة.", show_alert=True)
+        return
+    contest = {
+        "active": True,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "max_winners": max_winners,
+        "tiers": tiers,
+        "winners": [],
+        "total_emails_delivered": 0,
+        "total_points_awarded": 0.0,
+    }
+    save_contest(contest)
+    context.user_data.pop("contest_build", None)
+    context.user_data.pop("contest_build_step", None)
+    await query.edit_message_text(
+        "🎉 <b>تم إنشاء المسابقة وتفعيلها</b>\n\n" + "\n".join(contest_summary_lines(contest)),
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_single("🔙 إدارة المسابقة", "contest_menu"))
+
+
+async def handle_contest_build_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
         return
     text = update.message.text.strip()
     if text.casefold() in {"إلغاء", "الغاء", "cancel"}:
-        context.user_data.pop("contest_create_field", None)
-        context.user_data.pop("contest_create_data", None)
+        context.user_data.pop("contest_build", None)
+        context.user_data.pop("contest_build_step", None)
         await update.message.reply_text(
             "❌ تم الإلغاء.",
             reply_markup=kb_single("🔙 إدارة المسابقة", "contest_menu"))
         return
-    field = context.user_data.get("contest_create_field")
-    data = context.user_data.get("contest_create_data") or {}
+    step = context.user_data.get("contest_build_step")
+    build = context.user_data.get("contest_build") or {}
 
-    if field == "target_emails":
+    if step == "max_winners":
         try:
             v = int(float(text))
             if v <= 0:
@@ -3413,18 +3389,17 @@ async def handle_contest_create_input(update: Update, context: ContextTypes.DEFA
         except ValueError:
             await update.message.reply_text("⚠️ أرسل رقماً صحيحاً أكبر من صفر.")
             return
-        data["target_emails"] = v
-        context.user_data["contest_create_data"] = data
-        context.user_data["contest_create_field"] = "max_winners"
+        build["max_winners"] = v
+        context.user_data["contest_build"] = build
+        context.user_data["contest_build_step"] = "tier_emails"
         await update.message.reply_text(
-            f"✅ الهدف: <code>{v}</code> إيميل\n\n"
-            f"📌 *الخطوة 2/3*: أرسل الحد الأقصى لعدد الفائزين.\n"
-            f"مثال: `2000`\n\n_أو 'إلغاء'_",
+            f"✅ الحد الأقصى للفائزين لكل جائزة: <code>{v}</code>\n\n"
+            f"🎁 *الجائزة 1*: أرسل عدد الإيميلات المطلوبة.\nمثال: `100`\n\n_أو 'إلغاء'_",
             parse_mode=ParseMode.HTML,
             reply_markup=kb_single("🔙 إلغاء", "contest_menu"))
         return
 
-    if field == "max_winners":
+    if step == "tier_emails":
         try:
             v = int(float(text))
             if v <= 0:
@@ -3432,44 +3407,46 @@ async def handle_contest_create_input(update: Update, context: ContextTypes.DEFA
         except ValueError:
             await update.message.reply_text("⚠️ أرسل رقماً صحيحاً أكبر من صفر.")
             return
-        data["max_winners"] = v
-        context.user_data["contest_create_data"] = data
-        context.user_data["contest_create_field"] = "reward_per_winner"
+        build["_current_emails"] = v
+        context.user_data["contest_build"] = build
+        context.user_data["contest_build_step"] = "tier_reward"
         await update.message.reply_text(
-            f"✅ الحد الأقصى للفائزين: <code>{v}</code>\n\n"
-            f"📌 *الخطوة 3/3*: أرسل مكافأة كل فائز (بالدولار).\n"
-            f"مثال: `3` أو `0.5`\n\n_أو 'إلغاء'_",
+            f"✅ عدد الإيميلات: <code>{v}</code>\n\n"
+            f"💰 أرسل مكافأة هذه الجائزة (بالدولار).\nمثال: `3`\n\n_أو 'إلغاء'_",
             parse_mode=ParseMode.HTML,
             reply_markup=kb_single("🔙 إلغاء", "contest_menu"))
         return
 
-    if field == "reward_per_winner":
+    if step == "tier_reward":
         try:
-            v = float(text)
-            if v <= 0:
+            r = float(text)
+            if r <= 0:
                 raise ValueError
         except ValueError:
             await update.message.reply_text("⚠️ أرسل رقماً صحيحاً أكبر من صفر.")
             return
-        data["reward_per_winner"] = round(v, 2)
-        context.user_data.pop("contest_create_field", None)
-        context.user_data.pop("contest_create_data", None)
+        emails = int(build.get("_current_emails", 0) or 0)
+        tiers = build.get("tiers", [])
+        tiers.append({"emails": emails, "reward": round(r, 2)})
+        build["tiers"] = tiers
+        build.pop("_current_emails", None)
+        context.user_data["contest_build"] = build
+        context.user_data.pop("contest_build_step", None)
 
-        contest = {
-            "active": True,
-            "started_at": datetime.now(timezone.utc).isoformat(),
-            "target_emails": int(data["target_emails"]),
-            "max_winners": int(data["max_winners"]),
-            "reward_per_winner": float(data["reward_per_winner"]),
-            "winners": [],
-            "total_emails_delivered": 0,
-            "total_points_awarded": 0.0,
-        }
-        save_contest(contest)
+        lines = ["📋 <b>ملخص المسابقة حتى الآن</b>", ""]
+        lines.append(f"🏅 الحد الأقصى للفائزين (لكل جائزة): <code>{build['max_winners']}</code>")
+        lines.append("")
+        lines.append("🎁 <b>الجوائز:</b>")
+        for i, t in enumerate(tiers, 1):
+            lines.append(f"  {i}. عند <b>{t['emails']}</b> إيميل → <code>${t['reward']:.2f}</code>")
         await update.message.reply_text(
-            "🎉 <b>تم إنشاء المسابقة وتفعيلها</b>\n\n" + "\n".join(contest_summary_lines(contest)),
+            "\n".join(lines) + "\n\nهل تريد إضافة جائزة أخرى أم إنهاء المسابقة؟",
             parse_mode=ParseMode.HTML,
-            reply_markup=kb_single("🔙 إدارة المسابقة", "contest_menu"))
+            reply_markup=kb_vertical([
+                ("➕ إضافة جائزة", "contest_add_tier"),
+                ("✅ إنشاء المسابقة", "contest_finalize"),
+                ("❌ إلغاء", "contest_menu"),
+            ]))
         return
 
 
@@ -3496,23 +3473,34 @@ async def contest_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
-    stats = get_contest_live_stats()
-    if not stats or not stats.get("active") and not stats.get("started_at"):
+    contest = get_contest()
+    if not contest or not contest.get("started_at"):
         await query.edit_message_text(
             "📭 لا توجد مسابقة.",
             reply_markup=kb_single("🔙 إدارة المسابقة", "contest_menu"))
         return
+    started_at = contest.get("started_at")
+    delivered = int(contest.get("total_emails_delivered", 0) or 0)
+    winners = contest.get("winners", []) or []
+    tiers = contest.get("tiers", []) or []
+    total_pts = float(contest.get("total_points_awarded", 0) or 0)
     lines = ["📊 <b>إحصائيات المسابقة</b>", ""]
-    lines.append(f"📌 <b>الحالة:</b> {'🟢 نشطة' if stats['active'] else '🔴 متوقفة'}")
-    if stats.get("started_at"):
-        lines.append(f"🕐 <b>البداية:</b> <code>{tg_html_escape(_format_iso_time(stats['started_at']))}</code>")
-    lines.append(f"🎯 <b>الهدف:</b> <code>{stats.get('target_emails', 0)}</code> إيميل")
-    lines.append(f"🏅 <b>الحد الأقصى للفائزين:</b> <code>{stats.get('max_winners', 0)}</code>")
-    lines.append(f"💰 <b>مكافأة كل فائز:</b> <code>${stats.get('reward_per_winner', 0):.2f}</code>")
+    lines.append(f"📌 <b>الحالة:</b> {'🟢 نشطة' if contest.get('active') else '🔴 متوقفة'}")
+    if started_at:
+        lines.append(f"🕐 <b>البداية:</b> <code>{tg_html_escape(_format_iso_time(started_at))}</code>")
     lines.append("")
-    lines.append(f"✅ <b>عدد الفائزين:</b> <code>{stats.get('winners_count', 0)}</code>")
-    lines.append(f"📨 <b>عدد الإيميلات الواصلة:</b> <code>{stats.get('delivered_emails', 0)}</code>")
-    lines.append(f"💵 <b>النقاط الممنوحة:</b> <code>${stats.get('total_points_awarded', 0):.2f}</code>")
+    lines.append(f"✅ <b>عدد الفائزين الكلي:</b> <code>{len(winners)}</code>")
+    lines.append(f"📨 <b>عدد الإيميلات الواصلة:</b> <code>{delivered}</code>")
+    lines.append(f"💵 <b>النقاط الممنوحة:</b> <code>${total_pts:.2f}</code>")
+    lines.append("")
+    lines.append("🎁 <b>تفصيل كل جائزة:</b>")
+    for i, tier in enumerate(tiers):
+        emails = int(tier.get("emails", 0) or 0)
+        reward = float(tier.get("reward", 0) or 0)
+        tier_winners = [w for w in winners if int(w.get("tier_index", -1)) == i]
+        lines.append(
+            f"  {i+1}. عند <b>{emails}</b> إيميل → <code>${reward:.2f}</code> — فائزون: <code>{len(tier_winners)}</code>"
+        )
     await query.edit_message_text(
         "\n".join(lines), parse_mode=ParseMode.HTML,
         reply_markup=kb_single("🔙 إدارة المسابقة", "contest_menu"))
@@ -3526,19 +3514,12 @@ async def sales_total_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats = compute_sales_stats(since_iso=None)
     lines = ["📈 <b>البيع الكلي (كل الفترات)</b>", ""]
     lines.append(f"📦 <b>إجمالي الحسابات:</b> <code>{stats['total_accounts']}</code>")
-    lines.append(f"✅ <b>مقبولة:</b> <code>{stats['approved']}</code>")
-    lines.append(f"⏳ <b>منتظرة:</b> <code>{stats['pending']}</code>")
-    lines.append(f"❌ <b>مرفوضة:</b> <code>{stats['rejected']}</code>")
     lines.append("")
     lines.append("🏆 <b>أعلى 10 أعضاء بيعاً:</b>")
     if not stats["top"]:
         lines.append("_لا توجد بيانات._")
     for idx, item in enumerate(stats["top"], 1):
-        username = f" (@{tg_html_escape(item['username'])})" if item.get("username") else ""
-        lines.append(
-            f"{idx}- ID <code>{item['user_id']}</code> بيع <b>{item['total']}</b>{username}\n"
-            f"   ✅ {item['approved']} | ⏳ {item['pending']} | ❌ {item['rejected']}"
-        )
+        lines.append(f"{idx}- ID <code>{item['user_id']}</code> بيع <b>{item['total']}</b>")
     await query.edit_message_text(
         "\n".join(lines), parse_mode=ParseMode.HTML,
         reply_markup=kb_single("🔙 إدارة المسابقة", "contest_menu"))
@@ -3561,19 +3542,12 @@ async def sales_during_contest_view(update: Update, context: ContextTypes.DEFAUL
     lines.append(f"🕐 <b>من:</b> <code>{tg_html_escape(_format_iso_time(started_at))}</code>")
     lines.append("")
     lines.append(f"📦 <b>إجمالي الحسابات:</b> <code>{stats['total_accounts']}</code>")
-    lines.append(f"✅ <b>مقبولة:</b> <code>{stats['approved']}</code>")
-    lines.append(f"⏳ <b>منتظرة:</b> <code>{stats['pending']}</code>")
-    lines.append(f"❌ <b>مرفوضة:</b> <code>{stats['rejected']}</code>")
     lines.append("")
     lines.append("🏆 <b>أعلى 10 أعضاء بيعاً خلال المسابقة:</b>")
     if not stats["top"]:
         lines.append("_لا توجد بيانات._")
     for idx, item in enumerate(stats["top"], 1):
-        username = f" (@{tg_html_escape(item['username'])})" if item.get("username") else ""
-        lines.append(
-            f"{idx}- ID <code>{item['user_id']}</code> بيع <b>{item['total']}</b>{username}\n"
-            f"   ✅ {item['approved']} | ⏳ {item['pending']} | ❌ {item['rejected']}"
-        )
+        lines.append(f"{idx}- ID <code>{item['user_id']}</code> بيع <b>{item['total']}</b>")
     await query.edit_message_text(
         "\n".join(lines), parse_mode=ParseMode.HTML,
         reply_markup=kb_single("🔙 إدارة المسابقة", "contest_menu"))
@@ -3729,7 +3703,6 @@ def _collect_admin_requests() -> List[dict]:
             copy["user_id"] = uid
             copy["index"] = idx
             items.append(copy)
-    # المنتظرة: الأقدم أولاً
     try:
         items.sort(key=_record_sort_key)
     except Exception:
@@ -4225,7 +4198,6 @@ async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_T
                     f"أكمله الأدمن {admin_id} - معلق {hold_hours} ساعة", email)
     save_user(uid, user_data)
 
-    # ✅ فحص المسابقة بعد القبول
     try:
         await check_contest_award(context, uid)
     except Exception:
@@ -4478,12 +4450,6 @@ async def approval_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def _collect_all(items_field: str, sort_order: str = "newest") -> List[dict]:
-    """
-    sort_order:
-      - "newest": الأحدث أولاً (المقبولة والمرفوضة)
-      - "oldest": الأقدم أولاً (المنتظرة)
-    يحتفظ بالحقل "index" كالفهرس الأصلي في التخزين.
-    """
     users = load_json(USERS_DB)
     items = []
     for uid, encrypted_data in users.items():
@@ -4872,7 +4838,6 @@ async def complete_approval(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     user_data["total_approved_emails"] = int(user_data.get("total_approved_emails", 0)) + 1
     save_user(uid, user_data)
 
-    # ✅ فحص المسابقة بعد القبول
     try:
         await check_contest_award(context, uid)
     except Exception:
@@ -5928,7 +5893,6 @@ async def rejected_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg += f"👤 *المستخدم:* `{uid}`\n"
     msg += f"💰 *السعر:* ${request.get('amount', 0):.2f}\n"
     msg += f"📝 *سبب الرفض:* {tg_html_escape(str(reason_text))}\n"
-    # عرض من رفض
     if request.get("rejected_by"):
         msg += f"\n❌ *من رفضه:*\n"
         msg += f"  • معرف: `{request.get('rejected_by')}`\n"
@@ -6151,7 +6115,6 @@ async def hold_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 copy = dict(acc)
                 copy["user_id"] = uid
                 hold_list.append(copy)
-    # الأحدث أولاً
     hold_list = sort_records_newest_first(hold_list)
     if not hold_list:
         await query.edit_message_text("✅ لا توجد حسابات معلقة.",
@@ -6806,17 +6769,17 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
 
-    # مسابقة
-    if context.user_data.get("contest_create_field"):
+    # Contest build (multi-step)
+    if context.user_data.get("contest_build_step"):
         if user_id != OWNER_ID:
             return
-        await handle_contest_create_input(update, context)
+        await handle_contest_build_input(update, context)
         return
 
     session = SESSIONS.get(user_id)
     if session and session.step:
         admin_steps = ("admin_approval_step", "step", "mode", "store_action",
-                       "contest_create_field")
+                       "contest_build_step")
         has_admin_step = any(context.user_data.get(k) for k in admin_steps)
         if not has_admin_step:
             await add_account_step(update, context)
@@ -7235,6 +7198,10 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await contest_menu(update, context)
     elif data == "contest_create_start":
         await contest_create_start(update, context)
+    elif data == "contest_add_tier":
+        await contest_add_tier(update, context)
+    elif data == "contest_finalize":
+        await contest_finalize(update, context)
     elif data == "contest_stop":
         await contest_stop(update, context)
     elif data == "contest_stats":
