@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Dict, Optional, List, Any, Union, Tuple
 
 import pyotp
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -6427,16 +6427,19 @@ async def withdraw_store(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
     query = update.callback_query
+    send_message = (
+        query.edit_message_text if query else update.effective_message.reply_text
+    )
     config = load_config()
     categories = config.get("store_categories", [])
     if not categories:
-        await query.edit_message_text("🛒 لا توجد فئات.",
-                                      reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        await send_message("🛒 لا توجد فئات.",
+                           reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
         return
     buttons = [(f"📂 {cat['name']}", f"user_category:{cat['id']}") for cat in categories]
     buttons.append(("🔙 القائمة الرئيسية", "main_menu"))
-    await query.edit_message_text("🛒 *قسم السحب*\nاختر الفئة:", parse_mode=ParseMode.MARKDOWN,
-                                  reply_markup=kb_vertical(buttons))
+    await send_message("🛒 *قسم السحب*\nاختر الفئة:", parse_mode=ParseMode.MARKDOWN,
+                       reply_markup=kb_vertical(buttons))
 
 
 async def user_category_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -7149,6 +7152,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await main_menu(update, context)
 
 
+async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await withdraw_store(update, context)
+
+
 # ==================== ROUTER ====================
 async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -7442,6 +7449,16 @@ async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ==================== MAIN ====================
+async def initialize_application(application: Application):
+    await restore_leave_checks(application)
+    await application.bot.set_my_commands(
+        [
+            BotCommand("start", "check your account status"),
+            BotCommand("buy", "open the purchase section"),
+        ]
+    )
+
+
 def main():
     if not BOT_TOKEN:
         raise SystemExit("❌ BOT_TOKEN غير مضبوط.")
@@ -7449,9 +7466,10 @@ def main():
         logger.warning("⚠️ OWNER_TELEGRAM_ID = 0")
     app = (Application.builder()
            .token(BOT_TOKEN)
-           .post_init(restore_leave_checks)
+           .post_init(initialize_application)
            .build())
     app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("buy", buy_command))
     app.add_handler(CommandHandler("debug", debug_command))
     app.add_handler(CommandHandler("owner", owner_command))
     app.add_handler(CommandHandler("admin", admin_command))
