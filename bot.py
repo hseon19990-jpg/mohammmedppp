@@ -1,9 +1,9 @@
 """
-Advanced Telegram Account Manager Bot - v5.7
-- NEW: Contest supports MULTIPLE prize tiers (milestone-based, cumulative)
-       Example: 100→$3, 120→$5, 150→$8, 190→$12 (each awarded once per seller)
-- Top sellers / Sales stats show ONLY: rank + ID + total sales (no breakdown, no username)
-- Owner can create contest with: max winners per tier, then add N tiers (emails+reward)
+Advanced Telegram Account Manager Bot - v5.8
+- FIX: Reject handler now wraps everything in try/except and uses safe-edit fallback.
+- NEW: Auto-ban after 3 consecutive rejections: 1 day, then 1 week, then weekly.
+- FIX: Rare "extra info" bug when adding account (strict email match, session cleanup,
+       explicit record building, approved-fields filtering).
 - (all prior fixes retained)
 """
 
@@ -279,6 +279,11 @@ IMAP_RATE_LIMIT_SECONDS = 60
 AUTO_VERIFY_ENABLED = True
 ADMIN_TIER3_PRICE = 0.20
 
+# Auto-ban settings
+BAN_THRESHOLD = 3
+BAN_FIRST_DURATION_HOURS = 24
+BAN_WEEKLY_DURATION_HOURS = 24 * 7
+
 # ==================== REJECT REASONS ====================
 REJECT_REASON_KEYS = ("email", "password", "totp", "app_pass", "phone", "other")
 
@@ -438,6 +443,11 @@ DEFAULT_USER_FIELDS = {
     "used_app_passwords": [],
     "transactions": [],
     "contest_wins": [],
+    # Auto-ban fields
+    "consecutive_rejections": 0,
+    "ban_until": "",
+    "ban_level": 0,
+    "total_rejections": 0,
 }
 
 
@@ -477,6 +487,62 @@ def add_transaction(user_data: dict, kind: str, amount: float, note: str = "", e
         "email": email,
         "at": datetime.now(timezone.utc).isoformat(),
     })
+
+
+# ==================== AUTO-BAN HELPERS ====================
+def _ban_duration_hours_for_level(level: int) -> int:
+    return BAN_FIRST_DURATION_HOURS if level <= 1 else BAN_WEEKLY_DURATION_HOURS
+
+
+def get_active_ban_message(user_data: dict) -> Optional[str]:
+    """إذا كان المستخدم محظوراً حالياً، يعيد نص الحظر. غير ذلك None."""
+    ban_until_str = str(user_data.get("ban_until", "") or "").strip()
+    if not ban_until_str:
+        return None
+    try:
+        ban_until = datetime.fromisoformat(ban_until_str)
+    except ValueError:
+        return None
+    if ban_until.tzinfo is None:
+        ban_until = ban_until.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    if now >= ban_until:
+        return None
+    remaining = ban_until - now
+    hours = int(remaining.total_seconds() // 3600)
+    minutes = int((remaining.total_seconds() % 3600) // 60)
+    return (f"🚫 <b>أنت محظور من إرسال حسابات جديدة</b>\n"
+            f"⏳ الوقت المتبقي: {hours} ساعة و {minutes} دقيقة.\n"
+            f"<i>السبب: 3 رفضات متتالية.</i>")
+
+
+def register_rejection_and_maybe_ban(user_data: dict) -> Optional[Tuple[int, str]]:
+    """
+    يزيد عدّاد الرفض المتتالي. إذا وصل 3:
+    - المستوى 1: حظر يوم كامل
+    - المستوى 2+ : حظر أسبوع كامل
+    يعيد (level, duration_text) عند الحظر، غير ذلك None.
+    """
+    consecutive = int(user_data.get("consecutive_rejections", 0) or 0) + 1
+    user_data["consecutive_rejections"] = consecutive
+    user_data["total_rejections"] = int(user_data.get("total_rejections", 0) or 0) + 1
+
+    if consecutive < BAN_THRESHOLD:
+        return None
+
+    ban_level = int(user_data.get("ban_level", 0) or 0) + 1
+    user_data["ban_level"] = ban_level
+    user_data["consecutive_rejections"] = 0
+    duration_hours = _ban_duration_hours_for_level(ban_level)
+    ban_until = datetime.now(timezone.utc) + timedelta(hours=duration_hours)
+    user_data["ban_until"] = ban_until.isoformat()
+    duration_text = "يوم واحد" if ban_level == 1 else "أسبوع"
+    return ban_level, duration_text
+
+
+def register_approval_reset(user_data: dict):
+    """إعادة تصفير عدّاد الرفض المتتالي عند نجاح قبول حساب."""
+    user_data["consecutive_rejections"] = 0
 
 
 # ==================== SESSION PERSISTENCE ====================
@@ -559,6 +625,18 @@ def clear_edit_state(context: ContextTypes.DEFAULT_TYPE):
 
 def tg_html_escape(value: Any) -> str:
     return html.escape(str(value), quote=False)
+
+
+async def _safe_edit(query, text: str, **kwargs):
+    """edit_message_text مع fallback إلى reply_text عند فشل التعديل."""
+    try:
+        await query.edit_message_text(text, **kwargs)
+    except Exception:
+        logger.exception("edit_message_text failed, falling back to send_message")
+        try:
+            await query.message.reply_text(text, **kwargs)
+        except Exception:
+            logger.exception("send_message fallback failed")
 
 
 # ==================== PRICING ====================
@@ -1257,13 +1335,11 @@ def get_contest() -> dict:
     contest = config.get("contest")
     if not isinstance(contest, dict):
         return {}
-    # Migration from single-tier format
     if "tiers" not in contest:
         old_target = int(contest.get("target_emails", 0) or 0)
         old_reward = float(contest.get("reward_per_winner", 0) or 0)
         if old_target > 0 and old_reward > 0:
             contest["tiers"] = [{"emails": old_target, "reward": old_reward}]
-            # Migrate old winners to tier_index 0
             migrated = []
             for w in contest.get("winners", []) or []:
                 w2 = dict(w)
@@ -1342,7 +1418,6 @@ def contest_summary_lines(contest: dict) -> List[str]:
 
 
 async def check_contest_award(context: ContextTypes.DEFAULT_TYPE, uid: int):
-    """يمنح كل الجوائز المؤهلة مرة واحدة لكل فائز عند كل قبول."""
     contest = get_contest()
     if not contest or not contest.get("active"):
         return
@@ -1357,7 +1432,6 @@ async def check_contest_award(context: ContextTypes.DEFAULT_TYPE, uid: int):
     user_data = get_user(uid)
     count = _count_approved_in_window(user_data, started_at)
 
-    # عدّاد الإيميلات الواصلة الكلي (يزيد عند كل قبول)
     contest["total_emails_delivered"] = int(contest.get("total_emails_delivered", 0) or 0) + 1
     save_contest(contest)
 
@@ -1369,24 +1443,20 @@ async def check_contest_award(context: ContextTypes.DEFAULT_TYPE, uid: int):
         tier_reward = float(tier.get("reward", 0) or 0)
         if tier_emails <= 0 or tier_reward <= 0:
             continue
-        # لم يصل بعد
         if count < tier_emails:
             continue
-        # فاز بهذه الجائزة مسبقًا؟
         already_won = any(
             int(w.get("user_id", 0)) == uid and int(w.get("tier_index", -1)) == tier_index
             for w in winners
         )
         if already_won:
             continue
-        # اكتمل عدد الفائزين لهذه الجائزة؟
         tier_winners_count = sum(
             1 for w in winners if int(w.get("tier_index", -1)) == tier_index
         )
         if tier_winners_count >= max_winners:
             continue
 
-        # منح الجائزة
         user_data["balance"] = clamp_money(
             float(user_data.get("balance", 0.0)) + tier_reward)
         user_data["total_credited_balance"] = clamp_money(
@@ -1462,6 +1532,9 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     SESSIONS.pop(update.effective_user.id, None)
     save_sessions()
     user = update.effective_user
+    user_data = get_user(user.id)
+    ban_msg = get_active_ban_message(user_data)
+    prefix = (ban_msg + "\n\n") if ban_msg else ""
     buttons = [
         ("➕ إضافة حساب", "add_account"),
         ("💰 أموالي", "my_wallet"),
@@ -1478,14 +1551,17 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buttons.append(("🛠 الإدارية", "admin_panel"))
     if user.id == OWNER_ID:
         buttons.append(("⚙️ إعدادات المالك", "owner_panel"))
-    text = "👋 مرحباً بك!\nاختر من القائمة أدناه:"
+    text = prefix + "👋 مرحباً بك!\nاختر من القائمة أدناه:"
     if update.callback_query:
         try:
-            await update.callback_query.edit_message_text(text, reply_markup=kb_vertical(buttons))
+            await update.callback_query.edit_message_text(
+                text, parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
         except Exception:
-            await update.callback_query.message.reply_text(text, reply_markup=kb_vertical(buttons))
+            await update.callback_query.message.reply_text(
+                text, parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
     else:
-        await update.message.reply_text(text, reply_markup=kb_vertical(buttons))
+        await update.message.reply_text(
+            text, parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
 
 
 # ==================== TOP SELLERS VIEW ====================
@@ -1770,9 +1846,26 @@ async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
     uid = update.effective_user.id
+
+    # 🔒 فحص الحظر قبل السماح ببدء إضافة حساب
+    user_data_check = get_user(uid)
+    ban_msg = get_active_ban_message(user_data_check)
+    if ban_msg:
+        try:
+            await update.callback_query.answer("🚫 أنت محظور حالياً.", show_alert=True)
+        except Exception:
+            pass
+        await _safe_edit(
+            update.callback_query,
+            ban_msg, parse_mode=ParseMode.HTML,
+            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        return
+
     SESSIONS.pop(uid, None)
     save_sessions()
     clear_edit_state(context)
+
+    # تنظيف شامل لكل مفاتيح الحالة قبل البدء بجلسة نظيفة
     for key in ("step", "editing_field", "editing_uid", "editing_index",
                 "admin_completing_uid", "admin_completing_index",
                 "admin_completing_token", "admin_approval_step",
@@ -1781,9 +1874,11 @@ async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "reject_uid", "reject_index", "reject_reason",
                 "deduct_uid", "deduct_token", "give_uid", "give_index",
                 "mode", "store_action", "setting_tier", "pending_video_type",
-                "contest_build", "contest_build_step"):
+                "contest_build", "contest_build_step",
+                "reject_approved_uid", "reject_approved_token"):
         context.user_data.pop(key, None)
-    SESSIONS[uid] = Session(step="email")
+
+    SESSIONS[uid] = Session(step="email")  # جلسة جديدة نظيفة تمامًا
     save_sessions()
     config = load_config()
     prices = get_tier_prices()
@@ -1844,8 +1939,11 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prices = get_tier_prices()
 
     if session.step == "email":
-        email = normalize_email(text)
-        if not re.match(r"[^@]+@[^@]+\.[^@]+", email):
+        # 🛡️ حماية: خذ أول سطر فقط لتفادي لصق (إيميل + باسورد) في رسالة واحدة
+        first_line = text.splitlines()[0].strip() if text else ""
+        email = normalize_email(first_line)
+        # 🛡️ تحقق صارم كامل بلا أي مسافات
+        if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
             await update.message.reply_text("❌ إيميل غير صالح. أرسل إيميلاً صحيحاً:")
             return
         active_status = get_active_account_status(email)
@@ -1867,6 +1965,13 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     float(user_data.get("pending_balance", 0.0)) - sum(old_amounts)
                 )
                 save_user(uid, user_data)
+        # 🛡️ تصفير أي حقول قادمة من جلسة سابقة قبل إسناد الإيميل
+        session.password = ""
+        session.totp = ""
+        session.app_pass = ""
+        session.has_password = False
+        session.has_totp = False
+        session.has_app_pass = False
         session.email = email
         session.step = "password"
         save_sessions()
@@ -2038,11 +2143,12 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             clear_rejected_email_records(user_data, session.email)
 
             approval_time = datetime.now(timezone.utc)
+            # 🛡️ بناء سجل بحقول صريحة ومنفصلة تماماً
             account_record = {
-                "email": session.email,
-                "password": session.password,
-                "totp": session.totp,
-                "app_pass": session.app_pass,
+                "email": str(session.email or ""),
+                "password": str(session.password or ""),
+                "totp": str(session.totp or ""),
+                "app_pass": str(session.app_pass or ""),
                 "amount": final_price,
                 "timestamp": approval_time.isoformat(),
                 "approval_time": approval_time.isoformat(),
@@ -2075,6 +2181,8 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_data["user_username"] = user_username
             add_transaction(user_data, "hold", final_price,
                             "تحقق تلقائي - معلق 24 ساعة", session.email)
+            # 🔄 إعادة تصفير عدّاد الرفض المتتالي عند نجاح قبول
+            register_approval_reset(user_data)
             save_user(uid, user_data)
             SESSIONS.pop(uid, None)
             save_sessions()
@@ -2132,17 +2240,18 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_username = user.username or "لا يوجد"
         final_price = calculate_account_price(session.has_totp, session.has_app_pass)
         clear_rejected_email_records(user_data, session.email)
-        user_data["pending_requests"].append({
-            "email": session.email,
-            "password": session.password,
-            "totp": session.totp if session.has_totp else "",
-            "app_pass": session.app_pass,
+        # 🛡️ سجل بحقول صريحة
+        user_data.setdefault("pending_requests", []).append({
+            "email": str(session.email or ""),
+            "password": str(session.password or ""),
+            "totp": str(session.totp) if session.has_totp else "",
+            "app_pass": str(session.app_pass or ""),
             "amount": final_price,
             "requested_amount": final_price,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "extracted": False,
-            "has_totp": session.has_totp,
-            "has_app_pass": session.has_app_pass,
+            "has_totp": bool(session.has_totp),
+            "has_app_pass": bool(session.has_app_pass),
             "user_name": user_full_name,
             "user_username": user_username,
         })
@@ -2258,12 +2367,19 @@ async def submit_tier_1(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_full_name = user.full_name or "غير معروف"
     user_username = user.username or "لا يوجد"
     clear_rejected_email_records(user_data, session.email)
-    user_data["pending_requests"].append({
-        "email": session.email, "password": session.password,
-        "totp": "", "app_pass": "", "amount": price, "requested_amount": price,
+    user_data.setdefault("pending_requests", []).append({
+        "email": str(session.email or ""),
+        "password": str(session.password or ""),
+        "totp": "",
+        "app_pass": "",
+        "amount": price,
+        "requested_amount": price,
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "extracted": False, "has_totp": False, "has_app_pass": False,
-        "user_name": user_full_name, "user_username": user_username,
+        "extracted": False,
+        "has_totp": False,
+        "has_app_pass": False,
+        "user_name": user_full_name,
+        "user_username": user_username,
     })
     user_data["pending_balance"] = clamp_money(float(user_data.get("pending_balance", 0.0)) + price)
     user_data["user_name"] = user_full_name
@@ -2311,12 +2427,19 @@ async def submit_tier_2(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_full_name = user.full_name or "غير معروف"
     user_username = user.username or "لا يوجد"
     clear_rejected_email_records(user_data, session.email)
-    user_data["pending_requests"].append({
-        "email": session.email, "password": session.password,
-        "totp": session.totp, "app_pass": "", "amount": price, "requested_amount": price,
+    user_data.setdefault("pending_requests", []).append({
+        "email": str(session.email or ""),
+        "password": str(session.password or ""),
+        "totp": str(session.totp or ""),
+        "app_pass": "",
+        "amount": price,
+        "requested_amount": price,
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "extracted": False, "has_totp": True, "has_app_pass": False,
-        "user_name": user_full_name, "user_username": user_username,
+        "extracted": False,
+        "has_totp": True,
+        "has_app_pass": False,
+        "user_name": user_full_name,
+        "user_username": user_username,
     })
     user_data["pending_balance"] = clamp_money(float(user_data.get("pending_balance", 0.0)) + price)
     user_data["user_name"] = user_full_name
@@ -4196,6 +4319,8 @@ async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_T
     hold_hours = hold_seconds // 3600
     add_transaction(user_data, "hold", original_amount,
                     f"أكمله الأدمن {admin_id} - معلق {hold_hours} ساعة", email)
+    # 🔄 إعادة تصفير عدّاد الرفض المتتالي عند نجاح قبول من الأدمن
+    register_approval_reset(user_data)
     save_user(uid, user_data)
 
     try:
@@ -4800,6 +4925,21 @@ async def complete_approval(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             bool(approved_request.get("has_app_pass", False)))
     price = round(float(requested_amount), 2)
     approved_request["amount"] = price
+
+    # 🛡️ فلترة الحقول المسموح بها فقط لمنع تسرّب أي بيانات غريبة
+    allowed_fields = {
+        "email", "password", "totp", "app_pass", "amount", "requested_amount",
+        "timestamp", "extracted", "has_totp", "has_app_pass",
+        "user_name", "user_username", "verification", "approval_time",
+        "release_at", "approved_with_leave", "leave_confirmed", "totp_code",
+        "acceptance_mode", "completed_by_admin", "admin_bonus",
+        "admin_bonus_status", "completed_at", "completed_by_admin_name",
+        "completed_by_admin_username", "hold_seconds", "auto_verified",
+        "verification_24h", "rejected_at_24h", "rejection_reason",
+        "released_amount", "auto_confirmed", "confirmed_at",
+    }
+    approved_request = {k: v for k, v in approved_request.items() if k in allowed_fields}
+
     totp_code = ""
     if approved_request.get("has_totp", False) and approved_request.get("totp", ""):
         try:
@@ -4836,6 +4976,8 @@ async def complete_approval(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         pending.pop(index)
     user_data["pending_requests"] = pending
     user_data["total_approved_emails"] = int(user_data.get("total_approved_emails", 0)) + 1
+    # 🔄 إعادة تصفير عدّاد الرفض المتتالي عند نجاح قبول
+    register_approval_reset(user_data)
     save_user(uid, user_data)
 
     try:
@@ -5065,85 +5207,118 @@ async def reject_request_reason(update: Update, context: ContextTypes.DEFAULT_TY
 async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     actor_id = update.effective_user.id
-    if not is_admin_or_owner(actor_id):
-        await query.answer("🚫 هذا الإجراء للمالك والأدمن فقط.", show_alert=True)
-        return
-    parts = query.data.split(":")
-    reason_type = parts[1]
-    uid = int(parts[2])
-    token = parts[3]
-    user_data = get_user(uid)
-    match = find_pending_request(user_data, token)
-    if match is None:
-        await query.edit_message_text("⚠️ الطلب غير موجود.",
-                                      reply_markup=kb_single(
-                                          "🔙 العودة", rejection_list_callback(actor_id)))
-        return
-    index, request = match
-    if not can_reject_pending_request(actor_id, user_data, index):
-        await query.answer("🚫 لا تملك صلاحية رفض هذا الطلب.", show_alert=True)
-        return
-    email = request.get("email", "")
-    request_token = account_callback_token(email)
-    display_email = tg_html_escape(email)
-    detail_callback = (
-        f"pending_detail:{uid}:{request_token}"
-        if actor_id == OWNER_ID
-        else f"admin_request_detail:{uid}:{request_token}"
-    )
-
-    if reason_type == "other":
-        context.user_data["reject_uid"] = uid
-        context.user_data["reject_index"] = index
-        context.user_data["reject_reason"] = "other"
-        await query.edit_message_text(
-            f"📝 <b>اكتب سبب الرفض</b>\n\nأرسل رسالة توضح سبب رفض طلب <code>{display_email}</code>:",
-            parse_mode=ParseMode.HTML,
-            reply_markup=kb_single("🔙 إلغاء", detail_callback))
-        context.user_data["step"] = "reject_reason_text"
-        return
-
-    pending.pop(index)
-    move_request_to_rejected(user_data, request, reason_type)
-    user_data["pending_requests"] = pending
-    actor = update.effective_user
-    if user_data.get("rejected_requests"):
-        user_data["rejected_requests"][-1]["rejected_by"] = actor_id
-        user_data["rejected_requests"][-1]["rejected_by_name"] = actor.full_name or "غير معروف"
-        user_data["rejected_requests"][-1]["rejected_by_username"] = actor.username or ""
-        user_data["rejected_requests"][-1]["rejected_at"] = datetime.now(timezone.utc).isoformat()
-    save_user(uid, user_data)
-
-    reason = REJECT_REASON_MESSAGES.get(reason_type, "❌ تم رفض طلبك.")
-
-    config = load_config()
-    video_key = REJECT_REASON_VIDEO_KEY.get(reason_type)
-    video_path = config.get(video_key) if video_key else None
-    if video_path and Path(video_path).exists():
-        try:
-            await context.bot.send_video(
-                chat_id=uid,
-                video=open(video_path, "rb"),
-                caption=f"{reason}\n\n📹 *شاهد الفيديو:*",
-                parse_mode=ParseMode.MARKDOWN,
-                supports_streaming=True,
-            )
-        except Exception:
-            logger.exception("Failed to send rejection video")
-
     try:
-        await context.bot.send_message(
-            chat_id=uid,
-            text=f"{reason}\n\n📧 الإيميل: `{email}`\nيمكنك إعادة المحاولة.",
-            parse_mode=ParseMode.MARKDOWN)
-    except Exception:
-        pass
+        if not is_admin_or_owner(actor_id):
+            await query.answer("🚫 هذا الإجراء للمالك والأدمن فقط.", show_alert=True)
+            return
+        parts = query.data.split(":")
+        if len(parts) < 4:
+            await query.answer("⚠️ بيانات غير صحيحة.", show_alert=True)
+            return
+        reason_type = parts[1]
+        uid = int(parts[2])
+        token = parts[3]
 
-    await query.edit_message_text(
-        f"✅ تم رفض الطلب <code>{display_email}</code>.\n"
-        f"📝 السبب: {REJECT_REASON_LABELS.get(reason_type, reason_type)}",
-        parse_mode=ParseMode.HTML,
-        reply_markup=kb_single("🔙 العودة", rejection_list_callback(actor_id)))
+        user_data = get_user(uid)
+        match = find_pending_request(user_data, token)
+        if match is None:
+            await _safe_edit(
+                query,
+                "⚠️ الطلب غير موجود أو تمت معالجته.",
+                reply_markup=kb_single("🔙 العودة", rejection_list_callback(actor_id)))
+            return
+        index, request = match
+        if not can_reject_pending_request(actor_id, user_data, index):
+            await query.answer("🚫 لا تملك صلاحية رفض هذا الطلب.", show_alert=True)
+            return
+
+        email = request.get("email", "")
+        request_token = account_callback_token(email)
+        display_email = tg_html_escape(email)
+        detail_callback = (
+            f"pending_detail:{uid}:{request_token}"
+            if actor_id == OWNER_ID
+            else f"admin_request_detail:{uid}:{request_token}"
+        )
+
+        if reason_type == "other":
+            context.user_data["reject_uid"] = uid
+            context.user_data["reject_index"] = index
+            context.user_data["reject_reason"] = "other"
+            context.user_data["step"] = "reject_reason_text"
+            await _safe_edit(
+                query,
+                f"📝 <b>اكتب سبب الرفض</b>\n\nأرسل رسالة توضح سبب رفض طلب <code>{display_email}</code>:",
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb_single("🔙 إلغاء", detail_callback))
+            return
+
+        pending = user_data.get("pending_requests", [])
+        if index < len(pending):
+            pending.pop(index)
+        move_request_to_rejected(user_data, request, reason_type)
+        user_data["pending_requests"] = pending
+
+        # 🔥 تسجيل الرفض وحظر تلقائي عند 3 على التوالي
+        ban_result = register_rejection_and_maybe_ban(user_data)
+
+        actor = update.effective_user
+        if user_data.get("rejected_requests"):
+            user_data["rejected_requests"][-1]["rejected_by"] = actor_id
+            user_data["rejected_requests"][-1]["rejected_by_name"] = actor.full_name or "غير معروف"
+            user_data["rejected_requests"][-1]["rejected_by_username"] = actor.username or ""
+            user_data["rejected_requests"][-1]["rejected_at"] = datetime.now(timezone.utc).isoformat()
+        save_user(uid, user_data)
+
+        reason = REJECT_REASON_MESSAGES.get(reason_type, "❌ تم رفض طلبك.")
+
+        config = load_config()
+        video_key = REJECT_REASON_VIDEO_KEY.get(reason_type)
+        video_path = config.get(video_key) if video_key else None
+        if video_path and Path(video_path).exists():
+            try:
+                await context.bot.send_video(
+                    chat_id=uid,
+                    video=open(video_path, "rb"),
+                    caption=f"{reason}\n\n📹 *شاهد الفيديو:*",
+                    parse_mode=ParseMode.MARKDOWN,
+                    supports_streaming=True,
+                )
+            except Exception:
+                logger.exception("Failed to send rejection video")
+
+        ban_notice = ""
+        if ban_result:
+            _, duration_text = ban_result
+            ban_notice = (f"\n\n🚫 *تم حظرك من إرسال حسابات جديدة لمدة {duration_text}* "
+                          f"(3 رفضات متتالية).")
+
+        try:
+            await context.bot.send_message(
+                chat_id=uid,
+                text=f"{reason}\n\n📧 الإيميل: `{email}`\nيمكنك إعادة المحاولة.{ban_notice}",
+                parse_mode=ParseMode.MARKDOWN)
+        except Exception:
+            logger.exception("Failed to notify rejected user")
+
+        success_text = (
+            f"✅ تم رفض الطلب <code>{display_email}</code>.\n"
+            f"📝 السبب: {REJECT_REASON_LABELS.get(reason_type, reason_type)}"
+        )
+        if ban_result:
+            success_text += f"\n🚫 تم حظر البائع لمدة {ban_result[1]}."
+        await _safe_edit(
+            query,
+            success_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_single("🔙 العودة", rejection_list_callback(actor_id)))
+
+    except Exception:
+        logger.exception("execute_reject_reason failed")
+        try:
+            await query.answer("⚠️ حدث خطأ أثناء الرفض، حاول مرة أخرى.", show_alert=True)
+        except Exception:
+            pass
 
 
 async def handle_reject_reason_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5167,6 +5342,10 @@ async def handle_reject_reason_text(update: Update, context: ContextTypes.DEFAUL
     pending.pop(index)
     move_request_to_rejected(user_data, request, "other", text)
     user_data["pending_requests"] = pending
+
+    # 🔥 تسجيل الرفض وحظر تلقائي عند 3 على التوالي
+    ban_result = register_rejection_and_maybe_ban(user_data)
+
     actor = update.effective_user
     if user_data.get("rejected_requests"):
         user_data["rejected_requests"][-1]["rejected_by"] = actor_id
@@ -5174,18 +5353,27 @@ async def handle_reject_reason_text(update: Update, context: ContextTypes.DEFAUL
         user_data["rejected_requests"][-1]["rejected_by_username"] = actor.username or ""
         user_data["rejected_requests"][-1]["rejected_at"] = datetime.now(timezone.utc).isoformat()
     save_user(uid, user_data)
+
+    ban_notice = ""
+    if ban_result:
+        _, duration_text = ban_result
+        ban_notice = f"\n\n🚫 *تم حظرك لمدة {duration_text}* بسبب 3 رفضات متتالية."
+
     try:
         await context.bot.send_message(
             chat_id=uid,
-            text=f"❌ *تم رفض طلبك*\n\n📧 الإيميل: `{email}`\n📝 السبب: {text}",
+            text=f"❌ *تم رفض طلبك*\n\n📧 الإيميل: `{email}`\n📝 السبب: {text}{ban_notice}",
             parse_mode=ParseMode.MARKDOWN)
     except Exception:
-        pass
+        logger.exception("Failed to notify rejected user (custom reason)")
     for key in ("reject_uid", "reject_index", "reject_reason", "step"):
         context.user_data.pop(key, None)
-    await update.message.reply_text(f"✅ تم رفض الطلب `{email}`.",
-                                    reply_markup=kb_single(
-                                        "🔙 العودة", rejection_list_callback(actor_id)))
+    confirmation = f"✅ تم رفض الطلب `{email}`."
+    if ban_result:
+        confirmation += f"\n🚫 تم حظر البائع لمدة {ban_result[1]}."
+    await update.message.reply_text(
+        confirmation,
+        reply_markup=kb_single("🔙 العودة", rejection_list_callback(actor_id)))
 
 
 async def handle_approval_totp(update: Update, context: ContextTypes.DEFAULT_TYPE):
