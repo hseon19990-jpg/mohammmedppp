@@ -1,8 +1,10 @@
 """
-Advanced Telegram Account Manager Bot - v5.9
-- Auto verification on 4-info completion
-- Referral bonus in admin_verify_and_store
-- Hide TOTP secret from member confirmation
+Advanced Telegram Account Manager Bot - v6.0
+- IMAP verification happens ONLY at step 4 (app_pass)
+- On first IMAP success: account → approved_accounts + hold 24h
+- On first IMAP failure: request stays in pending_requests
+- On second IMAP success (after 24h): hold → balance (credits released)
+- On second IMAP failure (after 24h): account → rejected_requests
 """
 
 import asyncio
@@ -287,6 +289,7 @@ REJECT_REASON_KEYS = ("email", "password", "totp", "app_pass", "phone", "other")
 REJECT_REASON_ICONS = {
     "email": "📧", "password": "🔑", "totp": "🔐", "app_pass": "🗝",
     "phone": "📱", "other": "📝", "custom": "📝", "unknown": "❌",
+    "imap_failed_24h": "🔴",
 }
 
 REJECT_REASON_LABELS = {
@@ -294,6 +297,7 @@ REJECT_REASON_LABELS = {
     "app_pass": "كلمة مرور تطبيق خطأ", "phone": "يحتاج رقم هاتف",
     "other": "خطأ آخر", "custom": "سبب مخصص", "unknown": "غير معروف",
     "owner_manual": "رفض يدوي من المالك",
+    "imap_failed_24h": "فشل الفحص الثاني (24 ساعة)",
 }
 
 REJECT_REASON_MESSAGES = {
@@ -737,6 +741,10 @@ def get_active_account_status(email: str) -> Optional[str]:
         for request in user_data.get("pending_requests", []):
             if normalize_email(dec(request.get("email", ""))) == normalized_email:
                 return "pending"
+    for user_data in users.values():
+        for rejected in user_data.get("rejected_requests", []):
+            if normalize_email(dec(rejected.get("email", ""))) == normalized_email:
+                return "rejected"
     return None
 
 
@@ -770,7 +778,6 @@ def has_active_account_password(password: str) -> bool:
                 if stored and stored == candidate:
                     return True
     return False
-
 
 # ==================== IMAP VERIFICATION ====================
 IMAP_PROVIDERS = {
@@ -1494,6 +1501,7 @@ async def view_member_rejected_emails(update: Update, context: ContextTypes.DEFA
         "other": "سبب آخر",
         "custom": "سبب مخصص",
         "unknown": "غير معروف",
+        "imap_failed_24h": "فشل الفحص الثاني (24 ساعة)",
     }
     lines = ["❌ <b>الإيميلات المرفوضة (الأحدث أولاً)</b>", ""]
     for index, request in enumerate(rejected, 1):
@@ -1651,7 +1659,6 @@ async def handle_edit_field_input(update: Update, context: ContextTypes.DEFAULT_
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=kb_single("🔙 تعديل حساباتي", "edit_my_accounts"))
 
-
 # ==================== ADD ACCOUNT FLOW ====================
 async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
@@ -1702,7 +1709,7 @@ async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• إيميل + باسورد → <b>${prices['tier_1']:.2f}</b>\n"
         f"• + رمز مصادقة → <b>${prices['tier_2']:.2f}</b>\n"
         f"• + كلمة مرور التطبيق → <b>${prices['tier_3']:.2f}</b>\n\n"
-        f"✨ <i>كل مرحلة تُرسل للمالك فوراً، ويمكنك إكمال الباقي متى شئت.</i>\n\n"
+        f"✨ <i>لن يُقبل الحساب نهائياً إلا بعد التحقق التلقائي الكامل عند إرسال كلمة مرور التطبيق.</i>\n\n"
         f"📧 <b>الخطوة 1/2</b>: أرسل الإيميل:",
         parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
 
@@ -1763,6 +1770,12 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
             SESSIONS.pop(uid, None); save_sessions()
             return
+        if active_status == "rejected":
+            await update.message.reply_text(
+                "❌ هذا الإيميل مرفوض سابقاً! لا يمكنك إعادة إرساله.",
+                reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+            SESSIONS.pop(uid, None); save_sessions()
+            return
         if active_status == "pending":
             user_data = get_user(uid)
             pending = user_data.get("pending_requests", [])
@@ -1795,7 +1808,7 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🎁 <i>يمكنك مضاعفتها بإضافة رمز المصادقة وكلمة مرور التطبيق لاحقاً.</i>",
             parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
 
-    # ═══ الخطوة 2: الباسورد → إرسال فوري (tier_1) ═══
+    # ═══ الخطوة 2: الباسورد → حفظ مبدئي (بدون تحقق) ═══
     elif session.step == "password":
         if has_active_account_password(text):
             await update.message.reply_text(
@@ -1845,39 +1858,24 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-        try:
-            await context.bot.send_message(
-                chat_id=OWNER_ID,
-                text=(f"📥 <b>طلب جديد — المستوى 1</b>\n\n"
-                      f"👤 {tg_html_escape(user_full_name)} (@{tg_html_escape(user_username)})\n"
-                      f"🆔 <code>{uid}</code>\n"
-                      f"📧 <code>{tg_html_escape(session.email)}</code>\n"
-                      f"🔑 <code>{tg_html_escape(session.password)}</code>\n"
-                      f"💰 <b>${price:.2f}</b>\n\n"
-                      f"⏳ <i>العضو يمكنه إكمال البيانات للحصول على المزيد.</i>"),
-                parse_mode=ParseMode.HTML)
-        except Exception:
-            logger.exception("Failed to notify owner (tier_1)")
-
         await update.message.reply_text(
-            f"✅ <b>تم إرسال بياناتك بنجاح!</b>\n\n"
+            f"✅ <b>تم استلام بياناتك الأولية!</b>\n\n"
             f"📧 <code>{tg_html_escape(session.email)}</code>\n"
             f"🔑 الباسورد: ✅\n\n"
             f"━━━━━━━━━━━━━━━\n"
-            f"💰 <b>حصلت على ${price:.2f}</b>\n"
-            f"   <i>(إيميل + باسورد)</i>\n"
+            f"💰 <b>حصلت على ${price:.2f}</b> <i>(معلق حتى التحقق الكامل)</i>\n"
             f"━━━━━━━━━━━━━━━\n\n"
-            f"🎁 <b>هل تريد الحصول على المزيد؟</b>\n\n"
-            f"🔐 أضف رمز المصادقة (2FA) → <b>${prices['tier_2']:.2f}</b>\n"
+            f"🎁 <b>أكمل للحصول على المزيد:</b>\n\n"
+            f"🔐 رمز المصادقة (2FA) → <b>${prices['tier_2']:.2f}</b>\n"
             f"🗝 ثم كلمة مرور التطبيق → <b>${prices['tier_3']:.2f}</b>\n\n"
-            f"<i>اضغط على زر الإكمال لبدء الإضافة، أو إنهاء إذا كنت راضياً.</i>",
+            f"⚠️ <b>لن يتم قبول حسابك نهائياً حتى تُرسل كلمة مرور التطبيق ويتم التحقق منه.</b>",
             parse_mode=ParseMode.HTML,
             reply_markup=kb_vertical([
                 ("🚀 إكمال للحصول على المزيد", f"complete_more:{uid}"),
                 ("✅ إنهاء", f"finish_request:{uid}"),
             ]))
 
-    # ═══ الخطوة 3: TOTP → تحديث الطلب (tier_2) ═══
+    # ═══ الخطوة 3: TOTP → تحديث الطلب (بدون تحقق) ═══
     elif session.step == "totp":
         if not session.email or not session.password:
             await update.message.reply_text(
@@ -1931,35 +1929,16 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
 
-            user = update.effective_user
-            user_full_name = user.full_name or "غير معروف"
-            user_username = user.username or "لا يوجد"
-
-            try:
-                await context.bot.send_message(
-                    chat_id=OWNER_ID,
-                    text=(f"📥 <b>تحديث الطلب — إضافة 2FA</b>\n\n"
-                          f"👤 {tg_html_escape(user_full_name)} (@{tg_html_escape(user_username)})\n"
-                          f"🆔 <code>{uid}</code>\n"
-                          f"📧 <code>{tg_html_escape(session.email)}</code>\n"
-                          f"🔑 <code>{tg_html_escape(session.password)}</code>\n"
-                          f"🔐 <code>{tg_html_escape(secret)}</code>\n"
-                          f"🔢 الكود الحالي: <code>{code}</code>\n"
-                          f"💰 <b>${new_price:.2f}</b>"),
-                    parse_mode=ParseMode.HTML)
-            except Exception:
-                logger.exception("Failed to notify owner (tier_2)")
-
             await update.message.reply_text(
                 f"✅ <b>تم إضافة رمز المصادقة!</b>\n\n"
                 f"🔐 المفتاح: <code>•••• •••• •••• ••••</code>\n"
                 f"🔢 الكود الحالي: <code>{code}</code>\n\n"
                 f"━━━━━━━━━━━━━━━\n"
-                f"💰 <b>الآن حصلت على ${new_price:.2f}</b>\n"
+                f"💰 <b>الآن حصلت على ${new_price:.2f}</b> <i>(معلق حتى التحقق الكامل)</i>\n"
                 f"━━━━━━━━━━━━━━━\n\n"
-                f"🎁 <b>هل تريد الحصول على المزيد؟</b>\n\n"
+                f"🎁 <b>الخطوة الأخيرة:</b>\n\n"
                 f"🗝 أضف كلمة مرور التطبيق → <b>${prices['tier_3']:.2f}</b>\n\n"
-                f"<i>اضغط إكمال لمتابعة الإضافة، أو إنهاء إذا كنت راضياً.</i>",
+                f"⚠️ <b>لن يتم قبول حسابك نهائياً حتى يتم التحقق من كلمة مرور التطبيق.</b>",
                 parse_mode=ParseMode.HTML,
                 reply_markup=kb_vertical([
                     ("🚀 إكمال للحصول على المزيد", f"complete_more:{uid}"),
@@ -1968,7 +1947,7 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await update.message.reply_text(f"⚠️ مفتاح 2FA غير صالح: {str(e)}")
 
-    # ═══ الخطوة 4: App Password → التحقق التلقائي ثم الإكمال (tier_3) ═══
+    # ═══ الخطوة 4: App Password → التحقق التلقائي الحاسم ═══
     elif session.step == "app_pass":
         cleaned = text.replace(" ", "")
         if len(cleaned) != 16:
@@ -2009,13 +1988,144 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         old_price = float(pending[found_idx].get("amount", 0.0))
         new_price = prices["tier_3"]
+
+        # احذف الرسالة التي تحتوي على كلمة المرور
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+
+        # ═══ التحقق التلقائي الحاسم ═══
+        allowed, wait = imap_rate_ok(session.email)
+        if not allowed:
+            await context.bot.send_message(
+                chat_id=uid,
+                text=(f"⏳ <b>يرجى الانتظار {wait} ثانية</b>\n\n"
+                      f"تم تجاوز حد المحاولات لنفس الإيميل.\n"
+                      f"حاول مرة أخرى بعد قليل."),
+                parse_mode=ParseMode.HTML)
+            return
+
+        imap_rate_mark(session.email)
+        verify_result = await verify_account_credentials(
+            email=session.email,
+            password=session.password,
+            app_pass=cleaned,
+            totp_secret=session.totp,
+        )
+
+        # ═══ حالة الفشل: احتفظ بالطلب في pending_requests ═══
+        if not verify_result["imap_ok"]:
+            # احفظ app_pass في الطلب حتى يستطيع العضو تعديله
+            pending[found_idx]["app_pass"] = cleaned
+            pending[found_idx]["has_app_pass"] = True
+            pending[found_idx]["amount"] = new_price
+            pending[found_idx]["requested_amount"] = new_price
+            pending[found_idx]["verification"] = {
+                "level": verify_result["level"],
+                "badge": verify_result["badge"],
+                "message": verify_result["message"],
+                "imap_ok": False,
+                "totp_ok": verify_result["totp_ok"],
+                "category": verify_result.get("category", "unknown"),
+                "verified_at": datetime.now(timezone.utc).isoformat(),
+                "verified_by": "auto_on_completion",
+            }
+            pending[found_idx]["auto_verified"] = False
+            user_data["pending_requests"] = pending
+            user_data["pending_balance"] = clamp_money(
+                float(user_data.get("pending_balance", 0.0)) - old_price + new_price)
+            save_user(uid, user_data)
+
+            session.app_pass = cleaned
+            session.has_app_pass = True
+            session.step = "submitted_tier_2"  # يعود لحالة الانتظار
+            save_sessions()
+
+            # لم يتم إرسال أي شيء للمالك
+            await context.bot.send_message(
+                chat_id=uid,
+                text=(f"❌ <b>فشل التحقق التلقائي من IMAP</b>\n\n"
+                      f"📧 <code>{tg_html_escape(session.email)}</code>\n\n"
+                      f"📝 <b>السبب:</b>\n<i>{tg_html_escape(verify_result['message'])}</i>\n\n"
+                      f"━━━━━━━━━━━━━━━\n"
+                      f"⚠️ <b>لم يتم إرسال حسابك للمالك.</b>\n"
+                      f"الطلب لا يزال في قائمتك المعلقة.\n\n"
+                      f"💡 <b>كيف تحل هذه المشكلة؟</b>\n"
+                      f"• تأكد أن <b>App Password</b> حقيقي (وليس كلمة المرور العادية)\n"
+                      f"• لحسابات Gmail: فعّل 2FA ثم أنشئ App Password من إعدادات Google\n"
+                      f"• اضغط «✏️ تعديل حساباتي» لتصحيح البيانات والمحاولة مجدداً"),
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb_vertical([
+                    ("✏️ تعديل الحساب الآن", "edit_my_accounts"),
+                    ("🔙 القائمة الرئيسية", "main_menu"),
+                ]))
+            return
+
+        # ═══ حالة النجاح: انقل مباشرة إلى approved_accounts ═══
         pending[found_idx]["app_pass"] = cleaned
         pending[found_idx]["has_app_pass"] = True
         pending[found_idx]["amount"] = new_price
         pending[found_idx]["requested_amount"] = new_price
+        pending[found_idx]["verification"] = {
+            "level": verify_result["level"],
+            "badge": verify_result["badge"],
+            "message": verify_result["message"],
+            "imap_ok": True,
+            "totp_ok": verify_result["totp_ok"],
+            "category": "ok",
+            "verified_at": datetime.now(timezone.utc).isoformat(),
+            "verified_by": "auto_on_completion",
+        }
+        pending[found_idx]["auto_verified"] = True
+
+        # ابنِ سجل الحساب للانتقال إلى approved
+        user = update.effective_user
+        user_full_name = user.full_name or "غير معروف"
+        user_username = user.username or "لا يوجد"
+
+        approval_time = datetime.now(timezone.utc)
+        account_record = {
+            "email": str(session.email or ""),
+            "password": str(session.password or ""),
+            "totp": str(session.totp or ""),
+            "app_pass": str(cleaned),
+            "amount": new_price,
+            "requested_amount": new_price,
+            "timestamp": approval_time.isoformat(),
+            "approval_time": approval_time.isoformat(),
+            "release_at": (approval_time + timedelta(seconds=LEAVE_HOLD_SECONDS)).isoformat(),
+            "hold_seconds": LEAVE_HOLD_SECONDS,
+            "extracted": False,
+            "has_totp": True,
+            "has_app_pass": True,
+            "user_name": user_full_name,
+            "user_username": user_username,
+            "approved_with_leave": True,
+            "leave_confirmed": False,
+            "auto_verified": True,
+            "auto_approved": True,
+            "acceptance_mode": "automatic",
+            "admin_bonus_status": "not_applicable",
+            "verification": pending[found_idx]["verification"],
+        }
+
+        # 1) احذف من pending_requests
+        pending.pop(found_idx)
         user_data["pending_requests"] = pending
+        # 2) انقل الرصيد من pending إلى hold
         user_data["pending_balance"] = clamp_money(
-            float(user_data.get("pending_balance", 0.0)) - old_price + new_price)
+            float(user_data.get("pending_balance", 0.0)) - old_price)
+        user_data["hold_balance"] = clamp_money(
+            float(user_data.get("hold_balance", 0.0)) + new_price)
+        user_data["total_credited_balance"] = clamp_money(
+            float(user_data.get("total_credited_balance", 0.0) or 0.0) + new_price)
+        user_data["total_approved_emails"] = int(user_data.get("total_approved_emails", 0)) + 1
+        # 3) أضف إلى approved_accounts
+        user_data.setdefault("approved_accounts", []).append(account_record)
+        add_transaction(user_data, "hold", new_price,
+                        "حساب تم التحقق منه تلقائياً - معلق 24 ساعة", str(session.email))
+        register_approval_reset(user_data)
         save_user(uid, user_data)
 
         session.app_pass = cleaned
@@ -2024,79 +2134,60 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         SESSIONS.pop(uid, None)
         save_sessions()
 
+        # 4) جدول الفحص الثاني بعد 24 ساعة
         try:
-            await update.message.delete()
+            await schedule_leave_check(context, uid, str(session.email),
+                                       account_record["release_at"])
         except Exception:
-            pass
+            logger.exception("Failed to schedule second check for %s", session.email)
 
-        user = update.effective_user
-        user_full_name = user.full_name or "غير معروف"
-        user_username = user.username or "لا يوجد"
-
-        verify_result = None
-        verify_status = ""
+        # 5) المسابقة (تُحسب عند التحقق)
         try:
-            allowed, wait = imap_rate_ok(session.email)
-            if allowed:
-                imap_rate_mark(session.email)
-                verify_result = await verify_account_credentials(
-                    email=session.email,
-                    password=session.password,
-                    app_pass=cleaned,
-                    totp_secret=session.totp,
-                )
-                pending[found_idx]["verification"] = {
-                    "level": verify_result["level"],
-                    "badge": verify_result["badge"],
-                    "message": verify_result["message"],
-                    "imap_ok": verify_result["imap_ok"],
-                    "totp_ok": verify_result["totp_ok"],
-                    "category": verify_result.get("category", "unknown"),
-                    "verified_at": datetime.now(timezone.utc).isoformat(),
-                    "verified_by": "auto_on_completion",
-                }
-                pending[found_idx]["auto_verified"] = verify_result["imap_ok"]
-                user_data["pending_requests"] = pending
-                save_user(uid, user_data)
-
-                if verify_result["imap_ok"]:
-                    verify_status = "🟢 <b>تم التحقق التلقائي بنجاح!</b>\n"
-                elif verify_result["level"] == "partial":
-                    verify_status = "🟡 <b>تحقق جزئي (TOTP صالح)</b>\n"
-                elif verify_result["category"] == "unsupported_auth":
-                    verify_status = "⚪ <b>Gmail يحتاج App Password — تحقق غير كامل</b>\n"
-                else:
-                    verify_status = "🔴 <b>فشل التحقق التلقائي — راجع المالك</b>\n"
+            await check_contest_award(context, uid)
         except Exception:
-            logger.exception("Auto verification on completion failed")
+            logger.exception("Contest check failed")
 
+        # 6) إشعار المالك (للعلم فقط، ليس للموافقة)
         try:
             await context.bot.send_message(
                 chat_id=OWNER_ID,
-                text=(f"📥 <b>اكتمل الطلب — المستوى الكامل</b>\n\n"
+                text=(f"✅ <b>حساب تم التحقق منه تلقائياً</b>\n\n"
                       f"👤 {tg_html_escape(user_full_name)} (@{tg_html_escape(user_username)})\n"
                       f"🆔 <code>{uid}</code>\n"
                       f"📧 <code>{tg_html_escape(session.email)}</code>\n"
                       f"🔑 <code>{tg_html_escape(session.password)}</code>\n"
                       f"🔐 <code>{tg_html_escape(session.totp)}</code>\n"
                       f"🗝 <code>{tg_html_escape(format_app_password(cleaned))}</code>\n"
-                      f"💰 <b>${new_price:.2f}</b>\n\n"
-                      f"{verify_status}"
-                      f"✅ <i>الطلب مكتمل — جاهز للمراجعة.</i>"),
+                      f"💰 <b>${new_price:.2f}</b> (معلق 24 ساعة)\n\n"
+                      f"⏰ <i>سيُعاد فحصه تلقائياً بعد 24 ساعة. إذا نجح، تُسلّم النقاط للعضو.</i>"),
                 parse_mode=ParseMode.HTML)
         except Exception:
-            logger.exception("Failed to notify owner (tier_3)")
+            logger.exception("Failed to notify owner of verified account")
 
-        await update.message.reply_text(
-            f"🎉 <b>تم إكمال حسابك بالكامل!</b>\n\n"
-            f"📧 <code>{tg_html_escape(session.email)}</code>\n"
-            f"🔐 2FA: ✅\n"
-            f"🗝 كلمة مرور التطبيق: ✅\n\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"{verify_status}"
-            f"💰 <b>إجمالي نقاطك: ${new_price:.2f}</b>\n"
-            f"━━━━━━━━━━━━━━━\n\n"
-            f"⏳ <i>سيتم مراجعة حسابك من قبل المالك.</i>",
+        # 7) مكافأة الإحالة (تُسلّم عند قبول الحساب بعد التحقق)
+        referred_by = user_data.get("referred_by")
+        if referred_by:
+            try:
+                await context.bot.send_message(
+                    chat_id=referred_by,
+                    text=f"📢 *إشعار إحالة*\n\nالمستخدم `{uid}` تم التحقق من إيميله `{session.email}`.",
+                    parse_mode=ParseMode.MARKDOWN)
+            except Exception:
+                pass
+
+        # 8) رسالة نجاح للعضو
+        await context.bot.send_message(
+            chat_id=uid,
+            text=(f"🎉 <b>تم التحقق التلقائي بنجاح!</b>\n\n"
+                  f"📧 <code>{tg_html_escape(session.email)}</code>\n"
+                  f"🔐 2FA: ✅\n"
+                  f"🗝 كلمة مرور التطبيق: ✅\n\n"
+                  f"━━━━━━━━━━━━━━━\n"
+                  f"💰 <b>${new_price:.2f}</b> (معلق 24 ساعة)\n"
+                  f"━━━━━━━━━━━━━━━\n\n"
+                  f"✅ <b>حسابك الآن في قسم الحسابات المقبولة</b>\n"
+                  f"⏰ <i>سيتم إعادة الفحص تلقائياً بعد 24 ساعة.</i>\n"
+                  f"<i>إذا نجح الفحص الثاني، تُسلّم النقاط إلى رصيدك الدائم.</i>"),
             parse_mode=ParseMode.HTML,
             reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
 
@@ -2165,7 +2256,8 @@ async def complete_more_callback(update: Update, context: ContextTypes.DEFAULT_T
             f"📌 <b>أرسل كلمة مرور التطبيق:</b>\n\n"
             f"• يجب أن تكون <b>16 حرف</b>\n"
             f"• مثال: <code>abcd efgh ijkl mnop</code>\n\n"
-            f"<i>لمعرفة كيفية الحصول عليها، اضغط على زر الفيديو أعلاه.</i>",
+            f"⚠️ <b>سيتم التحقق التلقائي من الحساب فور الإرسال.</b>\n"
+            f"<i>إن لم يُطابق التحقق، لن يُقبل الحساب.</i>",
             parse_mode=ParseMode.HTML,
             reply_markup=kb_vertical(buttons))
     else:
@@ -2306,6 +2398,10 @@ async def schedule_leave_check(context: ContextTypes.DEFAULT_TYPE, user_id: int,
 
 
 async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
+    """الفحص الثاني بعد 24 ساعة:
+    - نجح → hold_balance → balance (تسليم النقاط)
+    - فشل → نقل الحساب إلى rejected_requests + خصم hold_balance
+    """
     job_data = context.job.data
     user_id = job_data["user_id"]
     email = job_data["email"]
@@ -2316,121 +2412,125 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
 
     user_data = get_user(user_id)
     accounts = user_data.get("approved_accounts", [])
-    account = next((acc for acc in accounts if acc.get("email") == email), None)
-    if not account or account.get("leave_confirmed", False):
+    account_idx = None
+    account = None
+    for i, acc in enumerate(accounts):
+        if normalize_email(acc.get("email", "")) == normalize_email(email):
+            account_idx = i
+            account = acc
+            break
+    if account is None or account.get("leave_confirmed", False):
         return
 
     price = float(account.get("amount", 0.0))
     hold_hours = max(1, int(account.get("hold_seconds", LEAVE_HOLD_SECONDS)) // 3600)
 
-    requires_release_recheck = (
-        account.get("auto_verified", False)
-        or bool(account.get("completed_by_admin"))
+    # إعادة الفحص عبر IMAP
+    allowed, wait = imap_rate_ok(email)
+    if not allowed:
+        await schedule_leave_check(
+            context, user_id, email,
+            (datetime.now(timezone.utc) + timedelta(seconds=wait)).isoformat())
+        return
+    imap_rate_mark(email)
+
+    recheck = await verify_account_credentials(
+        email=account.get("email", ""),
+        password=account.get("password", ""),
+        app_pass=account.get("app_pass", ""),
+        totp_secret=account.get("totp", ""),
     )
-    if requires_release_recheck:
-        allowed, wait = imap_rate_ok(email)
-        if not allowed:
-            await schedule_leave_check(
-                context, user_id, email,
-                (datetime.now(timezone.utc) + timedelta(seconds=wait)).isoformat())
-            return
-        imap_rate_mark(email)
 
-        recheck = await verify_account_credentials(
-            email=account.get("email", ""),
-            password=account.get("password", ""),
-            app_pass=account.get("app_pass", ""),
-            totp_secret=account.get("totp", ""),
-        )
-
-        if not recheck["imap_ok"]:
-            user_data["hold_balance"] = clamp_money(
-                float(user_data.get("hold_balance", 0.0)) - price)
-            if account.get("admin_bonus_status") == "pending":
-                admin_id = account.get("completed_by_admin")
-                admin_bonus = float(account.get("admin_bonus", 0.0) or 0.0)
-                if admin_id and admin_bonus > 0:
-                    admin_data = get_user(int(admin_id))
-                    admin_data["admin_pending_balance"] = clamp_money(
-                        float(admin_data.get("admin_pending_balance", 0.0)) - admin_bonus)
-                    account["admin_bonus_status"] = "rejected"
-                    save_user(int(admin_id), admin_data)
-            account["leave_confirmed"] = True
-            account["rejected_at_24h"] = True
-            account["rejection_reason"] = f"فشل إعادة فحص IMAP بعد {hold_hours} ساعة"
-            account["verification_24h"] = {
-                "level": recheck["level"],
-                "badge": recheck["badge"],
-                "message": recheck["message"],
-                "verified_at": datetime.now(timezone.utc).isoformat(),
-            }
-            add_transaction(user_data, "debit", price,
-                            f"رفض بعد فحص {hold_hours} ساعة", email)
-            save_user(user_id, user_data)
-            try:
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=(f"❌ *فشل الحساب في الفحص الثاني بعد {hold_hours} ساعة*\n\n"
-                          f"📧 `{email}`\n"
-                          f"📝 السبب: {tg_html_escape(recheck['message'])}\n\n"
-                          f"💰 تم خصم *${price:.2f}* من رصيدك المعلق."),
-                    parse_mode=ParseMode.MARKDOWN)
-            except Exception:
-                pass
-            try:
-                await context.bot.send_message(
-                    chat_id=OWNER_ID,
-                    text=(f"🔴 *فشل حساب في الفحص الثاني بعد {hold_hours} ساعة*\n\n"
-                          f"👤 المستخدم: `{user_id}`\n"
-                          f"📧 `{email}`\n"
-                          f"💰 `${price:.2f}`\n"
-                          f"📝 {tg_html_escape(recheck['message'])}"),
-                    parse_mode=ParseMode.MARKDOWN)
-            except Exception:
-                pass
-            return
-        account["verification_24h"] = {
+    # ═══ حالة الفشل في الفحص الثاني ═══
+    if not recheck["imap_ok"]:
+        # 1) اخصم hold_balance
+        user_data["hold_balance"] = clamp_money(
+            float(user_data.get("hold_balance", 0.0)) - price)
+        # 2) احذف من approved_accounts
+        accounts.pop(account_idx)
+        user_data["approved_accounts"] = accounts
+        # 3) انقله إلى rejected_requests مع سبب
+        failed_account = dict(account)
+        failed_account["rejected_at_24h"] = True
+        failed_account["leave_confirmed"] = True
+        failed_account["rejection_reason"] = f"فشل إعادة فحص IMAP بعد {hold_hours} ساعة"
+        failed_account["verification_24h"] = {
             "level": recheck["level"],
             "badge": recheck["badge"],
             "message": recheck["message"],
             "imap_ok": recheck["imap_ok"],
             "totp_ok": recheck["totp_ok"],
             "verified_at": datetime.now(timezone.utc).isoformat(),
-            "verified_by": "release_recheck",
+            "verified_by": "second_check_failed",
         }
+        move_approved_account_to_rejected(
+            user_data, failed_account, "imap_failed_24h",
+            f"فشل الفحص الثاني: {recheck['message'][:150]}")
+        add_transaction(user_data, "debit", price,
+                        f"رفض الحساب بعد فحص {hold_hours} ساعة", email)
+        save_user(user_id, user_data)
 
+        # إشعار العضو
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=(f"❌ <b>فشل الفحص الثاني بعد {hold_hours} ساعة</b>\n\n"
+                      f"📧 <code>{tg_html_escape(email)}</code>\n"
+                      f"📝 <b>السبب:</b>\n<i>{tg_html_escape(recheck['message'])}</i>\n\n"
+                      f"💰 <b>تم خصم ${price:.2f} من رصيدك المعلق.</b>\n"
+                      f"🚫 <b>لا يمكن إعادة إرسال هذا الإيميل مرة أخرى.</b>"),
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        except Exception:
+            pass
+
+        # إشعار المالك
+        try:
+            await context.bot.send_message(
+                chat_id=OWNER_ID,
+                text=(f"🔴 <b>فشل حساب في الفحص الثاني</b>\n\n"
+                      f"👤 المستخدم: <code>{user_id}</code>\n"
+                      f"📧 <code>{tg_html_escape(email)}</code>\n"
+                      f"💰 <code>${price:.2f}</code> (تم خصمها)\n\n"
+                      f"📝 {tg_html_escape(recheck['message'][:200])}"),
+                parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
+        return
+
+    # ═══ حالة النجاح في الفحص الثاني ═══
     user_data["hold_balance"] = clamp_money(
         float(user_data.get("hold_balance", 0.0)) - price)
     user_data["balance"] = clamp_money(
         float(user_data.get("balance", 0.0)) + price)
-    if account.get("admin_bonus_status") == "pending":
-        admin_id = account.get("completed_by_admin")
-        admin_bonus = float(account.get("admin_bonus", 0.0) or 0.0)
-        if admin_id and admin_bonus > 0:
-            admin_data = get_user(int(admin_id))
-            admin_data["admin_pending_balance"] = clamp_money(
-                float(admin_data.get("admin_pending_balance", 0.0)) - admin_bonus)
-            admin_data["admin_received_balance"] = clamp_money(
-                float(admin_data.get("admin_received_balance", 0.0)) + admin_bonus)
-            add_transaction(admin_data, "admin_bonus_release", admin_bonus,
-                            f"وصول مكافأة إكمال طلب {email}", email)
-            save_user(int(admin_id), admin_data)
-            account["admin_bonus_status"] = "released"
     account["leave_confirmed"] = True
     account["auto_confirmed"] = True
     account["confirmed_at"] = datetime.now(timezone.utc).isoformat()
     account["released_amount"] = price
+    account["verification_24h"] = {
+        "level": recheck["level"],
+        "badge": recheck["badge"],
+        "message": recheck["message"],
+        "imap_ok": recheck["imap_ok"],
+        "totp_ok": recheck["totp_ok"],
+        "verified_at": datetime.now(timezone.utc).isoformat(),
+        "verified_by": "second_check_passed",
+    }
+    accounts[account_idx] = account
+    user_data["approved_accounts"] = accounts
     add_transaction(user_data, "release", price,
                     f"تحويل تلقائي بعد {hold_hours} ساعة", email)
     save_user(user_id, user_data)
+
+    # إشعار العضو بتسليم النقاط
     try:
         await context.bot.send_message(
             chat_id=user_id,
-            text=(f"✅ *تم إضافة المبلغ إلى رصيدك تلقائياً!*\n\n"
-                  f"📧 الإيميل: `{email}`\n"
-                  f"💰 تم إضافة *${price:.2f}* إلى رصيدك الدائم.\n\n"
+            text=(f"✅ <b>تم تأكيد الحساب وتسليم النقاط!</b>\n\n"
+                  f"📧 الإيميل: <code>{tg_html_escape(email)}</code>\n"
+                  f"💰 تم إضافة <b>${price:.2f}</b> إلى رصيدك الدائم.\n\n"
                   f"_شكراً لاستخدامك البوت 🤖_"),
-            parse_mode=ParseMode.MARKDOWN)
+            parse_mode=ParseMode.HTML)
     except Exception as e:
         logger.error(f"Could not send auto-confirmation to user {user_id}: {e}")
 
@@ -3911,8 +4011,7 @@ async def handle_admin_app_pass_input(update: Update, context: ContextTypes.DEFA
     await prompt_admin_acceptance_choice(update, context, uid, index)
 
 
-async def prompt_admin_acceptance_choice(update: Update,
-                                          context: ContextTypes.DEFAULT_TYPE,
+async def prompt_admin_acceptance_choice(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                           uid: int, index: int):
     user_data = get_user(uid)
     pending = user_data.get("pending_requests", [])
@@ -3933,15 +4032,14 @@ async def prompt_admin_acceptance_choice(update: Update,
     await update.effective_message.reply_text(
         f"✅ تم استلام جميع المعلومات للحساب:\n"
         f"📧 `{request.get('email', '')}`\n\n"
-        f"اختر طريقة القبول:",
+        f"سيتم الآن التحقق التلقائي من IMAP.\n"
+        f"إذا نجح → يُقبل الحساب.\n"
+        f"إذا فشل → يُرفض تلقائياً.",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(
-                "✅ قبول تلقائي — فحص الآن / تحرير بعد 24 ساعة",
+                "✅ متابعة التحقق التلقائي",
                 callback_data=f"admin_accept_auto:{uid}:{token}")],
-            [InlineKeyboardButton(
-                "📹 قبول مع فيديو المغادرة — فحص الآن / تحرير بعد 48 ساعة",
-                callback_data=f"admin_accept_leave:{uid}:{token}")],
             [InlineKeyboardButton(
                 "❌ إلغاء",
                 callback_data=f"admin_completion_cancel:{uid}:{token}")],
@@ -3974,19 +4072,16 @@ async def admin_accept_completed(update: Update, context: ContextTypes.DEFAULT_T
             reply_markup=kb_single("🔙 الطلبات", "admin_requests:0"))
         return
     index, _ = match
-    leave_video = query.data.startswith("admin_accept_leave:")
-    hold_seconds = LEAVE_HOLD_48H_SECONDS if leave_video else LEAVE_HOLD_SECONDS
-    await admin_verify_and_store(
-        update, context, uid, index,
-        hold_seconds=hold_seconds,
-        send_leave_video=leave_video,
-    )
+    await admin_verify_and_store(update, context, uid, index, hold_seconds=LEAVE_HOLD_SECONDS)
 
 
 async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                   uid: int, index: int,
-                                  hold_seconds: int = LEAVE_HOLD_SECONDS,
-                                  send_leave_video: bool = False):
+                                  hold_seconds: int = LEAVE_HOLD_SECONDS):
+    """الأدمن يكمل الحساب → تحقق IMAP إلزامي قبل القبول.
+    نجح: أضف إلى approved_accounts + hold_balance
+    فشل: رفض تلقائي
+    """
     admin_id = update.effective_user.id
     reply_target = update.effective_message
     user_data = get_user(uid)
@@ -4021,21 +4116,45 @@ async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_T
     verify_result = await verify_account_credentials(
         email=email, password=password, app_pass=app_pass, totp_secret=totp)
 
+    # ═══ فشل التحقق → رفض الحساب تلقائياً ═══
     if not verify_result["imap_ok"]:
         try:
             await progress_msg.delete()
         except Exception:
             pass
+
+        # انقله إلى rejected_requests
+        pending.pop(index)
+        move_request_to_rejected(user_data, request, "other",
+                                 f"فشل التحقق التلقائي (أدمن): {verify_result['message'][:150]}")
+        user_data["pending_requests"] = pending
+        if user_data.get("rejected_requests"):
+            user_data["rejected_requests"][-1]["rejected_by"] = admin_id
+            user_data["rejected_requests"][-1]["rejected_by_name"] = "نظام التحقق التلقائي"
+            user_data["rejected_requests"][-1]["rejected_at"] = datetime.now(timezone.utc).isoformat()
+        save_user(uid, user_data)
+
         await reply_target.reply_text(
-            f"❌ *فشل التحقق التلقائي*\n\n"
-            f"📧 `{email}`\n\n"
-            f"📝 *السبب:* {tg_html_escape(verify_result['message'])}\n\n"
-            f"⚠️ تم الاحتفاظ بالبيانات في الطلب. يمكنك إعادة المحاولة بعد التصحيح.",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=kb_single("🔙 تفاصيل الطلب",
-                                   f"admin_request_detail:{uid}:{account_callback_token(email)}"))
+            f"❌ <b>فشل التحقق التلقائي — تم رفض الحساب</b>\n\n"
+            f"📧 <code>{tg_html_escape(email)}</code>\n\n"
+            f"📝 <b>السبب:</b>\n<i>{tg_html_escape(verify_result['message'])}</i>\n\n"
+            f"⚠️ <b>لم يتم قبول الحساب.</b>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_single("🔙 الطلبات", "admin_requests:0"))
+
+        try:
+            await context.bot.send_message(
+                chat_id=uid,
+                text=(f"❌ <b>تم رفض طلبك</b>\n\n"
+                      f"📧 <code>{tg_html_escape(email)}</code>\n\n"
+                      f"📝 السبب: فشل التحقق التلقائي من IMAP.\n\n"
+                      f"💡 تأكد من صحة كلمة مرور التطبيق أو أعد المحاولة ببيانات صحيحة."),
+                parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
         return
 
+    # ═══ نجح التحقق → قبول الحساب ═══
     original_amount_cents = money_to_cents(request.get("amount", 0.0))
     full_price_cents = money_to_cents(get_tier_prices()["tier_3"])
     original_amount = cents_to_money(original_amount_cents)
@@ -4065,7 +4184,7 @@ async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_T
         "approval_time": approval_time.isoformat(),
         "release_at": (approval_time + timedelta(seconds=hold_seconds)).isoformat(),
         "hold_seconds": hold_seconds,
-        "acceptance_mode": "leave_video" if send_leave_video else "automatic",
+        "acceptance_mode": "automatic",
         "admin_bonus_status": (
             "pending" if admin_id != OWNER_ID and admin_bonus > 0 else "not_applicable"
         ),
@@ -4178,17 +4297,13 @@ async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_T
     except Exception:
         pass
 
-    if send_leave_video:
-        await send_leave_video_to_user(context, uid, email)
-
     try:
         await context.bot.send_message(
             chat_id=uid,
             text=(f"✅ *تم التحقق من الحساب بنجاح!*\n\n"
                   f"📧 `{email}`\n"
                   f"💰 تم إضافة *${original_amount:.2f}* إلى رصيدك المعلق\n\n"
-                  f"⏰ سيتم فحص الحساب بعد *{hold_hours} ساعة* ويتم تسليمك النقاط."
-                  + (f"\n⚠️ *لا تنسى المغادرة.*" if send_leave_video else "")),
+                  f"⏰ سيتم فحص الحساب بعد *{hold_hours} ساعة* ويتم تسليمك النقاط."),
             parse_mode=ParseMode.MARKDOWN)
     except Exception:
         pass
@@ -4197,7 +4312,7 @@ async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_T
         context.user_data.pop(k, None)
 
     await reply_target.reply_text(
-        f"✅ *تم اعتماد الحساب!*\n\n"
+        f"✅ *تم اعتماد الحساب بعد التحقق التلقائي!*\n\n"
         f"📧 `{email}`\n"
         f"💰 للعضو: `${original_amount:.2f}` (معلق {hold_hours} ساعة)\n"
         f"💵 مكافأتك: `${admin_bonus:.2f}`",
@@ -4519,12 +4634,8 @@ async def pending_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not request.get("has_totp", False) or not request.get("has_app_pass", False):
         buttons.append(("📝 إكمال المعلومات قبل القبول",
                         f"complete_request_owner:{uid}:{request_token}"))
-        if has_leave_video:
-            buttons.append(("📝 إكمال ثم قبول مع فيديو المغادرة",
-                            f"complete_request_owner_with_leave:{uid}:{request_token}"))
-    buttons.append(("✅ قبول فوري", f"approve_request:{uid}:{request_token}"))
-    if has_leave_video:
-        buttons.append(("📹 قبول مع فيديو المغادرة", f"approve_with_leave:{uid}:{request_token}"))
+    buttons.append(("✅ قبول فوري (مع تحقق)",
+                    f"approve_request:{uid}:{request_token}"))
     if request.get("password") or request.get("app_pass"):
         if request.get("has_app_pass", False):
             verify_label = "🔍 تحقق تلقائي (App Password)"
@@ -4597,7 +4708,6 @@ async def owner_show_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer(f"🔢 الكود: {code} | ⏰ {seconds}s", show_alert=True)
 
 
-# ==================== AUTO VERIFY (OWNER-TRIGGERED) ====================
 async def auto_verify_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
@@ -4607,7 +4717,6 @@ async def auto_verify_account(update: Update, context: ContextTypes.DEFAULT_TYPE
     uid = int(parts[1])
     token = parts[2]
     user_data = get_user(uid)
-    pending = user_data.get("pending_requests", [])
     match = find_pending_request(user_data, token)
     if match is None:
         await query.edit_message_text("⚠️ هذا الطلب غير موجود.",
@@ -4630,15 +4739,6 @@ async def auto_verify_account(update: Update, context: ContextTypes.DEFAULT_TYPE
     imap_rate_mark(email)
 
     await query.answer("🔍 جاري التحقق…", show_alert=False)
-    loading_text = (f"🔍 <b>جاري التحقق التلقائي…</b>\n\n"
-                    f"📧 <code>{tg_html_escape(email)}</code>\n\n"
-                    f"<i>يتم الاتصال بخادم البريد والتحقق من البيانات…</i>")
-    try:
-        await query.edit_message_text(loading_text, parse_mode=ParseMode.HTML,
-                                      reply_markup=kb_single("⏳ يرجى الانتظار",
-                                                             f"pending_detail:{uid}:{account_callback_token(email)}"))
-    except Exception:
-        pass
 
     result = await verify_account_credentials(email=email, password=password,
                                               app_pass=app_pass, totp_secret=totp_secret)
@@ -4650,263 +4750,36 @@ async def auto_verify_account(update: Update, context: ContextTypes.DEFAULT_TYPE
         "verified_at": datetime.now(timezone.utc).isoformat(),
         "verified_by": "owner_manual",
     }
-    pending[index] = request
-    user_data["pending_requests"] = pending
+    user_data["pending_requests"][index] = request
     save_user(uid, user_data)
 
-    category = result.get("category", "unknown")
     if result["level"] == "verified":
         title = "🟢 <b>نجح التحقق التلقائي</b>"
     elif result["level"] == "partial":
         title = "🟡 <b>تحقق جزئي</b>"
     elif result["level"] == "unknown":
-        if category == "unsupported_auth":
-            title = "⚪ <b>Gmail يحتاج App Password أو OAuth2</b>"
-        elif category in {"2fa", "auth_or_policy"}:
-            title = "⚪ <b>تعذّر التحقق (رد Gmail عام)</b>"
-        else:
-            title = "⚪ <b>تعذّر التحقق (خطأ شبكة)</b>"
+        title = "⚪ <b>تعذّر التحقق</b>"
     else:
         title = "🔴 <b>فشل التحقق التلقائي</b>"
-
-    if category == "unsupported_auth":
-        category_hint = ("🔐 Gmail لا يقبل الياسورد العادي عبر IMAP؛ "
-                         "التحقق الصحيح يحتاج App Password أو OAuth2.")
-    elif category == "2fa":
-        category_hint = ("⚠️ رد Gmail يشير إلى App Password/2FA، لكنه لا يثبت أن الحساب محمي بـ2FA.")
-    elif category in {"auth", "auth_or_policy"}:
-        category_hint = ("⚠️ Gmail أعاد رفضاً عاماً للمصادقة. قد يكون App Password أو OAuth أو سياسة الحساب.")
-    elif category == "network":
-        category_hint = "🌐 تعذّر الوصول لخادم البريد — قد يكون حجب من IP السيرفر."
-    elif category == "ok":
-        category_hint = "✅ البيانات صحيحة، الحساب موجود."
-    else:
-        category_hint = ""
 
     result_msg = f"{title}\n\n📧 <b>الإيميل:</b> <code>{tg_html_escape(email)}</code>\n\n"
     result_msg += f"📬 <b>IMAP:</b> {'✅ نجح' if result['imap_ok'] else '❌ فشل'}\n"
     if totp_secret:
         result_msg += f"🔐 <b>مفتاح 2FA:</b> {'✅ صالح' if result['totp_ok'] else '❌ غير صالح'}\n"
     result_msg += f"\n📝 <b>النتيجة:</b> {tg_html_escape(result['message'])}\n"
-    if category_hint:
-        result_msg += f"\n💡 {category_hint}\n"
-    result_msg += f"\n<i>📌 هذا مجرد تقرير — لم يتم قبول أو رفض الطلب. القرار يبقى لك.</i>"
+    result_msg += f"\n<i>📌 هذا مجرد تقرير — لم يتم قبول أو رفض الطلب.</i>"
 
     request_token = account_callback_token(email)
     buttons = [("🔍 تحقق مرة أخرى", f"auto_verify:{uid}:{request_token}"),
-               ("✅ قبول فوري", f"approve_request:{uid}:{request_token}")]
-    config = load_config()
-    has_leave_video = config.get("video_leave") and Path(config.get("video_leave", "")).exists()
-    if has_leave_video:
-        buttons.append(("📹 قبول مع فيديو المغادرة",
-                        f"approve_with_leave:{uid}:{request_token}"))
-    buttons.append(("❌ رفض", f"reject_request:{uid}:{request_token}"))
-    buttons.append(("🔙 تفاصيل الطلب", f"pending_detail:{uid}:{request_token}"))
-    buttons.append(("🔙 الطلبات المنتظرة", "view_pending:0"))
-
+               ("✅ قبول فوري", f"approve_request:{uid}:{request_token}"),
+               ("❌ رفض", f"reject_request:{uid}:{request_token}"),
+               ("🔙 تفاصيل الطلب", f"pending_detail:{uid}:{request_token}")]
     await query.edit_message_text(result_msg, parse_mode=ParseMode.HTML,
                                   reply_markup=kb_vertical(buttons))
 
 
-# ==================== COMPLETE APPROVAL ====================
-async def complete_approval(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: int, index: int,
-                            approved_request: dict, with_leave: bool = False):
-    user_data = get_user(uid)
-    config = load_config()
-    requested_amount = approved_request.get("requested_amount", approved_request.get("amount"))
-    if requested_amount is None:
-        requested_amount = calculate_account_price(
-            bool(approved_request.get("has_totp", False)),
-            bool(approved_request.get("has_app_pass", False)))
-    price = round(float(requested_amount), 2)
-    approved_request["amount"] = price
-
-    allowed_fields = {
-        "email", "password", "totp", "app_pass", "amount", "requested_amount",
-        "timestamp", "extracted", "has_totp", "has_app_pass",
-        "user_name", "user_username", "verification", "approval_time",
-        "release_at", "approved_with_leave", "leave_confirmed", "totp_code",
-        "acceptance_mode", "completed_by_admin", "admin_bonus",
-        "admin_bonus_status", "completed_at", "completed_by_admin_name",
-        "completed_by_admin_username", "hold_seconds", "auto_verified",
-        "verification_24h", "rejected_at_24h", "rejection_reason",
-        "released_amount", "auto_confirmed", "confirmed_at",
-    }
-    approved_request = {k: v for k, v in approved_request.items() if k in allowed_fields}
-
-    totp_code = ""
-    if approved_request.get("has_totp", False) and approved_request.get("totp", ""):
-        try:
-            totp_code = pyotp.TOTP(approved_request.get("totp", "")).now()
-        except Exception:
-            totp_code = "غير متاح"
-    approved_request["extracted"] = False
-    approved_request["approved_with_leave"] = with_leave
-    approved_request["leave_confirmed"] = not with_leave
-    approved_request["totp_code"] = totp_code
-    if with_leave:
-        approval_time = datetime.now(timezone.utc)
-        approved_request["approval_time"] = approval_time.isoformat()
-        approved_request["timestamp"] = approval_time.isoformat()
-        approved_request["release_at"] = (approval_time + timedelta(seconds=LEAVE_HOLD_SECONDS)).isoformat()
-    else:
-        approval_time = datetime.now(timezone.utc)
-        if not approved_request.get("approval_time"):
-            approved_request["approval_time"] = approval_time.isoformat()
-        if not approved_request.get("timestamp"):
-            approved_request["timestamp"] = approval_time.isoformat()
-    user_data.setdefault("approved_accounts", []).append(approved_request)
-    user_data["pending_balance"] = clamp_money(float(user_data.get("pending_balance", 0.0)) - price)
-    if with_leave:
-        user_data["hold_balance"] = clamp_money(float(user_data.get("hold_balance", 0.0)) + price)
-        add_transaction(user_data, "hold", price, "معلق 24 ساعة", approved_request.get("email", ""))
-    else:
-        user_data["balance"] = clamp_money(float(user_data.get("balance", 0.0)) + price)
-        add_transaction(user_data, "credit", price, "قبول حساب", approved_request.get("email", ""))
-    user_data["total_credited_balance"] = clamp_money(
-        float(user_data.get("total_credited_balance", 0.0) or 0.0) + price)
-    pending = user_data.get("pending_requests", [])
-    if index < len(pending):
-        pending.pop(index)
-    user_data["pending_requests"] = pending
-    user_data["total_approved_emails"] = int(user_data.get("total_approved_emails", 0)) + 1
-    register_approval_reset(user_data)
-    save_user(uid, user_data)
-
-    try:
-        await check_contest_award(context, uid)
-    except Exception:
-        logger.exception("Contest check failed")
-
-    referred_by = user_data.get("referred_by")
-    if referred_by:
-        referral_bonus = float(config.get("referral_bonus", 0.0))
-        if referral_bonus > 0:
-            referrer_data = get_user(referred_by)
-            referrer_data["referral_earnings"] = clamp_money(
-                float(referrer_data.get("referral_earnings", 0.0)) + referral_bonus)
-            referrer_data["balance"] = clamp_money(
-                float(referrer_data.get("balance", 0.0)) + referral_bonus)
-            referrer_data["total_credited_balance"] = clamp_money(
-                float(referrer_data.get("total_credited_balance", 0.0) or 0.0) + referral_bonus)
-            referrer_data["total_referrals"] = int(referrer_data.get("total_referrals", 0)) + 1
-            add_transaction(referrer_data, "referral", referral_bonus,
-                            f"مكافأة إحالة للمستخدم {uid}", approved_request.get("email", ""))
-            save_user(referred_by, referrer_data)
-            try:
-                await context.bot.send_message(
-                    chat_id=referred_by,
-                    text=f"🎉 *مبروك!*\nحصلت على مكافأة إحالة بقيمة ${referral_bonus:.2f}",
-                    parse_mode=ParseMode.MARKDOWN)
-            except Exception:
-                pass
-    email = approved_request.get("email", "")
-    user_message = f"✅ <b>تم قبول طلبك!</b>\n\n📧 الإيميل: <code>{tg_html_escape(email)}</code>\n"
-    if totp_code:
-        user_message += f"🔢 <b>كود المصادقة:</b> <code>{tg_html_escape(totp_code)}</code>\n"
-    if with_leave:
-        user_message += (f"💰 المبلغ المعلق: <b>${price:.2f}</b>\n\n"
-                         f"⏰ <b>سيتم إضافة المبلغ إلى رصيدك تلقائياً بعد 24 ساعة.</b>")
-    else:
-        user_message += f"💰 تم إضافة <b>${price:.2f}</b> إلى رصيدك."
-    try:
-        await context.bot.send_message(chat_id=uid, text=user_message, parse_mode=ParseMode.HTML)
-    except Exception:
-        pass
-    if with_leave:
-        await send_leave_video_to_user(context, uid, email)
-        await schedule_leave_check(context, uid, email, approved_request.get("release_at"))
-    for key in ("approval_uid", "approval_index", "approval_token", "approval_data",
-                "approval_step", "approval_with_leave"):
-        context.user_data.pop(key, None)
-
-
-# ==================== APPROVE / REJECT ====================
-def can_reject_pending_request(actor_id: int, user_data: dict, index: int) -> bool:
-    if actor_id == OWNER_ID:
-        return True
-    if not is_admin(actor_id):
-        return False
-    pending = user_data.get("pending_requests", [])
-    return 0 <= index < len(pending)
-
-
-def rejection_list_callback(actor_id: int) -> str:
-    return "view_pending:0" if actor_id == OWNER_ID else "admin_requests:0"
-
-
-async def start_owner_completion(update: Update, context: ContextTypes.DEFAULT_TYPE,
-                                 uid: int, index: int, with_leave: bool = False):
-    query = update.callback_query
-    user_data = get_user(uid)
-    pending = user_data.get("pending_requests", [])
-    if index >= len(pending):
-        await query.edit_message_text(
-            "⚠️ الطلب غير موجود.",
-            reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending:0"))
-        return
-
-    approved_request = pending[index]
-    request_token = account_callback_token(approved_request.get("email", ""))
-    display_email = tg_html_escape(approved_request.get("email", ""))
-    context.user_data["approval_uid"] = uid
-    context.user_data["approval_index"] = index
-    context.user_data["approval_token"] = request_token
-    context.user_data["approval_data"] = approved_request
-    context.user_data["approval_with_leave"] = with_leave
-
-    if not approved_request.get("has_totp", False):
-        context.user_data["approval_step"] = "waiting_totp"
-        await query.edit_message_text(
-            f"🔐 <b>إكمال الطلب</b>\n\n📧 <code>{display_email}</code>\n\n"
-            f"📌 أرسل رمز المصادقة (32 حرفاً):\n\n<i>أو 'تخطي'</i>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=kb_single("🔙 إلغاء", f"pending_detail:{uid}:{request_token}"))
-        return
-
-    if not approved_request.get("has_app_pass", False):
-        context.user_data["approval_step"] = "waiting_app_pass"
-        await query.edit_message_text(
-            f"🗝 <b>إكمال الطلب</b>\n\n📧 <code>{display_email}</code>\n\n"
-            f"📌 أرسل كلمة مرور التطبيق (16 حرفاً):\n\n<i>أو 'تخطي'</i>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=kb_single("🔙 إلغاء", f"pending_detail:{uid}:{request_token}"))
-        return
-
-    await complete_approval(update, context, uid, index, approved_request, with_leave)
-
-
-async def complete_request_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    parts = query.data.split(":")
-    match = find_pending_request(get_user(int(parts[1])), parts[2])
-    if match is None:
-        await query.edit_message_text("⚠️ الطلب غير موجود.",
-                                      reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending:0"))
-        return
-    await start_owner_completion(
-        update, context, int(parts[1]), match[0], with_leave=False)
-
-
-async def complete_request_owner_with_leave(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    parts = query.data.split(":")
-    match = find_pending_request(get_user(int(parts[1])), parts[2])
-    if match is None:
-        await query.edit_message_text("⚠️ الطلب غير موجود.",
-                                      reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending:0"))
-        return
-    await start_owner_completion(
-        update, context, int(parts[1]), match[0], with_leave=True)
-
-
 async def approve_request_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """قبول الحساب من المالك يدوياً — يشمل تحقق IMAP إلزامي."""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
@@ -4920,37 +4793,9 @@ async def approve_request_owner(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text("⚠️ الطلب غير موجود.",
                                       reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending:0"))
         return
-    index, approved_request = match
-    display_email = tg_html_escape(approved_request.get("email", ""))
-    await complete_approval(update, context, uid, index, approved_request, False)
-    await query.edit_message_text(
-        f"✅ تم قبول الحساب <code>{display_email}</code> بنجاح!",
-        parse_mode=ParseMode.HTML,
-        reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending:0"))
-
-
-async def approve_with_leave(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    parts = query.data.split(":")
-    uid = int(parts[1])
-    token = parts[2]
-    user_data = get_user(uid)
-    match = find_pending_request(user_data, token)
-    if match is None:
-        await query.edit_message_text("⚠️ الطلب غير موجود.",
-                                      reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending:0"))
-        return
-    index, approved_request = match
-    display_email = tg_html_escape(approved_request.get("email", ""))
-    await complete_approval(update, context, uid, index, approved_request, True)
-    await query.edit_message_text(
-        f"✅ تم قبول الحساب <code>{display_email}</code> مع فيديو المغادرة!\n"
-        f"💰 المبلغ معلق لمدة 24 ساعة.",
-        parse_mode=ParseMode.HTML,
-        reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending:0"))
+    index, _ = match
+    # استخدم نفس مسار الأدمن (يشمل التحقق الإلزامي)
+    await admin_verify_and_store(update, context, uid, index, hold_seconds=LEAVE_HOLD_SECONDS)
 
 
 async def reject_request_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4966,8 +4811,7 @@ async def reject_request_reason(update: Update, context: ContextTypes.DEFAULT_TY
     match = find_pending_request(user_data, token)
     if match is None:
         await query.edit_message_text("⚠️ الطلب غير موجود.",
-                                      reply_markup=kb_single(
-                                          "🔙 العودة", rejection_list_callback(actor_id)))
+                                      reply_markup=kb_single("🔙 العودة", rejection_list_callback(actor_id)))
         return
     index, request = match
     if not can_reject_pending_request(actor_id, user_data, index):
@@ -5015,10 +4859,8 @@ async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TY
         user_data = get_user(uid)
         match = find_pending_request(user_data, token)
         if match is None:
-            await _safe_edit(
-                query,
-                "⚠️ الطلب غير موجود أو تمت معالجته.",
-                reply_markup=kb_single("🔙 العودة", rejection_list_callback(actor_id)))
+            await _safe_edit(query, "⚠️ الطلب غير موجود أو تمت معالجته.",
+                             reply_markup=kb_single("🔙 العودة", rejection_list_callback(actor_id)))
             return
         index, request = match
         if not can_reject_pending_request(actor_id, user_data, index):
@@ -5070,12 +4912,9 @@ async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TY
         if video_path and Path(video_path).exists():
             try:
                 await context.bot.send_video(
-                    chat_id=uid,
-                    video=open(video_path, "rb"),
+                    chat_id=uid, video=open(video_path, "rb"),
                     caption=f"{reason}\n\n📹 *شاهد الفيديو:*",
-                    parse_mode=ParseMode.MARKDOWN,
-                    supports_streaming=True,
-                )
+                    parse_mode=ParseMode.MARKDOWN, supports_streaming=True)
             except Exception:
                 logger.exception("Failed to send rejection video")
 
@@ -5099,11 +4938,8 @@ async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TY
         )
         if ban_result:
             success_text += f"\n🚫 تم حظر البائع لمدة {ban_result[1]}."
-        await _safe_edit(
-            query,
-            success_text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=kb_single("🔙 العودة", rejection_list_callback(actor_id)))
+        await _safe_edit(query, success_text, parse_mode=ParseMode.HTML,
+                         reply_markup=kb_single("🔙 العودة", rejection_list_callback(actor_id)))
 
     except Exception:
         logger.exception("execute_reject_reason failed")
@@ -5111,6 +4947,19 @@ async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TY
             await query.answer("⚠️ حدث خطأ أثناء الرفض، حاول مرة أخرى.", show_alert=True)
         except Exception:
             pass
+
+
+def can_reject_pending_request(actor_id: int, user_data: dict, index: int) -> bool:
+    if actor_id == OWNER_ID:
+        return True
+    if not is_admin(actor_id):
+        return False
+    pending = user_data.get("pending_requests", [])
+    return 0 <= index < len(pending)
+
+
+def rejection_list_callback(actor_id: int) -> str:
+    return "view_pending:0" if actor_id == OWNER_ID else "admin_requests:0"
 
 
 async def handle_reject_reason_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5167,22 +5016,56 @@ async def handle_reject_reason_text(update: Update, context: ContextTypes.DEFAUL
         reply_markup=kb_single("🔙 العودة", rejection_list_callback(actor_id)))
 
 
+async def complete_request_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    parts = query.data.split(":")
+    match = find_pending_request(get_user(int(parts[1])), parts[2])
+    if match is None:
+        await query.edit_message_text("⚠️ الطلب غير موجود.",
+                                      reply_markup=kb_single("🔙 الطلبات المنتظرة", "view_pending:0"))
+        return
+    uid = int(parts[1])
+    index, approved_request = match
+    context.user_data["approval_uid"] = uid
+    context.user_data["approval_index"] = index
+    context.user_data["approval_token"] = parts[2]
+    context.user_data["approval_data"] = approved_request
+    context.user_data["approval_with_leave"] = False
+
+    if not approved_request.get("has_totp", False):
+        context.user_data["approval_step"] = "waiting_totp"
+        await query.edit_message_text(
+            f"🔐 <b>إكمال الطلب</b>\n\n📧 <code>{tg_html_escape(approved_request.get('email', ''))}</code>\n\n"
+            f"📌 أرسل رمز المصادقة (32 حرفاً):\n\n<i>أو 'تخطي'</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_single("🔙 إلغاء", f"pending_detail:{uid}:{parts[2]}"))
+        return
+
+    if not approved_request.get("has_app_pass", False):
+        context.user_data["approval_step"] = "waiting_app_pass"
+        await query.edit_message_text(
+            f"🗝 <b>إكمال الطلب</b>\n\n📧 <code>{tg_html_escape(approved_request.get('email', ''))}</code>\n\n"
+            f"📌 أرسل كلمة مرور التطبيق (16 حرفاً):\n\n<i>أو 'تخطي'</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_single("🔙 إلغاء", f"pending_detail:{uid}:{parts[2]}"))
+        return
+
+    await query.edit_message_text("⚠️ الطلب مكتمل بالفعل.")
+
+
 async def handle_approval_totp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     uid = context.user_data.get("approval_uid")
     index = context.user_data.get("approval_index")
-    token = context.user_data.get("approval_token")
     approved_request = context.user_data.get("approval_data")
-    with_leave = context.user_data.get("approval_with_leave", False)
     if not uid or index is None or not approved_request:
         await update.message.reply_text("⚠️ حدث خطأ.")
         return
     user_data = get_user(uid)
     pending = user_data.get("pending_requests", [])
-    if token:
-        match = find_pending_request(user_data, token)
-        if match is not None:
-            index, _ = match
     if index >= len(pending):
         await update.message.reply_text("⚠️ الطلب غير موجود.")
         return
@@ -5194,22 +5077,21 @@ async def handle_approval_totp(update: Update, context: ContextTypes.DEFAULT_TYP
             context.user_data["approval_step"] = "waiting_app_pass"
             await update.message.reply_text(
                 "✅ تم تخطي رمز المصادقة.\n\n🗝 *أرسل كلمة مرور التطبيق (16 حرفاً):*\n\n_أو 'تخطي'_",
-                parse_mode=ParseMode.MARKDOWN,
-                reply_markup=kb_single(
-                    "🔙 إلغاء",
-                    f"pending_detail:{uid}:{account_callback_token(approved_request.get('email', ''))}"))
+                parse_mode=ParseMode.MARKDOWN)
         else:
-            await complete_approval(update, context, uid, index, approved_request, with_leave)
+            await update.message.reply_text("ℹ️ الطلب جاهز. استخدم زر القبول من التفاصيل.")
         return
     cleaned = text.replace(" ", "").upper()
     if len(cleaned) != 32 or not re.match(r'^[A-Z2-7]{32}$', cleaned):
         await update.message.reply_text("⚠️ مفتاح المصادقة يجب أن يكون 32 حرفاً Base32.")
         return
     try:
-        secret = cleaned
-        code = pyotp.TOTP(secret).now()
-        approved_request["totp"] = secret
+        code = pyotp.TOTP(cleaned).now()
+        approved_request["totp"] = cleaned
         approved_request["has_totp"] = True
+        pending[index] = approved_request
+        user_data["pending_requests"] = pending
+        save_user(uid, user_data)
         context.user_data["approval_data"] = approved_request
         if not approved_request.get("has_app_pass", False):
             context.user_data["approval_step"] = "waiting_app_pass"
@@ -5218,12 +5100,9 @@ async def handle_approval_totp(update: Update, context: ContextTypes.DEFAULT_TYP
                 f"🔐 *المفتاح:* `•••• •••• •••• ••••`\n"
                 f"🔢 *الكود:* `{code}`\n\n"
                 f"🗝 *أرسل كلمة مرور التطبيق (16 حرفاً):*\n\n_أو 'تخطي'_",
-                parse_mode=ParseMode.MARKDOWN,
-                reply_markup=kb_single(
-                    "🔙 إلغاء",
-                    f"pending_detail:{uid}:{account_callback_token(approved_request.get('email', ''))}"))
+                parse_mode=ParseMode.MARKDOWN)
         else:
-            await complete_approval(update, context, uid, index, approved_request, with_leave)
+            await update.message.reply_text("ℹ️ الطلب جاهز. استخدم زر القبول من التفاصيل.")
     except Exception as e:
         await update.message.reply_text(f"⚠️ مفتاح 2FA غير صالح: {str(e)}")
 
@@ -5232,18 +5111,12 @@ async def handle_approval_app_pass(update: Update, context: ContextTypes.DEFAULT
     text = update.message.text.strip()
     uid = context.user_data.get("approval_uid")
     index = context.user_data.get("approval_index")
-    token = context.user_data.get("approval_token")
     approved_request = context.user_data.get("approval_data")
-    with_leave = context.user_data.get("approval_with_leave", False)
     if not uid or index is None or not approved_request:
         await update.message.reply_text("⚠️ حدث خطأ.")
         return
     user_data = get_user(uid)
     pending = user_data.get("pending_requests", [])
-    if token:
-        match = find_pending_request(user_data, token)
-        if match is not None:
-            index, _ = match
     if index >= len(pending):
         await update.message.reply_text("⚠️ الطلب غير موجود.")
         return
@@ -5252,7 +5125,6 @@ async def handle_approval_app_pass(update: Update, context: ContextTypes.DEFAULT
         approved_request["has_app_pass"] = False
         context.user_data["approval_data"] = approved_request
         await update.message.reply_text("✅ تم تخطي كلمة مرور التطبيق.")
-        await complete_approval(update, context, uid, index, approved_request, with_leave)
         return
     cleaned = text.replace(" ", "")
     if len(cleaned) != 16 or not re.match(r'^[A-Za-z0-9]{16}$', cleaned):
@@ -5263,14 +5135,16 @@ async def handle_approval_app_pass(update: Update, context: ContextTypes.DEFAULT
         return
     approved_request["app_pass"] = cleaned
     approved_request["has_app_pass"] = True
+    pending[index] = approved_request
+    user_data["pending_requests"] = pending
+    save_user(uid, user_data)
     context.user_data["approval_data"] = approved_request
     formatted = format_app_password(cleaned)
-    await update.message.reply_text(f"✅ تم استلام كلمة مرور التطبيق.\n🗝 `{formatted}`",
-                                    parse_mode=ParseMode.MARKDOWN)
-    await complete_approval(update, context, uid, index, approved_request, with_leave)
+    await update.message.reply_text(
+        f"✅ تم استلام كلمة مرور التطبيق.\n🗝 `{formatted}`\n\n"
+        f"ℹ️ الطلب جاهز للتحقق. استخدم زر «✅ قبول فوري (مع تحقق)» من تفاصيل الطلب.")
 
 
-# ==================== VIEW APPROVED / REJECTED ====================
 async def view_approved_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
@@ -5398,14 +5272,12 @@ async def reject_approved_start(update: Update, context: ContextTypes.DEFAULT_TY
     if account_match is None:
         await query.edit_message_text(
             "⚠️ هذا الحساب غير موجود.",
-            reply_markup=kb_single("🔙 الطلبات المقبولة", "view_approved:0"),
-        )
+            reply_markup=kb_single("🔙 الطلبات المقبولة", "view_approved:0"))
         return
     _, account = account_match
     if account.get("rejected_at_24h"):
         await query.answer("⚠️ هذا الإيميل مرفوض مسبقاً.", show_alert=True)
         return
-
     email = account.get("email", "")
     display_email = tg_html_escape(email)
     await query.edit_message_text(
@@ -5422,119 +5294,7 @@ async def reject_approved_start(update: Update, context: ContextTypes.DEFAULT_TY
             ("📱 يحتاج رقم هاتف", f"reject_approved_reason:phone:{uid}:{account_callback_token(email)}"),
             ("📝 خطأ آخر (اكتب السبب)", f"reject_approved_reason:other:{uid}:{account_callback_token(email)}"),
             ("🔙 تفاصيل الحساب", f"approved_detail:{uid}:{account_callback_token(email)}"),
-        ]),
-    )
-
-
-async def reject_approved_by_email_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    context.user_data["step"] = "reject_approved_email_input"
-    await query.edit_message_text(
-        "❌ <b>رفض إيميل مقبول</b>\n\n"
-        "أرسل عنوان الإيميل الذي تريد رفضه:\n"
-        "مثال: <code>user@example.com</code>\n\n"
-        "سيظهر تأكيد قبل تنفيذ الرفض.",
-        parse_mode=ParseMode.HTML,
-        reply_markup=kb_single("🔙 إلغاء", "owner_panel"),
-    )
-
-
-async def handle_reject_approved_email_input(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-):
-    if update.effective_user.id != OWNER_ID:
-        return
-    text = update.message.text.strip()
-    if text.casefold() in {"إلغاء", "الغاء", "cancel"}:
-        context.user_data.pop("step", None)
-        await update.message.reply_text(
-            "❌ تم الإلغاء.",
-            reply_markup=kb_single("🔙 لوحة المالك", "owner_panel"),
-        )
-        return
-
-    email = normalize_email(text)
-    if not email:
-        await update.message.reply_text("⚠️ أرسل عنوان إيميل صحيحاً.")
-        return
-
-    found = None
-    for raw_uid, encrypted_data in load_json(USERS_DB).items():
-        user_data = decrypt_user_data(encrypted_data)
-        for account in user_data.get("approved_accounts", []):
-            if (
-                normalize_email(account.get("email", "")) == email
-                and not account.get("rejected_at_24h")
-            ):
-                found = (int(raw_uid), account)
-                break
-        if found:
-            break
-
-    if found is None:
-        await update.message.reply_text(
-            "⚠️ لم أجد هذا الإيميل ضمن الحسابات المقبولة.",
-            reply_markup=kb_single("🔙 لوحة المالك", "owner_panel"),
-        )
-        return
-
-    uid, account = found
-    token = account_callback_token(account.get("email", ""))
-    amount = clamp_money(account.get("amount", 0.0))
-    status = (
-        "🔒 المبلغ ما زال مقيداً"
-        if account.get("approved_with_leave") and not account.get("leave_confirmed")
-        else "✅ المبلغ وصل وسيتم عكسه"
-    )
-    context.user_data.pop("step", None)
-    await update.message.reply_text(
-        f"⚠️ <b>تأكيد رفض الإيميل</b>\n\n"
-        f"📧 <code>{tg_html_escape(account.get('email', ''))}</code>\n"
-        f"👤 المستخدم: <code>{uid}</code>\n"
-        f"💰 المبلغ: <code>${amount:.2f}</code>\n"
-        f"{status}\n\n"
-        "هل تريد تنفيذ الرفض ونقل الإيميل إلى المرفوضة؟",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton(
-                "✅ نعم، ارفض الإيميل",
-                callback_data=f"confirm_reject_approved:{uid}:{token}")],
-            [InlineKeyboardButton("❌ إلغاء", callback_data="owner_panel")],
-        ]),
-    )
-
-
-async def confirm_reject_approved_by_email(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    parts = query.data.split(":")
-    uid = int(parts[1])
-    token = parts[2]
-    user_data = get_user(uid)
-    account_match = find_approved_account(user_data, token)
-    if account_match is None:
-        await query.edit_message_text(
-            "⚠️ الإيميل غير موجود أو تمت معالجته مسبقاً.",
-            reply_markup=kb_single("🔙 لوحة المالك", "owner_panel"),
-        )
-        return
-    index, account = account_match
-    if account.get("rejected_at_24h"):
-        await query.edit_message_text(
-            "⚠️ هذا الإيميل مرفوض مسبقاً.",
-            reply_markup=kb_single("🔙 لوحة المالك", "owner_panel"),
-        )
-        return
-    await finalize_approved_rejection(
-        update, context, uid, index, account, "owner_manual"
-    )
+        ]))
 
 
 async def execute_reject_approved_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5549,40 +5309,26 @@ async def execute_reject_approved_reason(update: Update, context: ContextTypes.D
     user_data = get_user(uid)
     account_match = find_approved_account(user_data, token)
     if account_match is None:
-        await query.edit_message_text(
-            "⚠️ هذا الحساب غير موجود.",
-            reply_markup=kb_single("🔙 الطلبات المقبولة", "view_approved:0"),
-        )
+        await query.edit_message_text("⚠️ هذا الحساب غير موجود.",
+                                      reply_markup=kb_single("🔙 الطلبات المقبولة", "view_approved:0"))
         return
     index, account = account_match
     email = account.get("email", "")
-
     if reason_type == "other":
         context.user_data["reject_approved_uid"] = uid
         context.user_data["reject_approved_token"] = token
         context.user_data["step"] = "reject_approved_reason_text"
         await query.edit_message_text(
-            f"📝 <b>اكتب سبب رفض الإيميل المقبول</b>\n\n"
-            f"📧 <code>{tg_html_escape(email)}</code>",
+            f"📝 <b>اكتب سبب رفض الإيميل المقبول</b>\n\n📧 <code>{tg_html_escape(email)}</code>",
             parse_mode=ParseMode.HTML,
-            reply_markup=kb_single("🔙 إلغاء", f"approved_detail:{uid}:{token}"),
-        )
+            reply_markup=kb_single("🔙 إلغاء", f"approved_detail:{uid}:{token}"))
         return
-
-    await finalize_approved_rejection(
-        update, context, uid, index, account, reason_type
-    )
+    await finalize_approved_rejection(update, context, uid, index, account, reason_type)
 
 
-async def finalize_approved_rejection(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    uid: int,
-    index: int,
-    account: dict,
-    reason: str,
-    reason_text: str = "",
-):
+async def finalize_approved_rejection(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                       uid: int, index: int, account: dict,
+                                       reason: str, reason_text: str = ""):
     user_data = get_user(uid)
     accounts = user_data.get("approved_accounts", [])
     if index >= len(accounts) or accounts[index].get("email") != account.get("email"):
@@ -5595,7 +5341,7 @@ async def finalize_approved_rejection(
     account = dict(account)
     email = account.get("email", "")
     amount = clamp_money(account.get("amount", 0.0))
-    admin_bonus_status = account.get("admin_bonus_status")
+    was_hold = account.get("approved_with_leave") and not account.get("leave_confirmed")
     was_released = bool(account.get("leave_confirmed")) and not account.get("rejected_at_24h")
 
     accounts.pop(index)
@@ -5606,56 +5352,27 @@ async def finalize_approved_rejection(
         user_data["rejected_requests"][-1]["rejected_by"] = actor.id
         user_data["rejected_requests"][-1]["rejected_by_name"] = actor.full_name or "غير معروف"
         user_data["rejected_requests"][-1]["rejected_by_username"] = actor.username or ""
-    if admin_id := account.get("completed_by_admin"):
-        if account.get("admin_bonus", 0):
-            user_data["rejected_requests"][-1]["admin_bonus_status"] = "rejected"
 
-    if account.get("approved_with_leave") and not account.get("leave_confirmed"):
-        user_data["hold_balance"] = clamp_money(
-            float(user_data.get("hold_balance", 0.0)) - amount
-        )
+    if was_hold:
+        user_data["hold_balance"] = clamp_money(float(user_data.get("hold_balance", 0.0)) - amount)
         add_transaction(user_data, "approved_rejection", amount,
                         "رفض حساب مقبول وإلغاء الرصيد المعلّق", email)
     elif was_released:
-        user_data["balance"] = clamp_money(
-            float(user_data.get("balance", 0.0)) - amount
-        )
-        user_data["spent_balance"] = clamp_money(
-            float(user_data.get("spent_balance", 0.0)) + amount
-        )
+        user_data["balance"] = clamp_money(float(user_data.get("balance", 0.0)) - amount)
+        user_data["spent_balance"] = clamp_money(float(user_data.get("spent_balance", 0.0)) + amount)
         add_transaction(user_data, "debit", amount,
                         "رفض حساب مقبول واسترداد المبلغ", email)
     save_user(uid, user_data)
-
-    admin_bonus = clamp_money(account.get("admin_bonus", 0.0))
-    admin_data = None
-    if admin_id and admin_bonus > 0:
-        admin_data = get_user(int(admin_id))
-        if admin_bonus_status == "pending":
-            admin_data["admin_pending_balance"] = clamp_money(
-                float(admin_data.get("admin_pending_balance", 0.0)) - admin_bonus
-            )
-        elif admin_bonus_status == "released":
-            admin_data["admin_received_balance"] = clamp_money(
-                float(admin_data.get("admin_received_balance", 0.0)) - admin_bonus
-            )
-        add_transaction(admin_data, "admin_bonus_reversal", admin_bonus,
-                        f"إلغاء مكافأة رفض الحساب {email}", email)
-        account["admin_bonus_status"] = "rejected"
-        save_user(int(admin_id), admin_data)
 
     reason_label = REJECT_REASON_LABELS.get(reason, reason)
     try:
         await context.bot.send_message(
             chat_id=uid,
-            text=(
-                f"❌ *تم رفض إيميل مقبول*\n\n"
-                f"📧 `{email}`\n"
-                f"📝 السبب: {reason_text or reason_label}\n"
-                "تم نقل الإيميل إلى قائمة المرفوضة."
-            ),
-            parse_mode=ParseMode.MARKDOWN,
-        )
+            text=(f"❌ *تم رفض إيميل مقبول*\n\n"
+                  f"📧 `{email}`\n"
+                  f"📝 السبب: {reason_text or reason_label}\n"
+                  "تم نقل الإيميل إلى قائمة المرفوضة."),
+            parse_mode=ParseMode.MARKDOWN)
     except Exception:
         pass
 
@@ -5664,8 +5381,7 @@ async def finalize_approved_rejection(
     await update.effective_message.reply_text(
         f"✅ تم رفض الإيميل المقبول `{email}` ونقله إلى المرفوضة.",
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb_single("🔙 الطلبات المقبولة", "view_approved:0"),
-    )
+        reply_markup=kb_single("🔙 الطلبات المقبولة", "view_approved:0"))
 
 
 async def handle_reject_approved_reason_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5680,9 +5396,7 @@ async def handle_reject_approved_reason_text(update: Update, context: ContextTyp
         await update.message.reply_text("⚠️ الحساب غير موجود أو تمت معالجته.")
         return
     index, account = match
-    await finalize_approved_rejection(
-        update, context, uid, index, account, "other", update.message.text.strip()
-    )
+    await finalize_approved_rejection(update, context, uid, index, account, "other", update.message.text.strip())
 
 
 async def new_totp_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5776,20 +5490,11 @@ async def handle_deduct_points_input(update: Update, context: ContextTypes.DEFAU
         current_balance = spendable_balance_cents(user_data)
         if current_balance < amount_cents:
             await update.message.reply_text(
-                f"⚠️ رصيد المستخدم غير كافٍ!\n"
-                f"💰 الرصيد المتاح: ${cents_to_money(current_balance):.2f}")
+                f"⚠️ رصيد المستخدم غير كافٍ!\n💰 الرصيد المتاح: ${cents_to_money(current_balance):.2f}")
             return
         debit_spendable_balance(user_data, amount_cents)
         add_transaction(user_data, "debit", amount, "خصم من المالك", account.get("email", ""))
         save_user(uid, user_data)
-        try:
-            await context.bot.send_message(
-                chat_id=uid,
-                text=f"💰 *تم خصم نقاط من رصيدك!*\n\n📧 `{account.get('email', '')}`\n"
-                     f"💰 المخصوم: *${amount:.2f}*\n💰 الرصيد: *${user_data['balance']:.2f}*",
-                parse_mode=ParseMode.MARKDOWN)
-        except Exception:
-            pass
         for key in ("deduct_uid", "deduct_token", "step"):
             context.user_data.pop(key, None)
         await update.message.reply_text(
@@ -5856,6 +5561,7 @@ async def rejected_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "phone": "📱 هذا الحساب يحتاج رقم هاتف.",
         "other": "❌ سبب آخر.",
         "custom": "❌ سبب مخصص.",
+        "imap_failed_24h": "🔴 فشل الفحص الثاني (24 ساعة).",
     }
     reason_text = request.get("reject_reason_text") or reason_map.get(reason, reason)
     tier_icon = "🟢" if request.get("has_app_pass") else "🟡" if request.get("has_totp") else "🔵"
@@ -5936,14 +5642,6 @@ async def handle_give_points_input(update: Update, context: ContextTypes.DEFAULT
         email = rejected_list[index].get("email", "") if index < len(rejected_list) else ""
         add_transaction(user_data, "credit", amount, "تعويض عن طلب مرفوض", email)
         save_user(uid, user_data)
-        try:
-            await context.bot.send_message(
-                chat_id=uid,
-                text=f"💰 *تم إضافة نقاط إلى رصيدك!*\n\n📧 `{email}`\n"
-                     f"💰 المبلغ: *+${amount:.2f}*\n💰 الرصيد: *${user_data['balance']:.2f}*",
-                parse_mode=ParseMode.MARKDOWN)
-        except Exception:
-            pass
         for key in ("give_uid", "give_index", "step"):
             context.user_data.pop(key, None)
         await update.message.reply_text(
@@ -6032,13 +5730,6 @@ async def handle_points_by_id_input(update: Update, context: ContextTypes.DEFAUL
             float(user_data.get("total_credited_balance", 0.0)) + amount)
         add_transaction(user_data, "credit", amount, "منح من المالك")
         save_user(target_user_id, user_data)
-        try:
-            await context.bot.send_message(
-                chat_id=target_user_id,
-                text=f"💰 *تم إضافة نقاط!*\n\n💰 +${amount:.2f}\n💰 الرصيد: *${user_data['balance']:.2f}*",
-                parse_mode=ParseMode.MARKDOWN)
-        except Exception:
-            pass
         await update.message.reply_text(
             f"✅ تم إضافة ${amount:.2f} لرصيد `{target_user_id}`.",
             parse_mode=ParseMode.MARKDOWN,
@@ -6054,13 +5745,6 @@ async def handle_points_by_id_input(update: Update, context: ContextTypes.DEFAUL
         debit_spendable_balance(user_data, amount_cents)
         add_transaction(user_data, "debit", amount, "خصم من المالك")
         save_user(target_user_id, user_data)
-        try:
-            await context.bot.send_message(
-                chat_id=target_user_id,
-                text=f"💰 *تم خصم نقاط!*\n\n💰 -${amount:.2f}\n💰 الرصيد: *${user_data['balance']:.2f}*",
-                parse_mode=ParseMode.MARKDOWN)
-        except Exception:
-            pass
         await update.message.reply_text(
             f"✅ تم خصم ${amount:.2f} من `{target_user_id}`.",
             parse_mode=ParseMode.MARKDOWN,
@@ -6407,9 +6091,7 @@ async def withdraw_store(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
     query = update.callback_query
-    send_message = (
-        query.edit_message_text if query else update.effective_message.reply_text
-    )
+    send_message = (query.edit_message_text if query else update.effective_message.reply_text)
     config = load_config()
     categories = config.get("store_categories", [])
     if not categories:
@@ -6791,8 +6473,6 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_check_email_input(update, context); return
     if step == "reject_reason_text":
         await handle_reject_reason_text(update, context); return
-    if step == "reject_approved_email_input":
-        await handle_reject_approved_email_input(update, context); return
     if step == "reject_approved_reason_text":
         await handle_reject_approved_reason_text(update, context); return
     if step == "deduct_points_input":
@@ -6881,47 +6561,33 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await update.message.reply_text(
                 "⚠️ صيغة القناة غير صحيحة.\n"
                 "أرسل @username أو رابط قناة عامة. للقناة الخاصة أرسل:\n"
-                "-1001234567890 | https://t.me/+invite"
-            )
+                "-1001234567890 | https://t.me/+invite")
             return
-
         try:
             chat = await context.bot.get_chat(channel)
             if chat.type not in {"channel", "supergroup"}:
                 await update.message.reply_text("⚠️ المعرف لا يعود إلى قناة أو مجموعة.")
                 return
-
             bot_user = await context.bot.get_me()
             bot_member = await context.bot.get_chat_member(chat.id, bot_user.id)
             if bot_member.status not in {"administrator", "creator"}:
-                await update.message.reply_text(
-                    "⚠️ أضف البوت مشرفاً في القناة أولاً، ثم أعد إرسال بياناتها."
-                )
+                await update.message.reply_text("⚠️ أضف البوت مشرفاً في القناة أولاً، ثم أعد إرسال بياناتها.")
                 return
         except Exception:
             logger.exception("Could not validate the forced channel")
-            await update.message.reply_text(
-                "⚠️ تعذر الوصول إلى القناة. تأكد من صحة المعرف وأن البوت مشرف فيها."
-            )
+            await update.message.reply_text("⚠️ تعذر الوصول إلى القناة. تأكد من صحة المعرف وأن البوت مشرف فيها.")
             return
-
-        join_link = invite_link or (
-            f"https://t.me/{chat.username}" if getattr(chat, "username", None) else ""
-        )
+        join_link = invite_link or (f"https://t.me/{chat.username}" if getattr(chat, "username", None) else "")
         if not join_link:
-            await update.message.reply_text(
-                "⚠️ هذه قناة خاصة. أرسل المعرف الرقمي مع رابط الدعوة، مفصولين بعلامة |."
-            )
+            await update.message.reply_text("⚠️ هذه قناة خاصة. أرسل المعرف الرقمي مع رابط الدعوة، مفصولين بعلامة |.")
             return
-
         config = load_config()
         config["forced_channel"] = str(chat.id)
         config["forced_channel_link"] = join_link
         save_config(config)
         await update.message.reply_text(
             f"✅ تمت إضافة القناة الإجبارية: {chat.title}\n"
-            "يجب على الأعضاء الانضمام إليها قبل استخدام البوت."
-        )
+            "يجب على الأعضاء الانضمام إليها قبل استخدام البوت.")
         context.user_data.pop("store_action", None)
         await main_menu(update, context)
     elif action in {"set_purchase_channel_1", "set_purchase_channel_2"}:
@@ -7236,18 +6902,12 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await view_rejected_requests(update, context)
     elif data.startswith("pending_detail:"):
         await pending_detail(update, context)
-    elif data.startswith("complete_request_owner_with_leave:"):
-        await complete_request_owner_with_leave(update, context)
     elif data.startswith("complete_request_owner:"):
         await complete_request_owner(update, context)
     elif data.startswith("auto_verify:"):
         await auto_verify_account(update, context)
     elif data.startswith("approved_detail:"):
         await approved_detail(update, context)
-    elif data == "reject_approved_by_email":
-        await reject_approved_by_email_start(update, context)
-    elif data.startswith("confirm_reject_approved:"):
-        await confirm_reject_approved_by_email(update, context)
     elif data.startswith("reject_approved:"):
         await reject_approved_start(update, context)
     elif data.startswith("reject_approved_reason:"):
@@ -7268,8 +6928,6 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await deduct_points_by_id(update, context)
     elif data.startswith("approve_request:"):
         await approve_request_owner(update, context)
-    elif data.startswith("approve_with_leave:"):
-        await approve_with_leave(update, context)
     elif data.startswith("reject_request:"):
         await reject_request_reason(update, context)
     elif data.startswith("reject_reason:"):
