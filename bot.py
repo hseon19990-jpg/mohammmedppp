@@ -1,11 +1,8 @@
 """
-Advanced Telegram Account Manager Bot - v5.8
-- NEW FLOW: Email + Password → instant submit (tier_1) → offer to complete
-- NEW: "Continue for more" and "Finish" buttons after each tier
-- NEW: TOTP → instant submit (tier_2) → offer to complete
-- NEW: App Password → instant submit (tier_3) → final
-- Auto-ban after 3 consecutive rejections: 1 day, then 1 week, then weekly.
-- All prior fixes retained.
+Advanced Telegram Account Manager Bot - v5.9
+- Auto verification on 4-info completion
+- Referral bonus in admin_verify_and_store
+- Hide TOTP secret from member confirmation
 """
 
 import asyncio
@@ -280,7 +277,6 @@ IMAP_RATE_LIMIT_SECONDS = 60
 AUTO_VERIFY_ENABLED = True
 ADMIN_TIER3_PRICE = 0.20
 
-# Auto-ban settings
 BAN_THRESHOLD = 3
 BAN_FIRST_DURATION_HOURS = 24
 BAN_WEEKLY_DURATION_HOURS = 24 * 7
@@ -289,25 +285,14 @@ BAN_WEEKLY_DURATION_HOURS = 24 * 7
 REJECT_REASON_KEYS = ("email", "password", "totp", "app_pass", "phone", "other")
 
 REJECT_REASON_ICONS = {
-    "email": "📧",
-    "password": "🔑",
-    "totp": "🔐",
-    "app_pass": "🗝",
-    "phone": "📱",
-    "other": "📝",
-    "custom": "📝",
-    "unknown": "❌",
+    "email": "📧", "password": "🔑", "totp": "🔐", "app_pass": "🗝",
+    "phone": "📱", "other": "📝", "custom": "📝", "unknown": "❌",
 }
 
 REJECT_REASON_LABELS = {
-    "email": "إيميل خطأ",
-    "password": "باسورد خطأ",
-    "totp": "رمز مصادقة خطأ",
-    "app_pass": "كلمة مرور تطبيق خطأ",
-    "phone": "يحتاج رقم هاتف",
-    "other": "خطأ آخر",
-    "custom": "سبب مخصص",
-    "unknown": "غير معروف",
+    "email": "إيميل خطأ", "password": "باسورد خطأ", "totp": "رمز مصادقة خطأ",
+    "app_pass": "كلمة مرور تطبيق خطأ", "phone": "يحتاج رقم هاتف",
+    "other": "خطأ آخر", "custom": "سبب مخصص", "unknown": "غير معروف",
     "owner_manual": "رفض يدوي من المالك",
 }
 
@@ -321,11 +306,8 @@ REJECT_REASON_MESSAGES = {
 }
 
 REJECT_REASON_VIDEO_KEY = {
-    "email": "video_email",
-    "password": "video_password",
-    "totp": "video_totp",
-    "app_pass": "video_app_pass",
-    "phone": "video_phone",
+    "email": "video_email", "password": "video_password", "totp": "video_totp",
+    "app_pass": "video_app_pass", "phone": "video_phone",
 }
 
 
@@ -424,30 +406,15 @@ def is_admin_or_owner(user_id: int) -> bool:
 
 # ==================== USER DATA ====================
 DEFAULT_USER_FIELDS = {
-    "balance": 0.0,
-    "pending_balance": 0.0,
-    "hold_balance": 0.0,
-    "admin_pending_balance": 0.0,
-    "admin_received_balance": 0.0,
-    "total_credited_balance": 0.0,
-    "spent_balance": 0.0,
-    "approved_accounts": [],
-    "pending_requests": [],
-    "rejected_emails": [],
-    "rejected_requests": [],
-    "referral_code": "",
-    "referred_by": None,
-    "referral_earnings": 0.0,
-    "total_referrals": 0,
-    "total_approved_emails": 0,
-    "pending_purchases": [],
-    "used_app_passwords": [],
-    "transactions": [],
-    "contest_wins": [],
-    "consecutive_rejections": 0,
-    "ban_until": "",
-    "ban_level": 0,
-    "total_rejections": 0,
+    "balance": 0.0, "pending_balance": 0.0, "hold_balance": 0.0,
+    "admin_pending_balance": 0.0, "admin_received_balance": 0.0,
+    "total_credited_balance": 0.0, "spent_balance": 0.0,
+    "approved_accounts": [], "pending_requests": [], "rejected_emails": [],
+    "rejected_requests": [], "referral_code": "", "referred_by": None,
+    "referral_earnings": 0.0, "total_referrals": 0, "total_approved_emails": 0,
+    "pending_purchases": [], "used_app_passwords": [], "transactions": [],
+    "contest_wins": [], "consecutive_rejections": 0, "ban_until": "",
+    "ban_level": 0, "total_rejections": 0,
 }
 
 
@@ -481,10 +448,8 @@ def save_user(user_id: int, user_data: dict):
 
 def add_transaction(user_data: dict, kind: str, amount: float, note: str = "", email: str = ""):
     user_data.setdefault("transactions", []).append({
-        "kind": kind,
-        "amount": round(float(amount), 2),
-        "note": note[:200],
-        "email": email,
+        "kind": kind, "amount": round(float(amount), 2),
+        "note": note[:200], "email": email,
         "at": datetime.now(timezone.utc).isoformat(),
     })
 
@@ -519,10 +484,8 @@ def register_rejection_and_maybe_ban(user_data: dict) -> Optional[Tuple[int, str
     consecutive = int(user_data.get("consecutive_rejections", 0) or 0) + 1
     user_data["consecutive_rejections"] = consecutive
     user_data["total_rejections"] = int(user_data.get("total_rejections", 0) or 0) + 1
-
     if consecutive < BAN_THRESHOLD:
         return None
-
     ban_level = int(user_data.get("ban_level", 0) or 0) + 1
     user_data["ban_level"] = ban_level
     user_data["consecutive_rejections"] = 0
@@ -710,9 +673,7 @@ def move_request_to_rejected(user_data: dict, request: dict, reason: str, reason
     )
 
 
-def move_approved_account_to_rejected(
-    user_data: dict, account: dict, reason: str, reason_text: str = ""
-):
+def move_approved_account_to_rejected(user_data: dict, account: dict, reason: str, reason_text: str = ""):
     rejected_account = dict(account)
     rejected_account["reject_reason"] = reason
     rejected_account["rejected_from_approved"] = True
@@ -720,7 +681,6 @@ def move_approved_account_to_rejected(
     if reason_text:
         rejected_account["reject_reason_text"] = reason_text
     user_data.setdefault("rejected_requests", []).append(rejected_account)
-
     email = account.get("email", "")
     rejected_emails = user_data.get("rejected_emails", [])
     if not isinstance(rejected_emails, list):
@@ -814,26 +774,16 @@ def has_active_account_password(password: str) -> bool:
 
 # ==================== IMAP VERIFICATION ====================
 IMAP_PROVIDERS = {
-    "gmail.com": ("imap.gmail.com", 993),
-    "googlemail.com": ("imap.gmail.com", 993),
-    "outlook.com": ("outlook.office365.com", 993),
-    "outlook.sa": ("outlook.office365.com", 993),
-    "hotmail.com": ("outlook.office365.com", 993),
-    "hotmail.sa": ("outlook.office365.com", 993),
-    "live.com": ("outlook.office365.com", 993),
-    "msn.com": ("outlook.office365.com", 993),
-    "yahoo.com": ("imap.mail.yahoo.com", 993),
-    "ymail.com": ("imap.mail.yahoo.com", 993),
-    "icloud.com": ("imap.mail.me.com", 993),
-    "me.com": ("imap.mail.me.com", 993),
-    "mac.com": ("imap.mail.me.com", 993),
-    "aol.com": ("imap.aol.com", 993),
-    "zoho.com": ("imap.zoho.com", 993),
-    "yandex.com": ("imap.yandex.com", 993),
-    "yandex.ru": ("imap.yandex.com", 993),
-    "mail.ru": ("imap.mail.ru", 993),
-    "gmx.com": ("imap.gmx.com", 993),
-    "gmx.net": ("imap.gmx.net", 993),
+    "gmail.com": ("imap.gmail.com", 993), "googlemail.com": ("imap.gmail.com", 993),
+    "outlook.com": ("outlook.office365.com", 993), "outlook.sa": ("outlook.office365.com", 993),
+    "hotmail.com": ("outlook.office365.com", 993), "hotmail.sa": ("outlook.office365.com", 993),
+    "live.com": ("outlook.office365.com", 993), "msn.com": ("outlook.office365.com", 993),
+    "yahoo.com": ("imap.mail.yahoo.com", 993), "ymail.com": ("imap.mail.yahoo.com", 993),
+    "icloud.com": ("imap.mail.me.com", 993), "me.com": ("imap.mail.me.com", 993),
+    "mac.com": ("imap.mail.me.com", 993), "aol.com": ("imap.aol.com", 993),
+    "zoho.com": ("imap.zoho.com", 993), "yandex.com": ("imap.yandex.com", 993),
+    "yandex.ru": ("imap.yandex.com", 993), "mail.ru": ("imap.mail.ru", 993),
+    "gmx.com": ("imap.gmx.com", 993), "gmx.net": ("imap.gmx.net", 993),
 }
 
 
@@ -903,9 +853,7 @@ def _imap_login_sync(email: str, password: str, timeout: int = 15) -> Tuple[bool
         if "application-specific password required" in low:
             return False, prefix + "يتطلب كلمة مرور تطبيق (App Password) وليس كلمة المرور العادية."
         if "invalid credentials" in low or "authenticationfailed" in low or ("auth" in low and "fail" in low):
-            return False, (
-                prefix + f"رد Gmail العام: {err}. لا يحدد IMAP هل السبب كلمة المرور أو App Password أو سياسة الحساب."
-            )
+            return False, prefix + f"رد Gmail العام: {err}. لا يحدد IMAP هل السبب كلمة المرور أو App Password أو سياسة الحساب."
         if "account is disabled" in low or "disabled" in low:
             return False, prefix + "الحساب معطّل من قبل المزود."
         if "too many" in low or "rate" in low or "limit" in low:
@@ -919,23 +867,12 @@ def _imap_login_sync(email: str, password: str, timeout: int = 15) -> Tuple[bool
         return False, f"❌ نجحت DNS مبدئياً، لكن فشلت جلسة IMAP بعد {elapsed()}: {exc}"
     except Exception:
         logger.exception("IMAP verification error for %s", email)
-        return False, f"❌ خطأ غير متوقع بعد نجاح فحص الشبكة ({elapsed()}). راجع سجل الخدمة دون تسجيل بيانات الاعتماد."
+        return False, f"❌ خطأ غير متوقع بعد نجاح فحص الشبكة ({elapsed()}). راجع سجل الخدمة."
 
 
-NETWORK_ERROR_MARKERS = (
-    "timeout", "dns", "ssl", "connect", "unreachable", "refused",
-    "تعذّر الاتصال", "انتهت مهلة",
-)
-AUTH_ERROR_MARKERS = (
-    "invalid credentials", "authenticationfailed",
-    "username and password not accepted",
-    "بيانات الدخول غير صحيحة",
-)
-TWO_FA_ERROR_MARKERS = (
-    "application-specific password", "app password",
-    "two-factor", "2fa", "2-step", "app-specific",
-    "يتطلب كلمة مرور تطبيق",
-)
+NETWORK_ERROR_MARKERS = ("timeout", "dns", "ssl", "connect", "unreachable", "refused", "تعذّر الاتصال", "انتهت مهلة")
+AUTH_ERROR_MARKERS = ("invalid credentials", "authenticationfailed", "username and password not accepted", "بيانات الدخول غير صحيحة")
+TWO_FA_ERROR_MARKERS = ("application-specific password", "app password", "two-factor", "2fa", "2-step", "app-specific", "يتطلب كلمة مرور تطبيق")
 
 
 def classify_imap_error(message: str) -> str:
@@ -949,20 +886,8 @@ def classify_imap_error(message: str) -> str:
     return "unknown"
 
 
-async def verify_account_credentials(
-    email: str,
-    password: str = "",
-    app_pass: str = "",
-    totp_secret: str = "",
-) -> dict:
-    result = {
-        "level": "failed",
-        "badge": "🔴",
-        "message": "",
-        "imap_ok": False,
-        "totp_ok": False,
-        "category": "unknown",
-    }
+async def verify_account_credentials(email: str, password: str = "", app_pass: str = "", totp_secret: str = "") -> dict:
+    result = {"level": "failed", "badge": "🔴", "message": "", "imap_ok": False, "totp_ok": False, "category": "unknown"}
     if totp_secret:
         cleaned_totp = totp_secret.replace(" ", "").upper()
         if validate_totp_secret(cleaned_totp):
@@ -983,10 +908,7 @@ async def verify_account_credentials(
         result["level"] = "unknown"
         result["badge"] = "⚪"
         result["category"] = "unsupported_auth"
-        result["message"] = (
-            "⚪ Gmail لا يسمح بالتحقق من الياسورد العادي عبر IMAP. "
-            "استخدم App Password أو OAuth2."
-        )
+        result["message"] = "⚪ Gmail لا يسمح بالتحقق من الياسورد العادي عبر IMAP. استخدم App Password أو OAuth2."
     elif imap_pass:
         ok, msg = await asyncio.to_thread(_imap_login_sync, email, imap_pass)
         result["imap_ok"] = ok
@@ -1002,21 +924,14 @@ async def verify_account_credentials(
     if result["imap_ok"]:
         result["level"] = "verified"
         result["badge"] = "🟢"
-        result["message"] = ("🟢 تم التحقق الكامل عبر IMAP باستخدام كلمة مرور التطبيق."
-                             if app_pass else "🟢 تم تسجيل الدخول عبر IMAP بنجاح.")
+        result["message"] = ("🟢 تم التحقق الكامل عبر IMAP باستخدام كلمة مرور التطبيق." if app_pass else "🟢 تم تسجيل الدخول عبر IMAP بنجاح.")
     elif result["category"] == "2fa":
         result["level"] = "partial" if result["totp_ok"] else "unknown"
         result["badge"] = "🟡" if result["totp_ok"] else "⚪"
         if result["totp_ok"]:
-            result["message"] = (
-                "🟡 رفض Gmail مصادقة IMAP بطريقة تشير إلى App Password/2FA؛ "
-                "مفتاح TOTP صالح محليًا، لكن لم يتم إثبات ارتباطه بهذا الحساب."
-            )
+            result["message"] = "🟡 رفض Gmail مصادقة IMAP بطريقة تشير إلى App Password/2FA؛ مفتاح TOTP صالح محليًا."
         else:
-            result["message"] = (
-                "⚪ رفض Gmail مصادقة IMAP بطريقة تشير إلى App Password/2FA؛ "
-                "لا يمكن إثبات حالة 2FA أو صحة بيانات الحساب من هذا الرد."
-            )
+            result["message"] = "⚪ رفض Gmail مصادقة IMAP بطريقة تشير إلى App Password/2FA."
     elif result["category"] == "unsupported_auth":
         pass
     elif result["category"] == "network":
@@ -1032,7 +947,6 @@ async def verify_account_credentials(
         result["badge"] = "🔴"
         if not result["message"]:
             result["message"] = "❌ فشل التحقق التلقائي."
-
     return result
 
 
@@ -1070,32 +984,16 @@ def generate_totp_code_info(totp_secret: str) -> Tuple[bool, str, str, int]:
         return False, "", f"خطأ في توليد الكود: {exc}", 0
 
 
-async def send_totp_code_message(
-    context: ContextTypes.DEFAULT_TYPE,
-    chat_id: int,
-    totp_secret: str,
-    email: str = "",
-    title: str = "🔢 كود المصادقة الحالي",
-    back_callback: str = "",
-    auto_refresh: bool = False,
-):
+async def send_totp_code_message(context, chat_id: int, totp_secret: str, email: str = "",
+                                  title: str = "🔢 كود المصادقة الحالي", back_callback: str = "",
+                                  auto_refresh: bool = False):
     ok, code, err, seconds = generate_totp_code_info(totp_secret)
     if not ok:
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=f"⚠️ {err}",
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        await context.bot.send_message(chat_id=chat_id, text=f"⚠️ {err}", parse_mode=ParseMode.MARKDOWN)
         return None
-
     email_line = f"\n📧 `{email}`\n" if email else "\n"
-    text = (
-        f"{title}\n"
-        f"{email_line}\n"
-        f"🔢 *الكود:* `{code}`\n\n"
-        f"⏰ صالح لمدة *{seconds}* ثانية\n\n"
-        f"_اضغط «🔄 كود جديد» للحصول على كود محدّث._"
-    )
+    text = (f"{title}\n{email_line}\n🔢 *الكود:* `{code}`\n\n⏰ صالح لمدة *{seconds}* ثانية\n\n"
+            f"_اضغط «🔄 كود جديد» للحصول على كود محدّث._")
     buttons = []
     if auto_refresh and back_callback:
         buttons.append(("🔄 كود جديد", back_callback))
@@ -1103,20 +1001,12 @@ async def send_totp_code_message(
         buttons.append(("🔙 رجوع", back_callback))
     reply_markup = kb_vertical(buttons) if buttons else None
     try:
-        msg = await context.bot.send_message(
-            chat_id=chat_id,
-            text=text,
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=reply_markup,
-        )
+        msg = await context.bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
         return msg
     except Exception as exc:
         logger.exception("Failed to send TOTP code message")
         try:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"🔢 الكود: {code}\n⏰ {seconds} ثانية",
-            )
+            await context.bot.send_message(chat_id=chat_id, text=f"🔢 الكود: {code}\n⏰ {seconds} ثانية")
         except Exception:
             pass
         return None
@@ -1138,13 +1028,7 @@ def parse_forced_channel_input(value: str) -> Tuple[str, str]:
     invite_link = link_value.strip() if separator else ""
     valid_handle = bool(re.fullmatch(r"@[A-Za-z0-9_]{5,32}", channel))
     valid_chat_id = bool(re.fullmatch(r"-100\d+", channel))
-    valid_invite_link = not invite_link or bool(
-        re.fullmatch(
-            r"https?://t\.me/(?:\+[A-Za-z0-9_-]+|joinchat/[A-Za-z0-9_-]+)",
-            invite_link,
-            flags=re.IGNORECASE,
-        )
-    )
+    valid_invite_link = not invite_link or bool(re.fullmatch(r"https?://t\.me/(?:\+[A-Za-z0-9_-]+|joinchat/[A-Za-z0-9_-]+)", invite_link, flags=re.IGNORECASE))
     if not (valid_handle or valid_chat_id) or not valid_invite_link:
         return "", ""
     return channel, invite_link
@@ -1196,9 +1080,7 @@ async def check_forced_channel(update: Update, context: ContextTypes.DEFAULT_TYP
         return True
     try:
         member = await context.bot.get_chat_member(forced_channel, user_id)
-        if member.status in {"member", "administrator", "creator"} or (
-            member.status == "restricted" and getattr(member, "is_member", False)
-        ):
+        if member.status in {"member", "administrator", "creator"} or (member.status == "restricted" and getattr(member, "is_member", False)):
             context.user_data["_forced_channel_checked_update_id"] = update.update_id
             return True
     except Exception as exc:
@@ -1222,14 +1104,7 @@ async def check_forced_channel_callback(update: Update, context: ContextTypes.DE
 
 # ==================== SORT HELPERS ====================
 def _record_sort_key(record: dict) -> str:
-    return str(
-        record.get("timestamp")
-        or record.get("approval_time")
-        or record.get("rejected_at")
-        or record.get("completed_at")
-        or record.get("confirmed_at")
-        or ""
-    )
+    return str(record.get("timestamp") or record.get("approval_time") or record.get("rejected_at") or record.get("completed_at") or record.get("confirmed_at") or "")
 
 
 def sort_records_newest_first(records: List[dict]) -> List[dict]:
@@ -1260,11 +1135,7 @@ def compute_top_sellers(limit: int = 10) -> List[dict]:
         except (TypeError, ValueError):
             continue
         user_data = decrypt_user_data(encrypted_data)
-        total = (
-            len(user_data.get("approved_accounts", []) or [])
-            + len(user_data.get("pending_requests", []) or [])
-            + len(user_data.get("rejected_requests", []) or [])
-        )
+        total = (len(user_data.get("approved_accounts", []) or []) + len(user_data.get("pending_requests", []) or []) + len(user_data.get("rejected_requests", []) or []))
         if total <= 0:
             continue
         rows.append({"user_id": uid, "total": total})
@@ -1281,7 +1152,6 @@ def compute_sales_stats(since_iso: Optional[str] = None) -> dict:
                 start_dt = start_dt.replace(tzinfo=timezone.utc)
         except ValueError:
             start_dt = None
-
     users = load_json(USERS_DB)
     total_accounts = 0
     per_user: Dict[int, int] = {}
@@ -1314,13 +1184,12 @@ def compute_sales_stats(since_iso: Optional[str] = None) -> dict:
         if count > 0:
             per_user[uid] = count
             total_accounts += count
-
     top = sorted(per_user.items(), key=lambda x: (-x[1], x[0]))[:10]
     top_list = [{"user_id": uid, "total": c} for uid, c in top]
     return {"total_accounts": total_accounts, "top": top_list, "since": since_iso}
 
 
-# ==================== CONTEST SYSTEM (MULTI-TIER) ====================
+# ==================== CONTEST SYSTEM ====================
 def get_contest() -> dict:
     config = load_config()
     contest = config.get("contest")
@@ -1392,7 +1261,7 @@ def contest_summary_lines(contest: dict) -> List[str]:
     lines.append(f"📌 <b>الحالة:</b> {'🟢 نشطة' if active else '🔴 متوقفة'}")
     if started_at:
         lines.append(f"🕐 <b>بدأت:</b> <code>{tg_html_escape(_format_iso_time(started_at))}</code>")
-    lines.append(f"🏅 <b>الحد الأقصى للفائزين (لكل جائزة):</b> <code>{max_winners}</code>")
+    lines.append(f"🏅 <b>الحد الأقصى للفائزين:</b> <code>{max_winners}</code>")
     lines.append("")
     lines.append("🎁 <b>الجوائز:</b>")
     if not tiers:
@@ -1403,7 +1272,7 @@ def contest_summary_lines(contest: dict) -> List[str]:
         lines.append(f"  {i}. عند <b>{emails}</b> إيميل → <code>${reward:.2f}</code>")
     lines.append("")
     lines.append(f"✅ <b>عدد الفائزين الحالي:</b> <code>{len(winners)}</code>")
-    lines.append(f"📨 <b>عدد الإيميلات الواصلة (خلال المسابقة):</b> <code>{total_emails_delivered}</code>")
+    lines.append(f"📨 <b>عدد الإيميلات الواصلة:</b> <code>{total_emails_delivered}</code>")
     lines.append(f"💵 <b>النقاط الممنوحة:</b> <code>${total_pts:.2f}</code>")
     return lines
 
@@ -1419,16 +1288,12 @@ async def check_contest_award(context: ContextTypes.DEFAULT_TYPE, uid: int):
     max_winners = int(contest.get("max_winners", 0) or 0)
     if not tiers or max_winners <= 0:
         return
-
     user_data = get_user(uid)
     count = _count_approved_in_window(user_data, started_at)
-
     contest["total_emails_delivered"] = int(contest.get("total_emails_delivered", 0) or 0) + 1
     save_contest(contest)
-
     winners = contest.get("winners", []) or []
     awarded_now: List[Tuple[int, float]] = []
-
     for tier_index, tier in enumerate(tiers):
         tier_emails = int(tier.get("emails", 0) or 0)
         tier_reward = float(tier.get("reward", 0) or 0)
@@ -1436,81 +1301,44 @@ async def check_contest_award(context: ContextTypes.DEFAULT_TYPE, uid: int):
             continue
         if count < tier_emails:
             continue
-        already_won = any(
-            int(w.get("user_id", 0)) == uid and int(w.get("tier_index", -1)) == tier_index
-            for w in winners
-        )
+        already_won = any(int(w.get("user_id", 0)) == uid and int(w.get("tier_index", -1)) == tier_index for w in winners)
         if already_won:
             continue
-        tier_winners_count = sum(
-            1 for w in winners if int(w.get("tier_index", -1)) == tier_index
-        )
+        tier_winners_count = sum(1 for w in winners if int(w.get("tier_index", -1)) == tier_index)
         if tier_winners_count >= max_winners:
             continue
-
-        user_data["balance"] = clamp_money(
-            float(user_data.get("balance", 0.0)) + tier_reward)
-        user_data["total_credited_balance"] = clamp_money(
-            float(user_data.get("total_credited_balance", 0.0) or 0.0) + tier_reward)
-        add_transaction(user_data, "credit", tier_reward,
-                        f"جائزة المسابقة (هدف {tier_emails} إيميل)", "")
-        winners.append({
-            "user_id": uid,
-            "tier_index": tier_index,
-            "tier_emails": tier_emails,
-            "reward": tier_reward,
-            "awarded_at": datetime.now(timezone.utc).isoformat(),
-        })
+        user_data["balance"] = clamp_money(float(user_data.get("balance", 0.0)) + tier_reward)
+        user_data["total_credited_balance"] = clamp_money(float(user_data.get("total_credited_balance", 0.0) or 0.0) + tier_reward)
+        add_transaction(user_data, "credit", tier_reward, f"جائزة المسابقة (هدف {tier_emails} إيميل)", "")
+        winners.append({"user_id": uid, "tier_index": tier_index, "tier_emails": tier_emails,
+                        "reward": tier_reward, "awarded_at": datetime.now(timezone.utc).isoformat()})
         awarded_now.append((tier_emails, tier_reward))
-
     if not awarded_now:
         return
-
     wins = user_data.get("contest_wins", []) or []
     for tier_emails, tier_reward in awarded_now:
-        wins.append({
-            "contest_started_at": started_at,
-            "awarded_at": datetime.now(timezone.utc).isoformat(),
-            "tier_emails": tier_emails,
-            "reward": tier_reward,
-        })
+        wins.append({"contest_started_at": started_at, "awarded_at": datetime.now(timezone.utc).isoformat(),
+                     "tier_emails": tier_emails, "reward": tier_reward})
     user_data["contest_wins"] = wins
     save_user(uid, user_data)
-
     contest["winners"] = winners
     total_now = sum(r for _, r in awarded_now)
-    contest["total_points_awarded"] = float(
-        contest.get("total_points_awarded", 0) or 0) + total_now
+    contest["total_points_awarded"] = float(contest.get("total_points_awarded", 0) or 0) + total_now
     save_contest(contest)
-
-    tiers_lines = "\n".join(
-        [f"  • عند {e} إيميل → <code>${r:.2f}</code>" for e, r in awarded_now])
+    tiers_lines = "\n".join([f"  • عند {e} إيميل → <code>${r:.2f}</code>" for e, r in awarded_now])
     try:
-        await context.bot.send_message(
-            chat_id=uid,
-            text=(
-                "🎉 <b>مبروك! فزت في المسابقة</b>\n\n"
-                f"✅ <b>عدد الإيميلات الحالية:</b> <code>{count}</code>\n"
-                f"💰 <b>المكافآت المكتسبة:</b>\n{tiers_lines}\n\n"
-                f"💵 <b>الإجمالي الممنوح الآن:</b> <code>${total_now:.2f}</code>\n"
-                "تم إضافة المكافأة إلى رصيدك مباشرة."
-            ),
-            parse_mode=ParseMode.HTML,
-        )
+        await context.bot.send_message(chat_id=uid, text=("🎉 <b>مبروك! فزت في المسابقة</b>\n\n"
+            f"✅ <b>عدد الإيميلات الحالية:</b> <code>{count}</code>\n"
+            f"💰 <b>المكافآت المكتسبة:</b>\n{tiers_lines}\n\n"
+            f"💵 <b>الإجمالي الممنوح الآن:</b> <code>${total_now:.2f}</code>\n"
+            "تم إضافة المكافأة إلى رصيدك مباشرة."), parse_mode=ParseMode.HTML)
     except Exception:
         pass
     try:
-        await context.bot.send_message(
-            chat_id=OWNER_ID,
-            text=(
-                "🎉 <b>فائز جديد في المسابقة</b>\n\n"
-                f"👤 المستخدم: <code>{uid}</code>\n"
-                f"✅ الإيميلات الحالية: <code>{count}</code>\n"
-                f"💵 إجمالي الممنوح: <code>${total_now:.2f}</code>\n"
-                f"🎁 مكافآت: <code>{len(awarded_now)}</code>"
-            ),
-            parse_mode=ParseMode.HTML,
-        )
+        await context.bot.send_message(chat_id=OWNER_ID, text=("🎉 <b>فائز جديد في المسابقة</b>\n\n"
+            f"👤 المستخدم: <code>{uid}</code>\n✅ الإيميلات الحالية: <code>{count}</code>\n"
+            f"💵 إجمالي الممنوح: <code>${total_now:.2f}</code>\n"
+            f"🎁 مكافآت: <code>{len(awarded_now)}</code>"), parse_mode=ParseMode.HTML)
     except Exception:
         pass
 
@@ -1527,16 +1355,11 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ban_msg = get_active_ban_message(user_data)
     prefix = (ban_msg + "\n\n") if ban_msg else ""
     buttons = [
-        ("➕ إضافة حساب", "add_account"),
-        ("💰 أموالي", "my_wallet"),
-        ("📜 سجل معاملاتي", "my_transactions"),
-        ("📋 حساباتي", "my_accounts"),
-        ("🏆 الأكثر بيعاً", "top_sellers"),
-        ("📧 الإيميلات المرفوضة", "rejected_emails"),
-        ("📺 تعليم", "tutorials"),
-        ("🛒 سحب", "withdraw_store"),
-        ("🔗 الإحالة", "referral_menu"),
-        ("✏️ تعديل حساباتي", "edit_my_accounts"),
+        ("➕ إضافة حساب", "add_account"), ("💰 أموالي", "my_wallet"),
+        ("📜 سجل معاملاتي", "my_transactions"), ("📋 حساباتي", "my_accounts"),
+        ("🏆 الأكثر بيعاً", "top_sellers"), ("📧 الإيميلات المرفوضة", "rejected_emails"),
+        ("📺 تعليم", "tutorials"), ("🛒 سحب", "withdraw_store"),
+        ("🔗 الإحالة", "referral_menu"), ("✏️ تعديل حساباتي", "edit_my_accounts"),
     ]
     if is_admin(user.id):
         buttons.append(("🛠 الإدارية", "admin_panel"))
@@ -1545,14 +1368,11 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = prefix + "👋 مرحباً بك!\nاختر من القائمة أدناه:"
     if update.callback_query:
         try:
-            await update.callback_query.edit_message_text(
-                text, parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
+            await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
         except Exception:
-            await update.callback_query.message.reply_text(
-                text, parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
+            await update.callback_query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
     else:
-        await update.message.reply_text(
-            text, parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
 
 
 # ==================== TOP SELLERS VIEW ====================
@@ -1929,9 +1749,7 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_config()
     prices = get_tier_prices()
 
-    # ═══════════════════════════════════════════════════════════════
-    # الخطوة 1: الإيميل
-    # ═══════════════════════════════════════════════════════════════
+    # ═══ الخطوة 1: الإيميل ═══
     if session.step == "email":
         first_line = text.splitlines()[0].strip() if text else ""
         email = normalize_email(first_line)
@@ -1977,9 +1795,7 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🎁 <i>يمكنك مضاعفتها بإضافة رمز المصادقة وكلمة مرور التطبيق لاحقاً.</i>",
             parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
 
-    # ═══════════════════════════════════════════════════════════════
-    # الخطوة 2: الباسورد → إرسال فوري للمالك (tier_1)
-    # ═══════════════════════════════════════════════════════════════
+    # ═══ الخطوة 2: الباسورد → إرسال فوري (tier_1) ═══
     elif session.step == "password":
         if has_active_account_password(text):
             await update.message.reply_text(
@@ -2061,9 +1877,7 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ("✅ إنهاء", f"finish_request:{uid}"),
             ]))
 
-    # ═══════════════════════════════════════════════════════════════
-    # الخطوة 3: TOTP → تحديث الطلب وإرسال للمالك (tier_2)
-    # ═══════════════════════════════════════════════════════════════
+    # ═══ الخطوة 3: TOTP → تحديث الطلب (tier_2) ═══
     elif session.step == "totp":
         if not session.email or not session.password:
             await update.message.reply_text(
@@ -2138,7 +1952,7 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await update.message.reply_text(
                 f"✅ <b>تم إضافة رمز المصادقة!</b>\n\n"
-                f"🔐 المفتاح: <code>{tg_html_escape(format_totp_secret(secret))}</code>\n"
+                f"🔐 المفتاح: <code>•••• •••• •••• ••••</code>\n"
                 f"🔢 الكود الحالي: <code>{code}</code>\n\n"
                 f"━━━━━━━━━━━━━━━\n"
                 f"💰 <b>الآن حصلت على ${new_price:.2f}</b>\n"
@@ -2154,9 +1968,7 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await update.message.reply_text(f"⚠️ مفتاح 2FA غير صالح: {str(e)}")
 
-    # ═══════════════════════════════════════════════════════════════
-    # الخطوة 4: App Password → إكمال الطلب (tier_3)
-    # ═══════════════════════════════════════════════════════════════
+    # ═══ الخطوة 4: App Password → التحقق التلقائي ثم الإكمال (tier_3) ═══
     elif session.step == "app_pass":
         cleaned = text.replace(" ", "")
         if len(cleaned) != 16:
@@ -2221,6 +2033,43 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_full_name = user.full_name or "غير معروف"
         user_username = user.username or "لا يوجد"
 
+        verify_result = None
+        verify_status = ""
+        try:
+            allowed, wait = imap_rate_ok(session.email)
+            if allowed:
+                imap_rate_mark(session.email)
+                verify_result = await verify_account_credentials(
+                    email=session.email,
+                    password=session.password,
+                    app_pass=cleaned,
+                    totp_secret=session.totp,
+                )
+                pending[found_idx]["verification"] = {
+                    "level": verify_result["level"],
+                    "badge": verify_result["badge"],
+                    "message": verify_result["message"],
+                    "imap_ok": verify_result["imap_ok"],
+                    "totp_ok": verify_result["totp_ok"],
+                    "category": verify_result.get("category", "unknown"),
+                    "verified_at": datetime.now(timezone.utc).isoformat(),
+                    "verified_by": "auto_on_completion",
+                }
+                pending[found_idx]["auto_verified"] = verify_result["imap_ok"]
+                user_data["pending_requests"] = pending
+                save_user(uid, user_data)
+
+                if verify_result["imap_ok"]:
+                    verify_status = "🟢 <b>تم التحقق التلقائي بنجاح!</b>\n"
+                elif verify_result["level"] == "partial":
+                    verify_status = "🟡 <b>تحقق جزئي (TOTP صالح)</b>\n"
+                elif verify_result["category"] == "unsupported_auth":
+                    verify_status = "⚪ <b>Gmail يحتاج App Password — تحقق غير كامل</b>\n"
+                else:
+                    verify_status = "🔴 <b>فشل التحقق التلقائي — راجع المالك</b>\n"
+        except Exception:
+            logger.exception("Auto verification on completion failed")
+
         try:
             await context.bot.send_message(
                 chat_id=OWNER_ID,
@@ -2232,6 +2081,7 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
                       f"🔐 <code>{tg_html_escape(session.totp)}</code>\n"
                       f"🗝 <code>{tg_html_escape(format_app_password(cleaned))}</code>\n"
                       f"💰 <b>${new_price:.2f}</b>\n\n"
+                      f"{verify_status}"
                       f"✅ <i>الطلب مكتمل — جاهز للمراجعة.</i>"),
                 parse_mode=ParseMode.HTML)
         except Exception:
@@ -2243,15 +2093,14 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔐 2FA: ✅\n"
             f"🗝 كلمة مرور التطبيق: ✅\n\n"
             f"━━━━━━━━━━━━━━━\n"
+            f"{verify_status}"
             f"💰 <b>إجمالي نقاطك: ${new_price:.2f}</b>\n"
             f"━━━━━━━━━━━━━━━\n\n"
             f"⏳ <i>سيتم مراجعة حسابك من قبل المالك.</i>",
             parse_mode=ParseMode.HTML,
             reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
 
-    # ═══════════════════════════════════════════════════════════════
-    # حالة انتظار الأزرار
-    # ═══════════════════════════════════════════════════════════════
+    # ═══ حالة انتظار الأزرار ═══
     elif session.step in ("submitted_tier_1", "submitted_tier_2"):
         await update.message.reply_text(
             "📌 <i>يرجى استخدام الأزرار أعلاه للاختيار.</i>",
@@ -2262,7 +2111,7 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]))
 
 
-# ==================== CONTINUE / FINISH (NEW FLOW) ====================
+# ==================== CONTINUE / FINISH ====================
 async def complete_more_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     try:
@@ -4282,6 +4131,27 @@ async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_T
 
     referred_by = user_data.get("referred_by")
     if referred_by:
+        config_ref = load_config()
+        referral_bonus = float(config_ref.get("referral_bonus", 0.0))
+        if referral_bonus > 0:
+            referrer_data = get_user(referred_by)
+            referrer_data["referral_earnings"] = clamp_money(
+                float(referrer_data.get("referral_earnings", 0.0)) + referral_bonus)
+            referrer_data["balance"] = clamp_money(
+                float(referrer_data.get("balance", 0.0)) + referral_bonus)
+            referrer_data["total_credited_balance"] = clamp_money(
+                float(referrer_data.get("total_credited_balance", 0.0) or 0.0) + referral_bonus)
+            referrer_data["total_referrals"] = int(referrer_data.get("total_referrals", 0)) + 1
+            add_transaction(referrer_data, "referral", referral_bonus,
+                            f"مكافأة إحالة للمستخدم {uid}", email)
+            save_user(referred_by, referrer_data)
+            try:
+                await context.bot.send_message(
+                    chat_id=referred_by,
+                    text=f"🎉 *مبروك!*\nحصلت على مكافأة إحالة بقيمة ${referral_bonus:.2f}",
+                    parse_mode=ParseMode.MARKDOWN)
+            except Exception:
+                pass
         try:
             await context.bot.send_message(
                 chat_id=referred_by,
@@ -4800,20 +4670,12 @@ async def auto_verify_account(update: Update, context: ContextTypes.DEFAULT_TYPE
         title = "🔴 <b>فشل التحقق التلقائي</b>"
 
     if category == "unsupported_auth":
-        category_hint = (
-            "🔐 لم نغيّر خطوات الأعضاء. Gmail لا يقبل الياسورد العادي عبر IMAP؛ "
-            "التحقق الصحيح يحتاج App Password أو OAuth2."
-        )
+        category_hint = ("🔐 Gmail لا يقبل الياسورد العادي عبر IMAP؛ "
+                         "التحقق الصحيح يحتاج App Password أو OAuth2.")
     elif category == "2fa":
-        category_hint = (
-            "⚠️ رد Gmail يشير إلى App Password/2FA، لكنه لا يثبت أن الحساب محمي بـ2FA "
-            "ولا يثبت صحة الإيميل أو كلمة المرور. صلاحية TOTP إن ظهرت هي فحص محلي للمفتاح فقط."
-        )
+        category_hint = ("⚠️ رد Gmail يشير إلى App Password/2FA، لكنه لا يثبت أن الحساب محمي بـ2FA.")
     elif category in {"auth", "auth_or_policy"}:
-        category_hint = (
-            "⚠️ Gmail أعاد رفضاً عاماً للمصادقة. الشبكة سليمة، لكن IMAP لا يكشف السبب الداخلي؛ "
-            "قد يكون App Password أو OAuth أو سياسة الحساب."
-        )
+        category_hint = ("⚠️ Gmail أعاد رفضاً عاماً للمصادقة. قد يكون App Password أو OAuth أو سياسة الحساب.")
     elif category == "network":
         category_hint = "🌐 تعذّر الوصول لخادم البريد — قد يكون حجب من IP السيرفر."
     elif category == "ok":
@@ -5349,11 +5211,12 @@ async def handle_approval_totp(update: Update, context: ContextTypes.DEFAULT_TYP
         approved_request["totp"] = secret
         approved_request["has_totp"] = True
         context.user_data["approval_data"] = approved_request
-        formatted_secret = format_totp_secret(secret)
         if not approved_request.get("has_app_pass", False):
             context.user_data["approval_step"] = "waiting_app_pass"
             await update.message.reply_text(
-                f"✅ رمز المصادقة صالح!\n🔐 *المفتاح:* `{formatted_secret}`\n🔢 *الكود:* `{code}`\n\n"
+                f"✅ رمز المصادقة صالح!\n"
+                f"🔐 *المفتاح:* `•••• •••• •••• ••••`\n"
+                f"🔢 *الكود:* `{code}`\n\n"
                 f"🗝 *أرسل كلمة مرور التطبيق (16 حرفاً):*\n\n_أو 'تخطي'_",
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=kb_single(
