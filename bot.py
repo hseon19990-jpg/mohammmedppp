@@ -21,6 +21,8 @@ import shutil
 import socket
 import ssl
 import time
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass, asdict
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import datetime, timedelta, timezone
@@ -520,6 +522,10 @@ class Session:
 
 SESSIONS: Dict[int, Session] = {}
 PENDING_PURCHASES: Dict[int, Dict] = {}
+TG_LION_API_URL = "https://TG-Lion.net/"
+TG_LION_COUNTRY_CACHE = {"countries": None, "expires_at": 0.0}
+TG_LION_COUNTRY_CACHE_TTL = 60
+TG_LION_ORDER_LOCK = asyncio.Lock()
 _IMAP_RATE: Dict[str, float] = {}
 
 
@@ -6087,6 +6093,325 @@ async def remove_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ==================== WITHDRAW STORE ====================
+
+def _tg_lion_fetch_countries_sync() -> Tuple[Optional[List[dict]], str]:
+    api_key = os.environ.get("TG_LION_API_KEY", "").strip()
+    your_id = os.environ.get("TG_LION_USER_ID", "").strip()
+    if not api_key or not your_id:
+        return None, "not_configured"
+
+    params = urllib.parse.urlencode({
+        "action": "available_countries",
+        "apiKey": api_key,
+        "YourID": your_id,
+    })
+    request = urllib.request.Request(
+        f"{TG_LION_API_URL}?{params}",
+        headers={"Accept": "application/json", "User-Agent": "mohammmedppp-bot"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            raw_body = response.read(1024 * 1024 + 1)
+        if len(raw_body) > 1024 * 1024:
+            return None, "invalid_response"
+        payload = json.loads(raw_body.decode("utf-8"))
+    except Exception as exc:
+        # Do not log the request URL: the provider requires the API key in its query string.
+        logger.warning("TG-Lion country-list request failed (%s)", type(exc).__name__)
+        return None, "provider_error"
+
+    if not isinstance(payload, dict) or str(payload.get("status", "")).lower() != "ok":
+        return None, "provider_error"
+    raw_countries = payload.get("countries")
+    if isinstance(raw_countries, dict):
+        entries = raw_countries.items()
+    elif isinstance(raw_countries, list):
+        entries = [(item.get("code", ""), item) for item in raw_countries if isinstance(item, dict)]
+    else:
+        return None, "invalid_response"
+
+    countries = []
+    seen_codes = set()
+    for fallback_code, item in entries:
+        if not isinstance(item, dict):
+            continue
+        code = str(item.get("code") or fallback_code or "").strip().upper()
+        if not code or len(code) > 12 or code in seen_codes:
+            continue
+        try:
+            source_price = Decimal(str(item.get("price")))
+            if not source_price.is_finite() or source_price < 0:
+                continue
+            base_price_cents = money_to_cents(source_price)
+            quantity = int(item.get("qty", 0))
+        except (InvalidOperation, TypeError, ValueError, OverflowError):
+            continue
+        if quantity <= 0:
+            continue
+        name = str(item.get("name") or code).strip()[:120]
+        countries.append({
+            "code": code,
+            "name": name,
+            "qty": quantity,
+            "base_price_cents": base_price_cents,
+            "price_cents": base_price_cents + 5,
+        })
+        seen_codes.add(code)
+    return countries, "ok"
+
+
+async def get_tg_lion_countries(force_refresh: bool = False) -> Tuple[Optional[List[dict]], str]:
+    now = time.monotonic()
+    cached = TG_LION_COUNTRY_CACHE.get("countries")
+    if not force_refresh and cached is not None and now < TG_LION_COUNTRY_CACHE.get("expires_at", 0.0):
+        return cached, "ok"
+    countries, status = await asyncio.to_thread(_tg_lion_fetch_countries_sync)
+    if status == "ok" and countries is not None:
+        TG_LION_COUNTRY_CACHE["countries"] = countries
+        TG_LION_COUNTRY_CACHE["expires_at"] = time.monotonic() + TG_LION_COUNTRY_CACHE_TTL
+    return countries, status
+
+
+def tg_lion_country_keyboard(countries: List[dict], page: int) -> Tuple[InlineKeyboardMarkup, int]:
+    page_size = 14
+    total_pages = max(1, (len(countries) + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+    start = page * page_size
+    rows = []
+    page_items = countries[start:start + page_size]
+    for index in range(0, len(page_items), 2):
+        row = []
+        for country in page_items[index:index + 2]:
+            label = f"{country['code']} | {cents_to_money(country['price_cents']):.2f}$"
+            row.append(InlineKeyboardButton(label[:64], callback_data=f"tg_lion_country:{country['code']}:{page}"))
+        rows.append(row)
+    for start_page in range(0, total_pages, 7):
+        rows.append([
+            InlineKeyboardButton(
+                f"[{page_num + 1}]" if page_num == page else str(page_num + 1),
+                callback_data=f"tg_lion_page:{page_num}",
+            )
+            for page_num in range(start_page, min(start_page + 7, total_pages))
+        ])
+    return InlineKeyboardMarkup(rows), total_pages
+
+
+async def tg_lion_catalog(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 0):
+    if not await check_forced_channel(update, context):
+        return
+    query = update.callback_query
+    if not load_config().get("tg_lion_store_visible", True):
+        if query:
+            await query.answer("هذا القسم مخفي حالياً.", show_alert=True)
+        return
+    if query:
+        await query.answer()
+    countries, status = await get_tg_lion_countries()
+    if status != "ok" or countries is None:
+        if query:
+            await query.edit_message_text("⚠️ الخدمة غير متاحة حالياً. يرجى التواصل مع الإدارة.")
+        return
+    if not countries:
+        if query:
+            await query.edit_message_text("📭 لا توجد دول متاحة حالياً.")
+        return
+    keyboard, total_pages = tg_lion_country_keyboard(countries, page)
+    page = max(0, min(int(page), total_pages - 1))
+    text = (f"🌍 اختر الدولة\n"
+            f"السعر المعروض يشمل زيادة 0.05$ — الصفحة {page + 1}/{total_pages}")
+    if query:
+        await query.edit_message_text(text, reply_markup=keyboard)
+
+
+async def tg_lion_country_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, code: str, page: int):
+    if not await check_forced_channel(update, context):
+        return
+    query = update.callback_query
+    if not load_config().get("tg_lion_store_visible", True):
+        if query:
+            await query.answer("هذا القسم مخفي حالياً.", show_alert=True)
+        return
+    if query:
+        await query.answer()
+    countries, status = await get_tg_lion_countries()
+    if status != "ok" or countries is None:
+        if query:
+            await query.edit_message_text("⚠️ الخدمة غير متاحة حالياً. يرجى التواصل مع الإدارة.")
+        return
+    country = next((item for item in countries if item["code"] == code.upper()), None)
+    if not country:
+        if query:
+            await query.edit_message_text("⚠️ لم تعد هذه الدولة متاحة. افتح القائمة وحاول مجدداً.")
+        return
+    await show_tg_lion_confirmation(update, context, country, page)
+
+
+async def show_tg_lion_confirmation(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    country: dict,
+    page: int,
+    price_changed: bool = False,
+):
+    query = update.callback_query
+    if not query:
+        return
+    price_cents = country["price_cents"]
+    context.user_data["tg_lion_confirmation"] = {
+        "code": country["code"],
+        "price_cents": price_cents,
+        "page": page,
+        "expires_at": time.time() + 600,
+    }
+    change_note = "⚠️ تغيّر السعر؛ راجعه ثم أكّد الطلب مجدداً.\n\n" if price_changed else ""
+    text = (
+        f"{change_note}تأكيد طلب رقم من <b>{html.escape(country['name'])}</b>\n\n"
+        f"💰 السعر النهائي: <b>{cents_to_money(price_cents):.2f}$</b>\n"
+        f"📦 المتوفر عند المزوّد: {country['qty']}\n\n"
+        "سيُخصم السعر من رصيدك ويُرسل الطلب إلى قروب الطلبات للتنفيذ اليدوي."
+    )
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ تأكيد الطلب", callback_data=f"tg_lion_confirm:{country['code']}:{page}")],
+        [InlineKeyboardButton("إلغاء الطلب", callback_data=f"tg_lion_cancel:{page}")],
+    ])
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+
+
+async def tg_lion_cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int):
+    context.user_data.pop("tg_lion_confirmation", None)
+    await tg_lion_catalog(update, context, page)
+
+
+async def tg_lion_confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE, code: str, page: int):
+    if not await check_forced_channel(update, context):
+        return
+    query = update.callback_query
+    if not query:
+        return
+    config = load_config()
+    if not config.get("tg_lion_store_visible", True):
+        context.user_data.pop("tg_lion_confirmation", None)
+        await query.answer("هذا القسم مخفي حالياً.", show_alert=True)
+        return
+    confirmation = context.user_data.get("tg_lion_confirmation")
+    if (not confirmation or confirmation.get("code") != code.upper()
+            or confirmation.get("page") != page or confirmation.get("expires_at", 0) < time.time()):
+        context.user_data.pop("tg_lion_confirmation", None)
+        await query.answer("انتهت صلاحية التأكيد. اختر الدولة مجدداً.", show_alert=True)
+        return
+    await query.answer()
+    countries, status = await get_tg_lion_countries(force_refresh=True)
+    if status != "ok" or countries is None:
+        await query.edit_message_text("⚠️ تعذر تحديث قائمة الدول. لم يتم خصم أي رصيد؛ حاول مجدداً لاحقاً.")
+        return
+    country = next((item for item in countries if item["code"] == code.upper()), None)
+    if not country:
+        context.user_data.pop("tg_lion_confirmation", None)
+        await query.edit_message_text("⚠️ لم تعد هذه الدولة متاحة. لم يتم خصم أي رصيد.")
+        return
+    if country["price_cents"] != confirmation["price_cents"]:
+        await show_tg_lion_confirmation(update, context, country, page, price_changed=True)
+        return
+
+    _, purchase_channel = get_configured_purchase_channels()
+    if not purchase_channel:
+        await query.edit_message_text("⚠️ قروب الطلبات غير مضبوط. لم يتم خصم أي رصيد؛ تواصل مع الإدارة.")
+        return
+
+    async with TG_LION_ORDER_LOCK:
+        confirmation = context.user_data.get("tg_lion_confirmation")
+        if (not confirmation or confirmation.get("code") != code.upper()
+                or confirmation.get("page") != page or confirmation.get("expires_at", 0) < time.time()):
+            await query.edit_message_text("انتهت صلاحية هذا الطلب أو تم تسجيله مسبقاً.")
+            return
+        user = update.effective_user
+        user_data = get_user(user.id)
+        total_cents = country["price_cents"]
+        if spendable_balance_cents(user_data) < total_cents:
+            await query.edit_message_text(
+                f"❌ رصيدك غير كافٍ. رصيدك: {cents_to_money(spendable_balance_cents(user_data)):.2f}$، "
+                f"السعر: {cents_to_money(total_cents):.2f}$",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("إلغاء الطلب", callback_data=f"tg_lion_cancel:{page}")]
+                ]),
+            )
+            return
+
+        snapshot = {
+            key: (key in user_data, user_data.get(key))
+            for key in ("balance", "admin_received_balance", "spent_balance", "transactions")
+        }
+        if not debit_spendable_balance(user_data, total_cents):
+            await query.edit_message_text("❌ رصيدك غير كافٍ. لم يتم تسجيل الطلب.")
+            return
+        add_transaction(
+            user_data,
+            "purchase",
+            cents_to_money(total_cents),
+            f"حسابات لكل الدول: {country['name']} ({country['code']})",
+        )
+        try:
+            save_user(user.id, user_data)
+        except Exception as exc:
+            for key, (existed, value) in snapshot.items():
+                if existed:
+                    user_data[key] = value
+                else:
+                    user_data.pop(key, None)
+            try:
+                save_user(user.id, user_data)
+            except Exception:
+                logger.error("TG-Lion order balance rollback failed (%s)", type(exc).__name__)
+            await query.edit_message_text("⚠️ تعذر تسجيل الخصم. لم يتم إرسال الطلب؛ حاول مجدداً لاحقاً.")
+            return
+
+        order_ref = secrets.token_hex(4).upper()
+        username = f"@{user.username}" if user.username else "لا يوجد"
+        order_text = (
+            "📥 <b>طلب جديد — حسابات لكل الدول</b>\n\n"
+            f"🧾 رقم الطلب: <code>{order_ref}</code>\n"
+            f"👤 العضو: {html.escape(user.full_name or 'غير معروف')}\n"
+            f"🆔 المعرف: {html.escape(username)} | <code>{user.id}</code>\n"
+            f"🌍 الدولة: <b>{html.escape(country['name'])}</b> (<code>{html.escape(country['code'])}</code>)\n"
+            f"💵 سعر المزوّد المعروض: {cents_to_money(country['base_price_cents']):.2f}$\n"
+            f"💳 المخصوم من العضو: {cents_to_money(total_cents):.2f}$\n"
+            f"📦 الكمية المتاحة وقت الطلب: {country['qty']}\n"
+            "📝 الحالة: بانتظار التنفيذ اليدوي\n"
+            f"⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
+        )
+        try:
+            await context.bot.send_message(
+                chat_id=purchase_channel,
+                text=order_text,
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception as exc:
+            for key, (existed, value) in snapshot.items():
+                if existed:
+                    user_data[key] = value
+                else:
+                    user_data.pop(key, None)
+            try:
+                save_user(user.id, user_data)
+            except Exception:
+                logger.error("TG-Lion order refund failed (%s)", type(exc).__name__)
+            logger.warning("TG-Lion order receipt delivery failed (%s)", type(exc).__name__)
+            await query.edit_message_text(
+                "⚠️ تعذر إرسال الطلب إلى قروب الطلبات؛ أُعيد الرصيد إن أمكن. حاول مجدداً لاحقاً."
+            )
+            return
+
+        context.user_data.pop("tg_lion_confirmation", None)
+        await query.edit_message_text(
+            f"✅ تم تسجيل طلبك وإرساله إلى قروب الطلبات.\n\n"
+            f"🧾 رقم الطلب: <code>{order_ref}</code>\n"
+            f"🌍 الدولة: <b>{html.escape(country['name'])}</b>\n"
+            f"💰 المخصوم: <b>{cents_to_money(total_cents):.2f}$</b>\n"
+            "سيتم تنفيذ الطلب يدوياً من الإدارة.",
+            parse_mode=ParseMode.HTML,
+        )
+
+
 async def withdraw_store(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
@@ -6094,11 +6419,14 @@ async def withdraw_store(update: Update, context: ContextTypes.DEFAULT_TYPE):
     send_message = (query.edit_message_text if query else update.effective_message.reply_text)
     config = load_config()
     categories = config.get("store_categories", [])
-    if not categories:
+    lion_visible = config.get("tg_lion_store_visible", True)
+    if not categories and not lion_visible:
         await send_message("🛒 لا توجد فئات.",
                            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
         return
     buttons = [(f"📂 {cat['name']}", f"user_category:{cat['id']}") for cat in categories]
+    if lion_visible:
+        buttons.append(("🌍 حسابات لكل الدول", "tg_lion_catalog"))
     buttons.append(("🔙 القائمة الرئيسية", "main_menu"))
     await send_message("🛒 *قسم السحب*\nاختر الفئة:", parse_mode=ParseMode.MARKDOWN,
                        reply_markup=kb_vertical(buttons))
@@ -6652,10 +6980,27 @@ async def owner_store_section(update: Update, context: ContextTypes.DEFAULT_TYPE
     config = load_config()
     categories = config.get("store_categories", [])
     buttons = [(f"📂 {cat['name']}", f"store_category:{cat['id']}") for cat in categories]
+    visible = config.get("tg_lion_store_visible", True)
+    toggle_label = "👁️ إخفاء حسابات لكل الدول عن الأعضاء" if visible else "👁️ إظهار حسابات لكل الدول للأعضاء"
+    buttons.append((toggle_label, "toggle_tg_lion_store"))
     buttons.append(("➕ إضافة فئة", "store_add_category"))
     buttons.append(("🔙 إعدادات المالك", "owner_panel"))
     await query.edit_message_text("🛒 *إدارة المبيعات*", parse_mode=ParseMode.MARKDOWN,
                                   reply_markup=kb_vertical(buttons))
+
+
+
+async def toggle_tg_lion_store(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    config = load_config()
+    visible = not config.get("tg_lion_store_visible", True)
+    config["tg_lion_store_visible"] = visible
+    save_config(config)
+    await query.answer("✅ تم إظهار القسم للأعضاء." if visible else "✅ تم إخفاء القسم عن الأعضاء.")
+    await owner_store_section(update, context)
 
 
 async def store_add_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -6968,6 +7313,36 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await set_purchase_channel(update, context, 2)
     elif data == "withdraw_store":
         await withdraw_store(update, context)
+    elif data == "tg_lion_catalog":
+        await tg_lion_catalog(update, context)
+    elif data.startswith("tg_lion_page:"):
+        try:
+            page = int(data.split(":", 1)[1])
+        except (ValueError, IndexError):
+            page = 0
+        await tg_lion_catalog(update, context, page)
+    elif data.startswith("tg_lion_country:"):
+        parts = data.split(":")
+        if len(parts) == 3:
+            try:
+                await tg_lion_country_menu(update, context, parts[1], int(parts[2]))
+            except ValueError:
+                await update.callback_query.answer("تعذر فتح الدولة.", show_alert=True)
+    elif data.startswith("tg_lion_confirm:"):
+        parts = data.split(":")
+        if len(parts) == 3:
+            try:
+                await tg_lion_confirm_order(update, context, parts[1], int(parts[2]))
+            except ValueError:
+                await update.callback_query.answer("تعذر تأكيد الطلب.", show_alert=True)
+    elif data.startswith("tg_lion_cancel:"):
+        try:
+            page = int(data.split(":", 1)[1])
+        except (ValueError, IndexError):
+            page = 0
+        await tg_lion_cancel_order(update, context, page)
+    elif data == "toggle_tg_lion_store":
+        await toggle_tg_lion_store(update, context)
     elif data.startswith("user_category:"):
         await user_category_menu(update, context)
     elif data.startswith("user_buy:"):
