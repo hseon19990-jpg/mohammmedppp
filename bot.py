@@ -528,6 +528,69 @@ TG_LION_COUNTRY_CACHE_TTL = 60
 TG_LION_ORDER_LOCK = asyncio.Lock()
 _IMAP_RATE: Dict[str, float] = {}
 
+_TG_LION_CALLING_CODES = {
+    "AD": "376", "AE": "971", "AF": "93", "AG": "1268", "AI": "1264",
+    "AL": "355", "AM": "374", "AO": "244", "AR": "54", "AS": "1684",
+    "AT": "43", "AU": "61", "AW": "297", "AX": "358", "AZ": "994",
+    "BA": "387", "BB": "1246", "BD": "880", "BE": "32", "BF": "226",
+    "BG": "359", "BH": "973", "BI": "257", "BJ": "229", "BL": "590",
+    "BM": "1441", "BN": "673", "BO": "591", "BQ": "599", "BR": "55",
+    "BS": "1242", "BT": "975", "BW": "267", "BY": "375", "BZ": "501",
+    "CA": "1", "CC": "61", "CD": "243", "CF": "236", "CG": "242",
+    "CH": "41", "CI": "225", "CK": "682", "CL": "56", "CM": "237",
+    "CN": "86", "CO": "57", "CR": "506", "CU": "53", "CV": "238",
+    "CW": "599", "CX": "61", "CY": "357", "CZ": "420", "DE": "49",
+    "DJ": "253", "DK": "45", "DM": "1767", "DO": "1809", "DZ": "213",
+    "EC": "593", "EE": "372", "EG": "20", "ER": "291", "ES": "34",
+    "ET": "251", "FI": "358", "FJ": "679", "FK": "500", "FM": "691",
+    "FO": "298", "FR": "33", "GA": "241", "GB": "44", "GD": "1473",
+    "GE": "995", "GF": "594", "GG": "44", "GH": "233", "GI": "350",
+    "GL": "299", "GM": "220", "GN": "224", "GP": "590", "GQ": "240",
+    "GR": "30", "GT": "502", "GU": "1671", "GW": "245", "GY": "592",
+    "HK": "852", "HN": "504", "HR": "385", "HT": "509", "HU": "36",
+    "ID": "62", "IE": "353", "IL": "972", "IM": "44", "IN": "91",
+    "IO": "246", "IQ": "964", "IR": "98", "IS": "354", "IT": "39",
+    "JE": "44", "JM": "1876", "JO": "962", "JP": "81", "KE": "254",
+    "KG": "996", "KH": "855", "KI": "686", "KM": "269", "KN": "1869",
+    "KP": "850", "KR": "82", "KW": "965", "KY": "1345", "KZ": "7",
+    "LA": "856", "LB": "961", "LC": "1758", "LI": "423", "LK": "94",
+    "LR": "231", "LS": "266", "LT": "370", "LU": "352", "LV": "371",
+    "LY": "218", "MA": "212", "MC": "377", "MD": "373", "ME": "382",
+    "MF": "590", "MG": "261", "MH": "692", "MK": "389", "ML": "223",
+    "MM": "95", "MN": "976", "MO": "853", "MP": "1670", "MQ": "596",
+    "MR": "222", "MS": "1664", "MT": "356", "MU": "230", "MV": "960",
+    "MW": "265", "MX": "52", "MY": "60", "MZ": "258", "NA": "264",
+    "NC": "687", "NE": "227", "NF": "672", "NG": "234", "NI": "505",
+    "NL": "31", "NO": "47", "NP": "977", "NR": "674", "NU": "683",
+    "NZ": "64", "OM": "968", "PA": "507", "PE": "51", "PF": "689",
+    "PG": "675", "PH": "63", "PK": "92", "PL": "48", "PM": "508",
+    "PR": "1787", "PS": "970", "PT": "351", "PW": "680", "PY": "595",
+    "QA": "974", "RE": "262", "RO": "40", "RS": "381", "RU": "7",
+    "RW": "250", "SA": "966", "SB": "677", "SC": "248", "SD": "249",
+    "SE": "46", "SG": "65", "SH": "290", "SI": "386", "SK": "421",
+    "SL": "232", "SM": "378", "SN": "221", "SO": "252", "SR": "597",
+    "SS": "211", "ST": "239", "SV": "503", "SX": "1721", "SY": "963",
+    "SZ": "268", "TC": "1649", "TD": "235", "TG": "228", "TH": "66",
+    "TJ": "992", "TK": "690", "TL": "670", "TM": "993", "TN": "216",
+    "TO": "676", "TR": "90", "TT": "1868", "TV": "688", "TW": "886",
+    "TZ": "255", "UA": "380", "UG": "256", "US": "1", "UY": "598",
+    "UZ": "998", "VA": "379", "VC": "1784", "VE": "58", "VG": "1284",
+    "VI": "1340", "VN": "84", "VU": "678", "WF": "681", "WS": "685",
+    "YE": "967", "YT": "262", "ZA": "27", "ZM": "260", "ZW": "263",
+}
+
+
+def tg_lion_country_flag(country_code: str) -> str:
+    code = str(country_code or "").upper()
+    if len(code) != 2 or not all("A" <= letter <= "Z" for letter in code):
+        return "🌐"
+    return "".join(chr(ord(letter) + 127397) for letter in code)
+
+
+def normalize_tg_lion_calling_code(value: Any) -> str:
+    digits = re.sub(r"\D", "", str(value or ""))
+    return digits[2:] if digits.startswith("00") else digits
+
 
 def _sessions_to_json() -> dict:
     return {str(uid): asdict(sess) for uid, sess in SESSIONS.items()}
@@ -6149,9 +6212,18 @@ def _tg_lion_fetch_countries_sync() -> Tuple[Optional[List[dict]], str]:
         if quantity <= 0:
             continue
         name = str(item.get("name") or code).strip()[:120]
+        raw_calling_code = next(
+            (item.get(key) for key in (
+                "calling_code", "callingCode", "dial_code", "dialCode",
+                "phone_code", "phoneCode", "prefix",
+            ) if item.get(key)),
+            _TG_LION_CALLING_CODES.get(code, ""),
+        )
         countries.append({
             "code": code,
             "name": name,
+            "flag": str(item.get("flag") or tg_lion_country_flag(code)),
+            "calling_code": normalize_tg_lion_calling_code(raw_calling_code),
             "qty": quantity,
             "base_price_cents": base_price_cents,
             "price_cents": base_price_cents + 5,
@@ -6182,7 +6254,8 @@ def tg_lion_country_keyboard(countries: List[dict], page: int) -> Tuple[InlineKe
     for index in range(0, len(page_items), 2):
         row = []
         for country in page_items[index:index + 2]:
-            label = f"{country['code']} | {cents_to_money(country['price_cents']):.2f}$"
+            flag = country.get("flag") or tg_lion_country_flag(country["code"])
+            label = f"{flag} {country['code']} | {cents_to_money(country['price_cents']):.2f}$"
             row.append(InlineKeyboardButton(label[:64], callback_data=f"tg_lion_country:{country['code']}:{page}"))
         rows.append(row)
     for start_page in range(0, total_pages, 7):
@@ -6193,6 +6266,9 @@ def tg_lion_country_keyboard(countries: List[dict], page: int) -> Tuple[InlineKe
             )
             for page_num in range(start_page, min(start_page + 7, total_pages))
         ])
+    rows.append([
+        InlineKeyboardButton("🔎 بحث عن الدولة", callback_data=f"tg_lion_search_start:{page}")
+    ])
     return InlineKeyboardMarkup(rows), total_pages
 
 
@@ -6217,10 +6293,98 @@ async def tg_lion_catalog(update: Update, context: ContextTypes.DEFAULT_TYPE, pa
         return
     keyboard, total_pages = tg_lion_country_keyboard(countries, page)
     page = max(0, min(int(page), total_pages - 1))
-    text = (f"🌍 اختر الدولة\n"
-            f"السعر المعروض يشمل زيادة 0.05$ — الصفحة {page + 1}/{total_pages}")
     if query:
-        await query.edit_message_text(text, reply_markup=keyboard)
+        # Telegram does not allow an empty message text; this invisible separator
+        # leaves the country keyboard visible without the old heading/pricing text.
+        await query.edit_message_text("\u2063", reply_markup=keyboard)
+
+
+async def tg_lion_search_start(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int):
+    query = update.callback_query
+    if not query:
+        return
+    if not load_config().get("tg_lion_store_visible", True):
+        await query.answer("هذا القسم مخفي حالياً.", show_alert=True)
+        return
+    await query.answer()
+    context.user_data["tg_lion_search_page"] = max(0, page)
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("↩️ الرجوع إلى الدول", callback_data=f"tg_lion_search_cancel:{max(0, page)}")
+    ]])
+    await query.edit_message_text(
+        "أرسل رمز الاتصال الدولي للدولة، مثل 964 أو +964.",
+        reply_markup=keyboard,
+    )
+
+
+async def tg_lion_search_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int):
+    context.user_data.pop("tg_lion_search_page", None)
+    await tg_lion_catalog(update, context, page)
+
+
+def tg_lion_find_countries_by_calling_code(countries: List[dict], calling_code: str) -> List[dict]:
+    normalized = normalize_tg_lion_calling_code(calling_code)
+    return [
+        country for country in countries
+        if normalize_tg_lion_calling_code(
+            country.get("calling_code") or _TG_LION_CALLING_CODES.get(country.get("code", "").upper(), "")
+        ) == normalized
+    ]
+
+
+async def tg_lion_search_country_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    page = max(0, int(context.user_data.get("tg_lion_search_page", 0)))
+    raw_text = update.message.text.strip()
+    candidate = raw_text.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+    if candidate.startswith("+"):
+        candidate = candidate[1:]
+    elif candidate.startswith("00"):
+        candidate = candidate[2:]
+    if not candidate.isascii() or not candidate.isdigit() or not 1 <= len(candidate) <= 4:
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("↩️ الرجوع إلى الدول", callback_data=f"tg_lion_search_cancel:{page}")
+        ]])
+        await update.message.reply_text(
+            "أرسل رمز اتصال دولياً بالأرقام فقط، مثل 964 أو +964.",
+            reply_markup=keyboard,
+        )
+        return
+
+    countries, status = await get_tg_lion_countries()
+    if status != "ok" or countries is None:
+        await update.message.reply_text(
+            "⚠️ تعذر تحميل قائمة الدول الآن. أعد إرسال الرمز بعد قليل."
+        )
+        return
+
+    matches = tg_lion_find_countries_by_calling_code(countries, candidate)
+    context.user_data.pop("tg_lion_search_page", None)
+    back_keyboard = [[
+        InlineKeyboardButton("↩️ الرجوع إلى الدول", callback_data=f"tg_lion_search_cancel:{page}")
+    ]]
+    if not matches:
+        await update.message.reply_text(
+            f"لم أجد دولة متاحة برمز الاتصال +{candidate}.",
+            reply_markup=InlineKeyboardMarkup(back_keyboard),
+        )
+        return
+
+    rows = []
+    for country in matches:
+        flag = country.get("flag") or tg_lion_country_flag(country["code"])
+        label = (
+            f"{flag} {country['name']} | "
+            f"{cents_to_money(country['price_cents']):.2f}$"
+        )
+        rows.append([InlineKeyboardButton(
+            label[:64],
+            callback_data=f"tg_lion_search_result:{country['code']}:{page}",
+        )])
+    rows.extend(back_keyboard)
+    await update.message.reply_text(
+        f"الدول المتاحة لرمز الاتصال +{candidate}:",
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
 
 
 async def tg_lion_country_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, code: str, page: int):
@@ -6760,6 +6924,10 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
     if not await check_forced_channel(update, context):
+        return
+
+    if "tg_lion_search_page" in context.user_data:
+        await tg_lion_search_country_input(update, context)
         return
 
     if context.user_data.get("contest_build_step"):
@@ -7321,6 +7489,25 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except (ValueError, IndexError):
             page = 0
         await tg_lion_catalog(update, context, page)
+    elif data.startswith("tg_lion_search_start:"):
+        try:
+            page = int(data.split(":", 1)[1])
+        except (ValueError, IndexError):
+            page = 0
+        await tg_lion_search_start(update, context, page)
+    elif data.startswith("tg_lion_search_cancel:"):
+        try:
+            page = int(data.split(":", 1)[1])
+        except (ValueError, IndexError):
+            page = 0
+        await tg_lion_search_cancel(update, context, page)
+    elif data.startswith("tg_lion_search_result:"):
+        parts = data.split(":")
+        if len(parts) == 3:
+            try:
+                await tg_lion_country_menu(update, context, parts[1], int(parts[2]))
+            except ValueError:
+                await update.callback_query.answer("تعذر فتح الدولة.", show_alert=True)
     elif data.startswith("tg_lion_country:"):
         parts = data.split(":")
         if len(parts) == 3:
