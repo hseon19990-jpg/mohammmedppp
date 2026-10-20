@@ -13,6 +13,7 @@ import html
 import imaplib
 import io
 import json
+from urllib.parse import urlsplit
 import logging
 import os
 import re
@@ -385,6 +386,42 @@ def save_config(data: dict):
     invalidate_config_cache()
 
 
+def normalize_support_link(value: Any) -> str:
+    link = str(value or "").strip()
+    if not link or len(link) > 500 or any(character.isspace() for character in link):
+        return ""
+    try:
+        parsed = urlsplit(link)
+    except ValueError:
+        return ""
+    if (parsed.scheme.lower() != "https" or not parsed.hostname
+            or parsed.username or parsed.password):
+        return ""
+    return link
+
+
+def maintenance_is_enabled() -> bool:
+    return bool(load_config().get("maintenance_mode", False))
+
+
+def maintenance_toggle_button():
+    if maintenance_is_enabled():
+        return ("🛑 إيقاف الصيانة", "maintenance_toggle")
+    return ("🛠️ تشغيل الصيانة", "maintenance_toggle")
+
+
+async def maintenance_access_allowed(update: Update) -> bool:
+    user = update.effective_user
+    if not maintenance_is_enabled() or (user and user.id == OWNER_ID):
+        return True
+    notice = "🛠️ البوت تحت الصيانة حالياً. يرجى المحاولة لاحقاً."
+    if update.callback_query:
+        await update.callback_query.answer(notice, show_alert=True)
+    elif update.effective_message:
+        await update.effective_message.reply_text(notice)
+    return False
+
+
 # ==================== ADMINS ====================
 def load_admins() -> set:
     data = load_json(ADMINS_DB)
@@ -644,6 +681,16 @@ def kb_vertical(buttons: List[Union[tuple, list]]) -> InlineKeyboardMarkup:
 
 def kb_single(button_text: str, callback_data: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton(button_text, callback_data=callback_data)]])
+
+
+def member_menu_keyboard(buttons: List[Union[tuple, list]]) -> InlineKeyboardMarkup:
+    rows = list(kb_vertical(buttons).inline_keyboard)
+    support_link = normalize_support_link(load_config().get("support_link"))
+    if support_link:
+        rows.append([InlineKeyboardButton("📞 تواصل مع الدعم", url=support_link)])
+    else:
+        rows.append([InlineKeyboardButton("📞 تواصل مع الدعم", callback_data="support_link_unavailable")])
+    return InlineKeyboardMarkup(rows)
 
 
 def clear_edit_state(context: ContextTypes.DEFAULT_TYPE):
@@ -1421,6 +1468,8 @@ async def check_contest_award(context: ContextTypes.DEFAULT_TYPE, uid: int):
 
 # ==================== MAIN MENU ====================
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await maintenance_access_allowed(update):
+        return
     if not await check_forced_channel(update, context):
         return
     clear_edit_state(context)
@@ -1444,11 +1493,11 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = prefix + "👋 مرحباً بك!\nاختر من القائمة أدناه:"
     if update.callback_query:
         try:
-            await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
+            await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=member_menu_keyboard(buttons))
         except Exception:
             await update.callback_query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
     else:
-        await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=member_menu_keyboard(buttons))
 
 
 # ==================== TOP SELLERS VIEW ====================
@@ -3331,6 +3380,8 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("contest_build", None)
     context.user_data.pop("contest_build_step", None)
     buttons = [
+        maintenance_toggle_button(),
+        ("🔗 رابط الدعم", "support_link_settings"),
         ("👥 الإدارية", "admin_management"),
         ("💰 أسعار المستويات", "set_tier_prices"),
         ("📋 الطلبات", "approval_requests"),
@@ -3349,8 +3400,71 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ("💰 خصم/منح نقاط", "points_management"),
         ("🔙 القائمة الرئيسية", "main_menu")
     ]
-    await query.edit_message_text("⚙️ *لوحة تحكم المالك*\n\nاختر الإعداد الذي تريد تعديله:",
-                                  parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
+    maintenance_status = "مفعّل" if maintenance_is_enabled() else "متوقف"
+    await query.edit_message_text(
+        f"⚙️ *لوحة تحكم المالك*\n\nوضع الصيانة: *{maintenance_status}*\nاختر الإعداد الذي تريد تعديله:",
+        parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
+
+
+async def toggle_maintenance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.edit_message_text("🚫 هذا الخيار للمالك فقط.")
+        return
+    config = load_config()
+    config["maintenance_mode"] = not bool(config.get("maintenance_mode", False))
+    save_config(config)
+    await owner_panel(update, context)
+
+
+async def support_link_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.edit_message_text("🚫 هذا الخيار للمالك فقط.")
+        return
+    context.user_data["step"] = "support_link_input"
+    current_link = normalize_support_link(load_config().get("support_link")) or "غير مضبوط"
+    await query.edit_message_text(
+        "🔗 إعداد رابط الدعم\n\n"
+        f"الرابط الحالي: {current_link}\n\n"
+        "أرسل رابطاً يبدأ بـ https://، أو أرسل «حذف» لإزالته.",
+        reply_markup=kb_single("❌ إلغاء", "support_link_cancel"))
+
+
+async def handle_support_link_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        context.user_data.pop("step", None)
+        return
+    text = update.message.text.strip()
+    if text.casefold() in {"حذف", "مسح", "delete", "remove"}:
+        config = load_config()
+        config.pop("support_link", None)
+        save_config(config)
+        context.user_data.pop("step", None)
+        await update.message.reply_text(
+            "✅ تم حذف رابط الدعم.",
+            reply_markup=kb_single("⚙️ لوحة المالك", "owner_panel"))
+        return
+    support_link = normalize_support_link(text)
+    if not support_link:
+        await update.message.reply_text(
+            "⚠️ الرابط غير صالح. أرسل رابط HTTPS صحيحاً، مثل https://t.me/your_support.")
+        return
+    config = load_config()
+    config["support_link"] = support_link
+    save_config(config)
+    context.user_data.pop("step", None)
+    await update.message.reply_text(
+        "✅ تم حفظ رابط الدعم وسيظهر للأعضاء في القائمة الرئيسية.",
+        reply_markup=kb_single("⚙️ لوحة المالك", "owner_panel"))
+
+
+async def cancel_support_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        await update.callback_query.edit_message_text("🚫 هذا الخيار للمالك فقط.")
+        return
+    context.user_data.pop("step", None)
+    await owner_panel(update, context)
 
 
 # ==================== CONTEST MENU ====================
@@ -4527,6 +4641,8 @@ async def set_video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def handle_video_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await maintenance_access_allowed(update):
+        return
     if update.effective_user.id != OWNER_ID:
         return
     video_type = context.user_data.get("pending_video_type")
@@ -6923,7 +7039,13 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     user_id = update.effective_user.id
 
+    if not await maintenance_access_allowed(update):
+        return
     if not await check_forced_channel(update, context):
+        return
+
+    if context.user_data.get("step") == "support_link_input":
+        await handle_support_link_input(update, context)
         return
 
     if "tg_lion_search_page" in context.user_data:
@@ -7293,6 +7415,8 @@ async def handle_referral(update: Update, context: ContextTypes.DEFAULT_TYPE, re
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await maintenance_access_allowed(update):
+        return
     if not await check_forced_channel(update, context):
         return
     clear_edit_state(context)
@@ -7311,6 +7435,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await maintenance_access_allowed(update):
+        return
     await withdraw_store(update, context)
 
 
@@ -7322,6 +7448,8 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     if data == "noop":
         await query.answer()
+        return
+    if not await maintenance_access_allowed(update):
         return
     await query.answer()
     if not await check_forced_channel(update, context):
@@ -7357,6 +7485,16 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_video_in_add(update, context)
     elif data == "owner_panel":
         await owner_panel(update, context)
+    elif data == "maintenance_toggle":
+        await toggle_maintenance(update, context)
+    elif data == "support_link_settings":
+        await support_link_settings(update, context)
+    elif data == "support_link_cancel":
+        await cancel_support_link(update, context)
+    elif data == "support_link_unavailable":
+        await query.edit_message_text(
+            "ℹ️ لم يضبط المالك رابط الدعم بعد.",
+            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
     elif data == "contest_menu":
         await contest_menu(update, context)
     elif data == "contest_create_start":
@@ -7589,6 +7727,8 @@ async def placeholder(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== COMMANDS ====================
 async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await maintenance_access_allowed(update):
+        return
     if not await check_forced_channel(update, context):
         return
     user_id = update.effective_user.id
@@ -7607,7 +7747,9 @@ async def owner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
         await update.message.reply_text("🚫 هذا الأمر للمالك فقط.")
         return
-    buttons = [("👥 الإدارية", "admin_management"),
+    buttons = [maintenance_toggle_button(),
+               ("🔗 رابط الدعم", "support_link_settings"),
+               ("👥 الإدارية", "admin_management"),
                ("💰 أسعار المستويات", "set_tier_prices"),
                ("📋 الطلبات", "approval_requests"),
                ("🎯 إدارة المسابقة", "contest_menu"),
@@ -7627,6 +7769,8 @@ async def owner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await maintenance_access_allowed(update):
+        return
     if not await check_forced_channel(update, context):
         return
     if not is_admin(update.effective_user.id):
