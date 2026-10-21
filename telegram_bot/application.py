@@ -16,6 +16,15 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
 
+    # ═══ تدفق بيع إيميل جديد ═══
+    sell_step = context.user_data.get("step")
+    if sell_step == "sell_new_email_totp":
+        await handle_sell_new_email_totp(update, context)
+        return
+    if sell_step == "sell_new_email_app_pass":
+        await handle_sell_new_email_app_pass(update, context)
+        return
+
     if context.user_data.get("step") == "support_link_input":
         await handle_support_link_input(update, context)
         return
@@ -173,6 +182,18 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await main_menu(update, context)
     elif data == "add_account":
         await add_account_start(update, context)
+    # ═══ بيع إيميل جديد ═══
+    elif data == "sell_new_email":
+        await sell_new_email_start(update, context)
+    elif data == "sell_new_email_complete":
+        await sell_new_email_complete(update, context)
+    elif data == "sell_new_email_cancel":
+        await sell_new_email_cancel(update, context)
+    elif data == "sell_new_email_finish":
+        await sell_new_email_finish(update, context)
+    elif data.startswith("sell_show_video:"):
+        await sell_show_video(update, context)
+    # ═══ استمرار التدفق القديم ═══
     elif data == "cancel":
         await add_account_cancel(update, context)
     elif data.startswith("complete_more:"):
