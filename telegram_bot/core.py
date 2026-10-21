@@ -548,6 +548,7 @@ DEFAULT_USER_FIELDS = {
     "pending_purchases": [], "used_app_passwords": [], "transactions": [],
     "contest_wins": [], "consecutive_rejections": 0, "ban_until": "",
     "ban_level": 0, "total_rejections": 0,
+    "language": "ar",
 }
 
 
@@ -585,6 +586,41 @@ def add_transaction(user_data: dict, kind: str, amount: float, note: str = "", e
         "note": note[:200], "email": email,
         "at": datetime.now(timezone.utc).isoformat(),
     })
+
+
+# ==================== LANGUAGE HELPERS ====================
+SUPPORTED_LANGUAGES = ("ar", "en", "ru")
+
+
+def get_user_language(user_id: int) -> str:
+    user_data = get_user(user_id)
+    lang = str(user_data.get("language", "ar") or "ar").lower()
+    if lang not in SUPPORTED_LANGUAGES:
+        return "ar"
+    return lang
+
+
+def set_user_language(user_id: int, lang: str):
+    if lang not in SUPPORTED_LANGUAGES:
+        return
+    user_data = get_user(user_id)
+    user_data["language"] = lang
+    save_user(user_id, user_data)
+
+
+def t(user_id: int, key: str, **kwargs) -> str:
+    """ترجمة مفتاح حسب لغة المستخدم."""
+    from telegram_bot.locales import TRANSLATIONS
+    lang = get_user_language(user_id)
+    text = (
+        TRANSLATIONS.get(lang, {}).get(key)
+        or TRANSLATIONS.get("ar", {}).get(key)
+        or key
+    )
+    try:
+        return text.format(**kwargs)
+    except (KeyError, IndexError):
+        return text
 
 
 # ==================== AUTO-BAN HELPERS ====================
