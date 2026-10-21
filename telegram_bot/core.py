@@ -25,6 +25,7 @@ import string
 import time
 import urllib.parse
 import urllib.request
+from urllib.parse import urlsplit  # <--- تم إضافة هذا السطر لحل المشكلة
 from dataclasses import dataclass, asdict
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import datetime, timedelta, timezone
