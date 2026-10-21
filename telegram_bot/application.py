@@ -194,6 +194,10 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await sell_new_email_start(update, context)
     elif data == "sell_new_email_complete":
         await sell_new_email_complete(update, context)
+    elif data == "sell_new_email_finish_prompt":
+        await sell_new_email_finish_prompt(update, context)
+    elif data == "sell_new_email_finish_confirm":
+        await sell_new_email_finish_confirm(update, context)
     elif data == "sell_new_email_cancel":
         await sell_new_email_cancel(update, context)
     elif data == "sell_new_email_finish":
