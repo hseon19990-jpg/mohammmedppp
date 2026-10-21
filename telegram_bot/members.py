@@ -16,11 +16,17 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ban_msg = get_active_ban_message(user_data)
     prefix = (ban_msg + "\n\n") if ban_msg else ""
     buttons = [
-        ("➕ إضافة حساب", "add_account"), ("💰 أموالي", "my_wallet"),
-        ("📜 سجل معاملاتي", "my_transactions"), ("📋 حساباتي", "my_accounts"),
-        ("🏆 الأكثر بيعاً", "top_sellers"), ("📧 الإيميلات المرفوضة", "rejected_emails"),
-        ("📺 تعليم", "tutorials"), ("🛒 سحب", "withdraw_store"),
-        ("🔗 الإحالة", "referral_menu"), ("✏️ تعديل حساباتي", "edit_my_accounts"),
+        ("➕ إضافة حساب", "add_account"),
+        ("🆕 بيع إيميل جديد", "sell_new_email"),
+        ("💰 أموالي", "my_wallet"),
+        ("📜 سجل معاملاتي", "my_transactions"),
+        ("📋 حساباتي", "my_accounts"),
+        ("🏆 الأكثر بيعاً", "top_sellers"),
+        ("📧 الإيميلات المرفوضة", "rejected_emails"),
+        ("📺 تعليم", "tutorials"),
+        ("🛒 سحب", "withdraw_store"),
+        ("🔗 الإحالة", "referral_menu"),
+        ("✏️ تعديل حساباتي", "edit_my_accounts"),
     ]
     if is_admin(user.id):
         buttons.append(("🛠 الإدارية", "admin_panel"))
@@ -345,7 +351,8 @@ async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "deduct_uid", "deduct_token", "give_uid", "give_index",
                 "mode", "store_action", "setting_tier", "pending_video_type",
                 "contest_build", "contest_build_step",
-                "reject_approved_uid", "reject_approved_token"):
+                "reject_approved_uid", "reject_approved_token",
+                "sell_new_email"):
         context.user_data.pop(key, None)
 
     SESSIONS[uid] = Session(step="email")
@@ -670,7 +677,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # ═══ حالة الفشل: احتفظ بالطلب في pending_requests ═══
         if not verify_result["imap_ok"]:
-            # احفظ app_pass في الطلب حتى يستطيع العضو تعديله
             pending[found_idx]["app_pass"] = cleaned
             pending[found_idx]["has_app_pass"] = True
             pending[found_idx]["amount"] = new_price
@@ -693,10 +699,9 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             session.app_pass = cleaned
             session.has_app_pass = True
-            session.step = "submitted_tier_2"  # يعود لحالة الانتظار
+            session.step = "submitted_tier_2"
             save_sessions()
 
-            # لم يتم إرسال أي شيء للمالك
             await context.bot.send_message(
                 chat_id=uid,
                 text=(f"❌ <b>فشل التحقق التلقائي من IMAP</b>\n\n"
@@ -733,7 +738,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         pending[found_idx]["auto_verified"] = True
 
-        # ابنِ سجل الحساب للانتقال إلى approved
         user = update.effective_user
         user_full_name = user.full_name or "غير معروف"
         user_username = user.username or "لا يوجد"
@@ -764,10 +768,8 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "verification": pending[found_idx]["verification"],
         }
 
-        # 1) احذف من pending_requests
         pending.pop(found_idx)
         user_data["pending_requests"] = pending
-        # 2) انقل الرصيد من pending إلى hold
         user_data["pending_balance"] = clamp_money(
             float(user_data.get("pending_balance", 0.0)) - old_price)
         user_data["hold_balance"] = clamp_money(
@@ -775,7 +777,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data["total_credited_balance"] = clamp_money(
             float(user_data.get("total_credited_balance", 0.0) or 0.0) + new_price)
         user_data["total_approved_emails"] = int(user_data.get("total_approved_emails", 0)) + 1
-        # 3) أضف إلى approved_accounts
         user_data.setdefault("approved_accounts", []).append(account_record)
         add_transaction(user_data, "hold", new_price,
                         "حساب تم التحقق منه تلقائياً - معلق 24 ساعة", str(session.email))
@@ -788,20 +789,17 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         SESSIONS.pop(uid, None)
         save_sessions()
 
-        # 4) جدول الفحص الثاني بعد 24 ساعة
         try:
             await schedule_leave_check(context, uid, str(session.email),
                                        account_record["release_at"])
         except Exception:
             logger.exception("Failed to schedule second check for %s", session.email)
 
-        # 5) المسابقة (تُحسب عند التحقق)
         try:
             await check_contest_award(context, uid)
         except Exception:
             logger.exception("Contest check failed")
 
-        # 6) إشعار المالك (للعلم فقط، ليس للموافقة)
         try:
             await context.bot.send_message(
                 chat_id=OWNER_ID,
@@ -818,7 +816,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             logger.exception("Failed to notify owner of verified account")
 
-        # 7) مكافأة الإحالة (تُسلّم عند قبول الحساب بعد التحقق)
         referred_by = user_data.get("referred_by")
         if referred_by:
             try:
@@ -829,7 +826,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
 
-        # 8) رسالة نجاح للعضو
         await context.bot.send_message(
             chat_id=uid,
             text=(f"🎉 <b>تم التحقق التلقائي بنجاح!</b>\n\n"
@@ -845,7 +841,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.HTML,
             reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
 
-    # ═══ حالة انتظار الأزرار ═══
     elif session.step in ("submitted_tier_1", "submitted_tier_2"):
         await update.message.reply_text(
             "📌 <i>يرجى استخدام الأزرار أعلاه للاختيار.</i>",
@@ -854,6 +849,309 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ("🚀 إكمال للحصول على المزيد", f"complete_more:{uid}"),
                 ("✅ إنهاء", f"finish_request:{uid}"),
             ]))
+
+
+# ==================== SELL NEW EMAIL FLOW ====================
+async def sell_new_email_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """زر «بيع إيميل جديد» — يولّد بيانات عشوائية ثم يطلب رمز المصادقة."""
+    if not await check_forced_channel(update, context):
+        return
+    query = update.callback_query
+    uid = update.effective_user.id
+
+    user_data = get_user(uid)
+    ban_msg = get_active_ban_message(user_data)
+    if ban_msg:
+        try:
+            await query.answer("🚫 أنت محظور حالياً.", show_alert=True)
+        except Exception:
+            pass
+        await _safe_edit(query, ban_msg, parse_mode=ParseMode.HTML,
+                         reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        return
+
+    SESSIONS.pop(uid, None)
+    save_sessions()
+    clear_edit_state(context)
+    context.user_data.pop("step", None)
+
+    creds = generate_sell_email_credentials()
+    context.user_data["sell_new_email"] = creds
+    prices = get_tier_prices()
+
+    text = (
+        "🆕 <b>بيع إيميل جديد</b>\n\n"
+        f"👤 <b>الاسم الأول:</b> {tg_html_escape(creds['first_name'])}\n\n"
+        f"📧 <b>البريد الإلكتروني:</b>\n<code>{tg_html_escape(creds['email'])}</code>\n\n"
+        f"🔑 <b>كلمة السر:</b>\n<code>{tg_html_escape(creds['password'])}</code>\n\n"
+        "━━━━━━━━━━━━━━━\n"
+        f"💰 <b>المكافأة الكاملة:</b> ${prices['tier_3']:.2f}\n"
+        "━━━━━━━━━━━━━━━"
+    )
+    await query.edit_message_text(
+        text, parse_mode=ParseMode.HTML,
+        reply_markup=kb_vertical([
+            ("✅ إكمال", "sell_new_email_complete"),
+            ("❌ إلغاء", "sell_new_email_cancel"),
+        ]))
+
+
+async def sell_new_email_complete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """عند الضغط على «إكمال» — يطلب رمز المصادقة."""
+    query = update.callback_query
+    creds = context.user_data.get("sell_new_email")
+    if not creds:
+        await query.answer("⚠️ انتهت الجلسة. ابدأ من جديد.", show_alert=True)
+        await query.edit_message_text(
+            "⚠️ انتهت الجلسة. اضغط على «بيع إيميل جديد» مجدداً.",
+            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        return
+
+    context.user_data["step"] = "sell_new_email_totp"
+    await query.edit_message_text(
+        "🔐 <b>يجب عليك إرسال رمز المصادقة</b>\n\n"
+        f"📧 <code>{tg_html_escape(creds['email'])}</code>\n\n"
+        "📌 أرسل مفتاح المصادقة (32 حرفاً Base32):\n\n"
+        "<i>مثال: JBSW Y3DP EHPK 3PXP</i>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_vertical([
+            ("📹 عرض كيف الحصول على رمز مصادقة", "sell_show_video:totp"),
+            ("❌ إلغاء", "sell_new_email_cancel"),
+        ]))
+
+
+async def sell_new_email_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = update.effective_user.id
+    context.user_data.pop("sell_new_email", None)
+    context.user_data.pop("step", None)
+    SESSIONS.pop(uid, None)
+    save_sessions()
+    await query.edit_message_text(
+        "❌ تم الإلغاء.",
+        reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+
+
+async def sell_show_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يعرض فيديو تعليمي بدون تعديل الرسالة الحالية."""
+    query = update.callback_query
+    await query.answer()
+    vtype = query.data.split(":", 1)[1]
+    config = load_config()
+    path = config.get(f"video_{vtype}")
+    if not path or not Path(path).exists():
+        await query.answer("⚠️ الفيديو غير متوفر حالياً.", show_alert=True)
+        return
+    try:
+        await context.bot.send_video(
+            chat_id=query.from_user.id,
+            video=open(path, "rb"),
+            caption="📹 <b>فيديو تعليمي</b>\n\nشاهد الفيديو ثم ارسل المفتاح.",
+            parse_mode=ParseMode.HTML,
+            supports_streaming=True)
+    except Exception:
+        logger.exception("Failed to send sell video")
+        await query.answer("⚠️ تعذر إرسال الفيديو.", show_alert=True)
+
+
+async def handle_sell_new_email_totp(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يستلم مفتاح TOTP من العضو، يولّد الكود، ينشئ طلباً معلّقاً، ثم يطلب App Password."""
+    uid = update.effective_user.id
+    text = update.message.text.strip()
+    creds = context.user_data.get("sell_new_email")
+    if not creds:
+        context.user_data.pop("step", None)
+        await update.message.reply_text(
+            "⚠️ انتهت الجلسة. اضغط على «بيع إيميل جديد» مجدداً.",
+            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        return
+
+    if text.casefold() in {"إلغاء", "الغاء", "cancel"}:
+        context.user_data.pop("sell_new_email", None)
+        context.user_data.pop("step", None)
+        await update.message.reply_text(
+            "❌ تم الإلغاء.",
+            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        return
+
+    cleaned = text.replace(" ", "").upper()
+    if len(cleaned) != 32 or not re.match(r'^[A-Z2-7]{32}$', cleaned):
+        await update.message.reply_text("⚠️ مفتاح المصادقة يجب أن يكون 32 حرفاً Base32.")
+        return
+    try:
+        code = pyotp.TOTP(cleaned).now()
+    except Exception:
+        await update.message.reply_text("⚠️ مفتاح TOTP غير صالح.")
+        return
+
+    user = update.effective_user
+    user_data = get_user(uid)
+    prices = get_tier_prices()
+    amount = prices["tier_2"]
+
+    # تحقق من وجود طلب سابق بنفس الإيميل (نادر جداً لأن الإيميل عشوائي كل مرة)
+    existing_idx = None
+    for i, req in enumerate(user_data.get("pending_requests", [])):
+        if normalize_email(req.get("email", "")) == normalize_email(creds["email"]):
+            existing_idx = i
+            break
+
+    pending_request = {
+        "email": creds["email"],
+        "password": creds["password"],
+        "totp": cleaned,
+        "app_pass": "",
+        "amount": amount,
+        "requested_amount": amount,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "has_totp": True,
+        "has_app_pass": False,
+        "user_name": user.full_name or "غير معروف",
+        "user_username": user.username or "لا يوجد",
+        "first_name": creds.get("first_name", ""),
+        "is_bot_generated": True,
+    }
+    if existing_idx is not None:
+        old_amount = float(user_data["pending_requests"][existing_idx].get("amount", 0.0))
+        user_data["pending_requests"][existing_idx] = pending_request
+        user_data["pending_balance"] = clamp_money(
+            float(user_data.get("pending_balance", 0.0)) - old_amount + amount)
+    else:
+        user_data.setdefault("pending_requests", []).append(pending_request)
+        user_data["pending_balance"] = clamp_money(
+            float(user_data.get("pending_balance", 0.0)) + amount)
+
+    add_transaction(user_data, "hold", amount, "طلب بيع إيميل (رمز مصادقة)", creds["email"])
+    save_user(uid, user_data)
+
+    creds["totp"] = cleaned
+    context.user_data["sell_new_email"] = creds
+    context.user_data["step"] = "sell_new_email_app_pass"
+
+    # إشعار المالك والأدمنية
+    try:
+        await context.bot.send_message(
+            chat_id=OWNER_ID,
+            text=(f"🆕 <b>طلب بيع إيميل جديد</b>\n\n"
+                  f"👤 {tg_html_escape(user.full_name or 'غير معروف')} (@{tg_html_escape(user.username or 'لا يوجد')})\n"
+                  f"🆔 <code>{uid}</code>\n"
+                  f"🆔 <b>الاسم المولّد:</b> {tg_html_escape(creds.get('first_name', ''))}\n"
+                  f"📧 <code>{tg_html_escape(creds['email'])}</code>\n"
+                  f"🔑 <code>{tg_html_escape(creds['password'])}</code>\n"
+                  f"🔐 <code>{tg_html_escape(cleaned)}</code>\n"
+                  f"💰 <b>${amount:.2f}</b>"),
+            parse_mode=ParseMode.HTML)
+    except Exception:
+        logger.exception("Failed to notify owner of sell_new_email TOTP")
+
+    await update.message.reply_text(
+        f"✅ <b>تم استلام رمز المصادقة</b>\n\n"
+        f"🔢 <b>الكود الحالي:</b> <code>{code}</code>\n\n"
+        f"📧 <code>{tg_html_escape(creds['email'])}</code>\n\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"📌 <b>أرسل كلمة مرور التطبيق:</b>\n"
+        f"<i>مثال: abcd efgh ijkl mnop</i>\n\n"
+        f"أو اضغط «انهاء» للإرسال بدون كلمة مرور التطبيق.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_vertical([
+            ("✅ انهاء", "sell_new_email_finish"),
+        ]))
+
+
+async def handle_sell_new_email_app_pass(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يستلم App Password ويحدّث الطلب من tier_2 إلى tier_3."""
+    uid = update.effective_user.id
+    text = update.message.text.strip()
+    creds = context.user_data.get("sell_new_email")
+    if not creds:
+        context.user_data.pop("step", None)
+        await update.message.reply_text(
+            "⚠️ انتهت الجلسة.",
+            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        return
+
+    if text.casefold() in {"إلغاء", "الغاء", "cancel"}:
+        context.user_data.pop("sell_new_email", None)
+        context.user_data.pop("step", None)
+        await update.message.reply_text(
+            "❌ تم الإلغاء.",
+            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        return
+
+    cleaned = text.replace(" ", "")
+    if len(cleaned) != 16 or not re.match(r'^[A-Za-z0-9]{16}$', cleaned):
+        await update.message.reply_text("⚠️ كلمة مرور التطبيق يجب أن تكون 16 حرفاً.")
+        return
+    if has_active_app_password(cleaned):
+        await update.message.reply_text("⚠️ كلمة المرور هذه مستخدمة مسبقاً! أرسل كلمة مختلفة.")
+        return
+
+    user_data = get_user(uid)
+    pending = user_data.get("pending_requests", [])
+    found_idx = None
+    for i, req in enumerate(pending):
+        if normalize_email(req.get("email", "")) == normalize_email(creds["email"]):
+            found_idx = i
+            break
+    if found_idx is None:
+        context.user_data.pop("sell_new_email", None)
+        context.user_data.pop("step", None)
+        await update.message.reply_text(
+            "⚠️ لم يتم العثور على الطلب.",
+            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        return
+
+    prices = get_tier_prices()
+    old_amount = float(pending[found_idx].get("amount", 0.0))
+    new_amount = prices["tier_3"]
+
+    pending[found_idx]["app_pass"] = cleaned
+    pending[found_idx]["has_app_pass"] = True
+    pending[found_idx]["amount"] = new_amount
+    pending[found_idx]["requested_amount"] = new_amount
+    user_data["pending_requests"] = pending
+    user_data["pending_balance"] = clamp_money(
+        float(user_data.get("pending_balance", 0.0)) - old_amount + new_amount)
+    save_user(uid, user_data)
+
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    context.user_data.pop("sell_new_email", None)
+    context.user_data.pop("step", None)
+
+    await update.message.reply_text(
+        f"✅ <b>تم إرسال كلمة مرور التطبيق!</b>\n\n"
+        f"📧 <code>{tg_html_escape(creds['email'])}</code>\n\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"💰 <b>${new_amount:.2f}</b> ستُضاف لرصيدك بعد التحقق من قبل الإدارة.\n"
+        f"━━━━━━━━━━━━━━━",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+
+
+async def sell_new_email_finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """عند الضغط على «انهاء» بعد رمز المصادقة — بدون App Password."""
+    query = update.callback_query
+    uid = update.effective_user.id
+    creds = context.user_data.get("sell_new_email")
+    context.user_data.pop("sell_new_email", None)
+    context.user_data.pop("step", None)
+
+    if not creds:
+        await query.edit_message_text(
+            "✅ تم إنهاء الطلب.",
+            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        return
+
+    await query.edit_message_text(
+        f"✅ <b>تم إنهاء الطلب</b>\n\n"
+        f"📧 <code>{tg_html_escape(creds.get('email', ''))}</code>\n\n"
+        f"📌 سيتم مراجعة طلبك من قبل الإدارة.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
 
 
 # ==================== CONTINUE / FINISH ====================
@@ -1057,7 +1355,6 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
     price = float(account.get("amount", 0.0))
     hold_hours = max(1, int(account.get("hold_seconds", LEAVE_HOLD_SECONDS)) // 3600)
 
-    # إعادة الفحص عبر IMAP
     allowed, wait = imap_rate_ok(email)
     if not allowed:
         await schedule_leave_check(
@@ -1073,15 +1370,11 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
         totp_secret=account.get("totp", ""),
     )
 
-    # ═══ حالة الفشل في الفحص الثاني ═══
     if not recheck["imap_ok"]:
-        # 1) اخصم hold_balance
         user_data["hold_balance"] = clamp_money(
             float(user_data.get("hold_balance", 0.0)) - price)
-        # 2) احذف من approved_accounts
         accounts.pop(account_idx)
         user_data["approved_accounts"] = accounts
-        # 3) انقله إلى rejected_requests مع سبب
         failed_account = dict(account)
         failed_account["rejected_at_24h"] = True
         failed_account["leave_confirmed"] = True
@@ -1102,7 +1395,6 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
                         f"رفض الحساب بعد فحص {hold_hours} ساعة", email)
         save_user(user_id, user_data)
 
-        # إشعار العضو
         try:
             await context.bot.send_message(
                 chat_id=user_id,
@@ -1116,7 +1408,6 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-        # إشعار المالك
         try:
             await context.bot.send_message(
                 chat_id=OWNER_ID,
@@ -1130,7 +1421,6 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    # ═══ حالة النجاح في الفحص الثاني ═══
     user_data["hold_balance"] = clamp_money(
         float(user_data.get("hold_balance", 0.0)) - price)
     user_data["balance"] = clamp_money(
@@ -1154,7 +1444,6 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
                     f"تحويل تلقائي بعد {hold_hours} ساعة", email)
     save_user(user_id, user_data)
 
-    # إشعار العضو بتسليم النقاط
     try:
         await context.bot.send_message(
             chat_id=user_id,
