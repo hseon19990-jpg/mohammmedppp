@@ -1495,7 +1495,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=member_menu_keyboard(buttons))
         except Exception:
-            await update.callback_query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
+            await update.callback_query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=member_menu_keyboard(buttons))
     else:
         await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=member_menu_keyboard(buttons))
 
