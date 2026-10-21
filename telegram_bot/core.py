@@ -13,14 +13,15 @@ import html
 import imaplib
 import io
 import json
-from urllib.parse import urlsplit
 import logging
 import os
+import random
 import re
 import secrets
 import shutil
 import socket
 import ssl
+import string
 import time
 import urllib.parse
 import urllib.request
@@ -285,6 +286,30 @@ ADMIN_TIER3_PRICE = 0.20
 BAN_THRESHOLD = 3
 BAN_FIRST_DURATION_HOURS = 24
 BAN_WEEKLY_DURATION_HOURS = 24 * 7
+
+# ==================== SELL NEW EMAIL GENERATOR ====================
+FIRST_NAMES_EN = [
+    "James", "John", "Robert", "Michael", "William", "David", "Richard", "Joseph",
+    "Thomas", "Charles", "Christopher", "Daniel", "Matthew", "Anthony", "Mark",
+    "Donald", "Steven", "Paul", "Andrew", "Joshua", "Kenneth", "Kevin", "Brian",
+    "George", "Edward", "Ronald", "Timothy", "Jason", "Jeffrey", "Ryan",
+    "Jacob", "Gary", "Nicholas", "Eric", "Jonathan", "Stephen", "Larry",
+    "Justin", "Scott", "Brandon", "Benjamin", "Samuel", "Frank", "Gregory",
+    "Alexander", "Patrick", "Jack", "Dennis", "Jerry", "Tyler", "Aaron",
+    "Jose", "Adam", "Nathan", "Henry", "Douglas", "Zachary", "Peter",
+    "Ethan", "Walter", "Kyle", "Harold", "Jeremy", "Terry", "Keith", "Roger",
+]
+
+
+def generate_sell_email_credentials() -> dict:
+    """توليد اسم + إيميل + باسورد عشوائي لعملية (بيع إيميل جديد)."""
+    first_name = random.choice(FIRST_NAMES_EN)
+    letters = "".join(secrets.choice(string.ascii_lowercase) for _ in range(18))
+    digits = "".join(secrets.choice(string.digits) for _ in range(5))
+    email = f"{letters}{digits}@gmail.com"
+    password = "".join(secrets.choice(string.ascii_letters) for _ in range(10))
+    return {"first_name": first_name, "email": email, "password": password}
+
 
 # ==================== REJECT REASONS ====================
 REJECT_REASON_KEYS = ("email", "password", "totp", "app_pass", "phone", "other")
