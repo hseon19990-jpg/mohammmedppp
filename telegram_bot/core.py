@@ -1,10 +1,5 @@
 """
-Advanced Telegram Account Manager Bot - v6.1
-- IMAP verification happens ONLY at step 4 (app_pass)
-- On first IMAP success: account → approved_accounts + hold 24h
-- On first IMAP failure: request stays in pending_requests
-- On second IMAP success (after 24h): hold → balance (credits released)
-- On second IMAP failure (after 24h): account → rejected_requests
+Advanced Telegram Account Manager Bot - v6.3
 """
 
 import asyncio
@@ -26,6 +21,7 @@ import time
 import urllib.parse
 import urllib.request
 from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
 from dataclasses import dataclass, asdict
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import datetime, timedelta, timezone
@@ -310,6 +306,74 @@ def generate_sell_email_credentials() -> dict:
     email = f"{letters}{digits}@gmail.com"
     password = "".join(secrets.choice(string.ascii_letters) for _ in range(10))
     return {"first_name": first_name, "email": email, "password": password}
+
+
+# ==================== EMAIL AVAILABILITY CHECKER ====================
+_EMAIL_AVAILABILITY_CACHE: Dict[str, Tuple[float, Optional[bool]]] = {}
+_LAST_CHECK_TIME = 0.0
+_CHECK_MIN_INTERVAL = 1.5
+
+
+def check_email_availability_sync(username: str) -> Optional[bool]:
+    """
+    فحص توفر اسم المستخدم في جوجل بدون فتح متصفح (خفيف جداً على السيرفر).
+    يعيد:
+      True  -> متاح (غير محجوز)
+      False -> محجوز (مستخدم)
+      None  -> فشل الفحص (خطأ شبكة أو حظر مؤقت)
+    """
+    try:
+        url = "https://accounts.google.com/InputValidator?resource=SignUp"
+        payload = json.dumps({
+            "input01": {
+                "Input": "GmailAddress",
+                "GmailAddress": username,
+                "FirstName": "Test",
+                "LastName": "User",
+            }
+        }).encode("utf-8")
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Content-Type": "application/json",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        req = Request(url, data=payload, headers=headers, method="POST")
+        with urlopen(req, timeout=10) as response:
+            body = response.read().decode("utf-8", errors="ignore")
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(data, dict) and data.get("errors"):
+            return False
+        return True
+    except Exception as exc:
+        logger.warning(f"Availability check failed: {type(exc).__name__}")
+        return None
+
+
+async def check_email_availability(email: str, use_cache: bool = True) -> Optional[bool]:
+    """نسخة Async مع كاش + Rate Limit."""
+    global _LAST_CHECK_TIME
+
+    if use_cache:
+        cached = _EMAIL_AVAILABILITY_CACHE.get(email)
+        if cached and (time.time() - cached[0]) < 180:
+            return cached[1]
+
+    elapsed = time.time() - _LAST_CHECK_TIME
+    if elapsed < _CHECK_MIN_INTERVAL:
+        await asyncio.sleep(_CHECK_MIN_INTERVAL - elapsed)
+    _LAST_CHECK_TIME = time.time()
+
+    username = email.split("@")[0]
+    result = await asyncio.to_thread(check_email_availability_sync, username)
+
+    if result is not None:
+        _EMAIL_AVAILABILITY_CACHE[email] = (time.time(), result)
+
+    return result
 
 
 # ==================== REJECT REASONS ====================
@@ -961,6 +1025,29 @@ def get_imap_host(email: str) -> Tuple[str, int]:
     return ("", 0)
 
 
+def is_valid_email_domain(email: str) -> bool:
+    """التحقق من أن نطاق الإيميل موجود فعلاً وليس وهمياً (DNS Check)"""
+    if not email or "@" not in email:
+        return False
+    domain = email.rsplit("@", 1)[-1].strip().lower()
+    if not domain:
+        return False
+    host, port = get_imap_host(email)
+    if not host:
+        return False
+    try:
+        socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        return True
+    except socket.gaierror:
+        try:
+            socket.getaddrinfo(domain, 25, type=socket.SOCK_STREAM)
+            return True
+        except socket.gaierror:
+            return False
+    except Exception:
+        return True
+
+
 def _imap_login_sync(email: str, password: str, timeout: int = 15) -> Tuple[bool, str]:
     host, port = get_imap_host(email)
     if not host:
@@ -1507,6 +1594,51 @@ async def check_contest_award(context: ContextTypes.DEFAULT_TYPE, uid: int):
             f"🎁 مكافآت: <code>{len(awarded_now)}</code>"), parse_mode=ParseMode.HTML)
     except Exception:
         pass
+
+
+# ==================== AUTO CLEANUP JOB ====================
+async def cleanup_fake_requests_job(context: ContextTypes.DEFAULT_TYPE):
+    """مهمة تلقائية لرفض الطلبات الوهمية أو المعلقة لفترة طويلة"""
+    users = load_json(USERS_DB)
+    changed = False
+    for uid, encrypted_data in users.items():
+        ud = decrypt_user_data(encrypted_data)
+        pending = ud.get("pending_requests", [])
+        new_pending = []
+        rejected_any = False
+        for req in pending:
+            if req.get("has_app_pass"):
+                new_pending.append(req)
+                continue
+            
+            timestamp = req.get("timestamp")
+            is_old = False
+            if timestamp:
+                try:
+                    dt = datetime.fromisoformat(timestamp)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    if (datetime.now(timezone.utc) - dt).total_seconds() > 12 * 3600:
+                        is_old = True
+                except Exception:
+                    pass
+            
+            email = req.get("email", "")
+            valid_domain = await asyncio.to_thread(is_valid_email_domain, email)
+            
+            if not valid_domain or is_old:
+                move_request_to_rejected(ud, req, "other", "رفض تلقائي: إيميل وهمي أو لم يكتمل خلال 12 ساعة")
+                rejected_any = True
+                changed = True
+            else:
+                new_pending.append(req)
+                
+        if rejected_any:
+            ud["pending_requests"] = new_pending
+            save_user(int(uid), ud)
+            
+    if changed:
+        logger.info("Auto-rejected fake or abandoned pending requests.")
 
 
 # Shared date and time helpers
