@@ -5,6 +5,7 @@ from telegram_bot.members import *
 from telegram_bot.owner import *
 from telegram_bot.approvals import *
 from telegram_bot.store import *
+from telegram_bot.locales import TRANSLATIONS
 
 # ==================== TEXT INPUT ROUTER ====================
 async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -182,6 +183,10 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "main_menu":
         await main_menu(update, context)
+    elif data == "language_menu":
+        await language_menu(update, context)
+    elif data.startswith("set_language:"):
+        await set_language_handler(update, context)
     elif data == "add_account":
         await add_account_start(update, context)
     # ═══ بيع إيميل جديد ═══
