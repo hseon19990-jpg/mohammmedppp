@@ -625,6 +625,18 @@ def register_rejection_and_maybe_ban(user_data: dict) -> Optional[Tuple[int, str
     duration_hours = _ban_duration_hours_for_level(ban_level)
     ban_until = datetime.now(timezone.utc) + timedelta(hours=duration_hours)
     user_data["ban_until"] = ban_until.isoformat()
+    # ═══ حذف جميع الإيميلات المعلقة عند تفعيل الحظر ═══
+    pending = user_data.get("pending_requests", []) or []
+    if pending:
+        total_pending = 0.0
+        for req in pending:
+            try:
+                total_pending += float(req.get("amount", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                continue
+        user_data["pending_balance"] = clamp_money(
+            float(user_data.get("pending_balance", 0.0)) - total_pending)
+    user_data["pending_requests"] = []
     duration_text = "يوم واحد" if ban_level == 1 else "أسبوع"
     return ban_level, duration_text
 
