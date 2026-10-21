@@ -372,7 +372,8 @@ async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• + رمز مصادقة → <b>${prices['tier_2']:.2f}</b>\n"
         f"• + كلمة مرور التطبيق → <b>${prices['tier_3']:.2f}</b>\n\n"
         f"✨ <i>لن يُقبل الحساب نهائياً إلا بعد التحقق التلقائي الكامل عند إرسال كلمة مرور التطبيق.</i>\n\n"
-        f"⚠️ <b>يجب إكمال الـ 4 خطوات بالكامل.</b>\n\n"
+        f"⚠️ <b>يجب إكمال الـ 4 خطوات بالكامل.</b>\n"
+        f"⚠️ <b>تنبيه: رفض 3 إيميلات متتالية سيؤدي إلى حظرك لمدة 24 ساعة وحذف جميع إيميلاتك المعلقة.</b>\n\n"
         f"📧 <b>الخطوة 1/4</b>: أرسل الإيميل:",
         parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
 
@@ -454,11 +455,27 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             SESSIONS.pop(uid, None); save_sessions()
             return
         if active_status == "rejected":
+            user_data = get_user(uid)
+            rejected_count = sum(
+                1 for r in user_data.get("rejected_requests", [])
+                if normalize_email(r.get("email", "")) == email
+            )
+            if rejected_count >= 3:
+                await update.message.reply_text(
+                    f"❌ <b>هذا الإيميل رُفض 3 مرات كحد أقصى!</b>\n\n"
+                    f"📧 <code>{tg_html_escape(email)}</code>\n\n"
+                    f"لا يمكنك إرسال هذا الإيميل مجدداً.",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+                SESSIONS.pop(uid, None); save_sessions()
+                return
+            remaining = 3 - rejected_count
             await update.message.reply_text(
-                "❌ هذا الإيميل مرفوض سابقاً! لا يمكنك إعادة إرساله.",
-                reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
-            SESSIONS.pop(uid, None); save_sessions()
-            return
+                f"⚠️ <b>هذا الإيميل رُفض سابقاً</b>\n\n"
+                f"📧 <code>{tg_html_escape(email)}</code>\n"
+                f"📊 <b>المحاولات المتبقية:</b> {remaining} من 3\n\n"
+                f"⚠️ <i>تنبيه: رفض 3 إيميلات متتالية سيؤدي إلى حظرك لمدة 24 ساعة.</i>",
+                parse_mode=ParseMode.HTML)
         if active_status == "pending":
             user_data = get_user(uid)
             pending = user_data.get("pending_requests", [])
@@ -728,6 +745,7 @@ async def sell_new_email_start(update: Update, context: ContextTypes.DEFAULT_TYP
         "━━━━━━━━━━━━━━━\n"
         f"💰 <b>المكافأة الكاملة (4 خطوات):</b> ${prices['tier_3']:.2f}\n"
         "━━━━━━━━━━━━━━━\n\n"
+        "⚠️ <b>تنبيه: رفض 3 إيميلات متتالية سيؤدي إلى حظرك لمدة 24 ساعة وحذف جميع إيميلاتك المعلقة.</b>\n\n"
         "📌 <b>الخطوات:</b>\n"
         "1. قم بإنشاء هذا الإيميل على Gmail\n"
         "2. فعّل التحقق بخطوتين (2FA)\n"
