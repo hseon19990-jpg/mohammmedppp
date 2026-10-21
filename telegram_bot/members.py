@@ -427,24 +427,41 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
             await update.message.reply_text("❌ إيميل غير صالح. أرسل إيميلاً صحيحاً:")
             return
-            
-        # التحقق من النطاق (لمنع الإيميلات الوهمية)
-        valid_domain = await asyncio.to_thread(is_valid_email_domain, email)
-        if not valid_domain:
-            await update.message.reply_text("❌ هذا الإيميل وهمي أو النطاق غير موجود. أرسل إيميلاً حقيقياً:")
-            return
 
-        # ═══ فحص التوفر (للإيميل القديم يجب أن يكون محجوزاً) ═══
-        avail_result = await check_email_availability(email)
-        if avail_result is True:
-            await update.message.reply_text(
-                "❌ <b>هذا الإيميل غير موجود!</b>\n\n"
-                "هذا الإيميل لا يزال <b>متاحاً للإنشاء</b>، مما يعني أنه لم يتم إنشاؤه مسبقاً على جوجل.\n\n"
-                "📌 الإيميل القديم يجب أن يكون حساباً موجوداً بالفعل.",
-                parse_mode=ParseMode.HTML,
-                reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
-            SESSIONS.pop(uid, None); save_sessions()
-            return
+        # ★★★ فحص إلزامي: جوجل → فحص توفر صارم / غير جوجل → DNS ★★★
+        if is_gmail_address(email):
+            avail_result = await check_email_availability_retry(email, max_attempts=3)
+            if avail_result is True:
+                # الإيميل شاغر → غير موجود → رفض
+                await update.message.reply_text(
+                    "❌ <b>هذا الإيميل غير موجود!</b>\n\n"
+                    "هذا الإيميل لا يزال <b>متاحاً للإنشاء</b>، مما يعني أنه لم يتم إنشاؤه مسبقاً على جوجل.\n\n"
+                    "📌 الإيميل القديم يجب أن يكون حساباً موجوداً بالفعل (محجوز).",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+                SESSIONS.pop(uid, None); save_sessions()
+                return
+            if avail_result is None:
+                # تعذّر التحقق → رفض (لا نمرر بدون تأكيد)
+                await update.message.reply_text(
+                    "⚠️ <b>تعذّر التحقق من الإيميل حالياً</b>\n\n"
+                    f"📧 <code>{tg_html_escape(email)}</code>\n\n"
+                    "🔍 خوادم جوجل لم تعطِ نتيجة مؤكدة بعد 3 محاولات.\n"
+                    "لا يمكن المتابعة بدون إثبات أن الإيميل محجوز.\n\n"
+                    "📌 أعد إرسال الإيميل بعد قليل.",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+                SESSIONS.pop(uid, None); save_sessions()
+                return
+            # avail_result is False → الإيميل محجوز ✓ نكمل
+        else:
+            # غير جوجل → فحص DNS فقط (IMAP سيتحقق لاحقاً)
+            valid_domain = await asyncio.to_thread(is_valid_email_domain, email)
+            if not valid_domain:
+                await update.message.reply_text(
+                    "❌ هذا الإيميل وهمي أو النطاق غير موجود. أرسل إيميلاً حقيقياً:")
+                return
+        # ★★★ نهاية الفحص الجديد ★★★
 
         active_status = get_active_account_status(email)
         if active_status == "approved":
@@ -699,23 +716,25 @@ async def sell_new_email_start(update: Update, context: ContextTypes.DEFAULT_TYP
         "<i>يرجى الانتظار لحظات</i>",
         parse_mode=ParseMode.HTML)
 
+    # ★★★ نبحث فقط عن إيميل شاغر مؤكد (True) ★★★
     creds = None
-    for attempt in range(3):
+    for attempt in range(5):
         candidate = generate_sell_email_credentials()
-        result = await check_email_availability(candidate["email"], use_cache=False)
-        
-        if result is True or result is None:
+        result = await check_email_availability_retry(candidate["email"], max_attempts=2)
+        logger.info("Sell-new-email attempt %d: %s -> %s", attempt + 1, candidate["email"], result)
+        if result is True:
             creds = candidate
             break
-        logger.info(f"Email {candidate['email']} is taken, regenerating...")
-    
+
     if creds is None:
         await query.edit_message_text(
-            "⚠️ <b>تعذر العثور على إيميل متاح حالياً</b>\n\n"
-            "يرجى المحاولة لاحقاً.",
+            "⚠️ <b>تعذر العثور على إيميل شاغر مؤكد حالياً</b>\n\n"
+            "🔍 لم تستجب خوادم جوجل بنتيجة مؤكدة بعد عدة محاولات.\n"
+            "📌 يرجى المحاولة بعد قليل — نحن نرفض إرسال أي إيميل غير مؤكد الشغور.",
             parse_mode=ParseMode.HTML,
             reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
         return
+    # ★★★ نهاية البحث الجديد ★★★
 
     context.user_data["sell_new_email"] = creds
     prices = get_tier_prices("new")
@@ -759,16 +778,18 @@ async def sell_new_email_complete(update: Update, context: ContextTypes.DEFAULT_
         "<i>يرجى الانتظار لحظات</i>",
         parse_mode=ParseMode.HTML)
 
-    result = await check_email_availability(creds["email"], use_cache=False)
-    
+    # ★★★ إعادة فحص إلزامية — يجب أن يصبح الإيميل محجوزاً (False) ★★★
+    result = await check_email_availability_retry(creds["email"], max_attempts=3)
+
+    # الحالة 1: لا يزال شاغراً → العضو لم يُنشئه
     if result is True:
         await query.edit_message_text(
             "❌ <b>لم تقم بإنشاء الإيميل بعد!</b>\n\n"
             f"📧 <code>{tg_html_escape(creds['email'])}</code>\n\n"
-            "هذا الإيميل لا يزال <b>متاحاً للإنشاء</b>، مما يعني أنك لم تقم بحجزه بعد.\n\n"
+            "هذا الإيميل لا يزال <b>متاحاً للإنشاء</b>، مما يعني أنك لم تحجزه على جوجل.\n\n"
             "📌 <b>الخطوات المطلوبة:</b>\n"
             "1. اذهب إلى <a href=\"https://accounts.google.com/signup\">صفحة إنشاء حساب جوجل</a>\n"
-            "2. استخدم البريد والاسم والباسورد المعروضة أعلاه\n"
+            "2. استخدم البريد والباسورد المعروضة أعلاه\n"
             "3. أكمل عملية الإنشاء حتى النهاية\n"
             "4. ارجع واضغط «لقد أنشأت الإيميل»",
             parse_mode=ParseMode.HTML,
@@ -779,10 +800,25 @@ async def sell_new_email_complete(update: Update, context: ContextTypes.DEFAULT_
             ])
         )
         return
-    
-    if result is False:
-        logger.info(f"Email {creds['email']} verified as created by user")
-    
+
+    # الحالة 2: تعذّر التحقق → لا نمرر، نطلب إعادة المحاولة
+    if result is None:
+        await query.edit_message_text(
+            "⚠️ <b>تعذّر التحقق من الإيميل حالياً</b>\n\n"
+            f"📧 <code>{tg_html_escape(creds['email'])}</code>\n\n"
+            "🔍 خوادم جوجل لم تعطِ نتيجة مؤكدة بعد 3 محاولات.\n\n"
+            "📌 <b>لا يمكن المتابعة بدون تأكيد أن الإيميل أصبح محجوزاً.</b>\n"
+            "تأكد أنك أنشأت الإيميل فعلاً، ثم اضغط «إعادة المحاولة».",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_vertical([
+                ("🔄 إعادة المحاولة", "sell_new_email_complete"),
+                ("❌ إلغاء", "sell_new_email_cancel"),
+            ]))
+        return
+
+    # الحالة 3: False = الإيميل أصبح محجوزاً (تم إنشاؤه) ✓
+    logger.info("Email %s verified as created by user (status: reserved)", creds["email"])
+
     context.user_data["step"] = "sell_new_email_totp"
     await query.edit_message_text(
         "✅ <b>تم التحقق من أنك أنشأت الإيميل!</b>\n\n"
