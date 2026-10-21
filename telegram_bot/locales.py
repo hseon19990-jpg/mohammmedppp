@@ -2,14 +2,7 @@
 
 TRANSLATIONS = {
     "ar": {
-        # --- عام ---
-        "welcome": (
-            "👋 مرحباً بك في بوت شراء الإيميل!\n\n"
-            "💵 نشتري من الإيميل بسعر:\n"
-            "• الإيميل القديم (4 خطوات): <b>${old_price:.2f}</b>\n"
-            "• الإيميل الجديد (4 خطوات): <b>${new_price:.2f}</b>\n\n"
-            "اختر من القائمة أدناه:"
-        ),
+        "welcome": "👋 مرحباً بك في بوت شراء الإيميل!\n\n💵 نشتري من الإيميل بسعر:\n• الإيميل القديم (4 خطوات): <b>${old_price:.2f}</b>\n• الإيميل الجديد (4 خطوات): <b>${new_price:.2f}</b>\n\nاختر من القائمة أدناه:",
         "choose_language": "🌐 <b>اختر اللغة:</b>",
         "language_set": "✅ تم تعيين اللغة إلى العربية.",
         "main_menu": "🔙 القائمة الرئيسية",
@@ -21,7 +14,6 @@ TRANSLATIONS = {
         "msg_success": "✅ تم بنجاح.",
         "msg_unknown": "غير معروف",
 
-        # --- القائمة الرئيسية ---
         "btn_sell_old": "➕ بيع إيميل قديم",
         "btn_sell_new": "🆕 بيع إيميل جديد",
         "btn_wallet": "💰 أموالي",
@@ -37,16 +29,13 @@ TRANSLATIONS = {
         "btn_owner": "⚙️ إعدادات المالك",
         "btn_language": "🌐 تغيير اللغة",
 
-        # --- الأكثر بيعاً ---
         "top_sellers_title": "🏆 <b>الأكثر بيعاً</b>",
         "top_sellers_empty": "📭 لا توجد بيانات بيع بعد.",
         "top_sellers_item": "{idx}- ID <code>{uid}</code> بيع <b>{count}</b>",
 
-        # --- سجل المعاملات ---
         "transactions_title": "📜 <b>آخر 20 معاملة:</b>",
         "transactions_empty": "📭 لا توجد معاملات بعد.",
 
-        # --- حساباتي ---
         "accounts_title": "📋 <b>جميع حساباتي:</b>",
         "accounts_empty": "📭 لا توجد حسابات لديك.",
         "accounts_approved_header": "✅ <b>مقبولة (الأحدث أولاً):</b>",
@@ -56,11 +45,9 @@ TRANSLATIONS = {
         "accounts_leave_hold": " ⏳ (معلق 24 ساعة)",
         "accounts_leave_done": " ✅ (تم التحويل)",
 
-        # --- الإيميلات المرفوضة (عضو) ---
         "rejected_title": "❌ <b>الإيميلات المرفوضة (الأحدث أولاً)</b>",
         "rejected_empty": "📭 لا توجد لديك إيميلات مرفوضة حاليًا.",
 
-        # --- تعديل الحسابات ---
         "edit_title": "✏️ <b>تعديل الحسابات الجارية</b>\nاختر الحساب لتعديله:",
         "edit_empty": "📭 لا توجد حسابات جارية للتعديل.",
         "edit_account_title": "✏️ <b>تعديل الحساب:</b> <code>{email}</code>\n\nاختر ما تريد تعديله:",
@@ -77,7 +64,6 @@ TRANSLATIONS = {
         "edit_field_totp": "رمز المصادقة الثنائية",
         "edit_field_app_pass": "كلمة مرور التطبيق",
 
-        # --- بيع إيميل قديم ---
         "add_old_title": "📝 <b>بيع إيميل قديم</b>",
         "add_old_pricing": "💵 <b>نظام المكافآت المتدرج:</b>",
         "add_old_tier1": "• إيميل + باسورد → <b>${price:.2f}</b>",
@@ -111,15 +97,16 @@ TRANSLATIONS = {
         "add_verify_failed": "❌ <b>فشل التحقق التلقائي من IMAP</b>\n\n📧 <code>{email}</code>\n\n📝 <b>السبب:</b>\n<i>{message}</i>\n\n💡 تأكد من البيانات وحاول مرة أخرى. أرسل كلمة مرور التطبيق مجدداً:",
         "add_success": "🎉 <b>تم التحقق التلقائي بنجاح!</b>\n\n📧 <code>{email}</code>\n\n💰 <b>${price:.2f}</b> (معلق 24 ساعة)\n⏰ سيتم إعادة الفحص بعد 24 ساعة لتسليم النقاط الدائمة.",
 
-        # --- بيع إيميل جديد ---
         "sell_new_generating": "⏳ <b>جاري توليد إيميل متاح...</b>\n\n<i>يرجى الانتظار لحظات</i>",
         "sell_new_no_available": "⚠️ <b>تعذر العثور على إيميل متاح حالياً</b>\n\nيرجى المحاولة لاحقاً.",
         "sell_new_title": "🆕 <b>بيع إيميل جديد</b>\n\n👤 <b>الاسم الأول:</b> {first_name}\n\n📧 <b>البريد الإلكتروني:</b>\n<code>{email}</code>\n\n🔑 <b>كلمة السر:</b>\n<code>{password}</code>\n\n━━━━━━━━━━━━━━━\n💰 <b>المكافأة الكاملة (4 خطوات):</b> ${price:.2f}\n━━━━━━━━━━━━━━━\n\n⚠️ <b>تنبيه: رفض 3 إيميلات متتالية سيؤدي إلى حظرك لمدة 24 ساعة وحذف جميع إيميلاتك المعلقة.</b>\n\n📌 <b>الخطوات:</b>\n1. قم بإنشاء هذا الإيميل على Gmail\n2. فعّل التحقق بخطوتين (2FA)\n3. أنشئ كلمة مرور التطبيق\n4. اضغط «إكمال» هنا",
         "sell_new_btn_complete": "✅ إكمال",
+        
         "sell_new_btn_skip_2fa": "⏭️ إنهاء (بدون 2FA)",
-        "sell_new_finish_prompt": "⚠️ <b>تنبيه هام</b>\n\nيفضل بشدة إكمال التحقق بخطوتين (2FA) وإرسال كلمة مرور التطبيق لضمان قبول الإيميل والحصول على السعر الكامل.\n\nإذا قمت بالإنهاء الآن، سيتم إرسال الإيميل (باسورد فقط) إلى الطلبات المعلقة، وقد يتأخر قبوله أو يتم رفضه.\n\nهل أنت متأكد من الإنهاء؟",
+        "sell_new_finish_prompt": "⚠️ <b>هل أنت متأكد؟</b>\n\nإذا أنهيت الطلب الآن، فسيتم إرسال الإيميل (باسورد فقط) وستحصل على مكافأة أقل.\n\n💡 <b>نصيحة:</b> إذا أكملت التحقق بخطوتين (2FA) وكلمة مرور التطبيق، ستحصل على <b>السعر الكامل (${full_price:.2f})</b> ويتم قبول حسابك بشكل أسرع!\n\nهل تريد الإنهاء الآن وتفويت المكافأة الكاملة؟",
         "sell_new_btn_finish_confirm": "✅ نعم، أنهِ الطلب",
         "sell_new_btn_complete_2fa": "🔙 إكمال التحقق (2FA)",
+        
         "sell_new_session_expired": "⚠️ انتهت الجلسة. اضغط على «بيع إيميل جديد» مجدداً.",
         "sell_new_checking_created": "⏳ <b>جاري التحقق من قيامك بإنشاء الإيميل...</b>\n\n📧 <code>{email}</code>\n\n<i>يرجى الانتظار لحظات</i>",
         "sell_new_not_created": "❌ <b>لم تقم بإنشاء الإيميل بعد!</b>\n\n📧 <code>{email}</code>\n\nهذا الإيميل لا يزال <b>متاحاً للإنشاء</b>، مما يعني أنك لم تقم بحجزه بعد.\n\n📌 <b>الخطوات المطلوبة:</b>\n1. اذهب إلى <a href=\"https://accounts.google.com/signup\">صفحة إنشاء حساب جوجل</a>\n2. استخدم البريد والاسم والباسورد المعروضة أعلاه\n3. أكمل عملية الإنشاء حتى النهاية\n4. ارجع واضغط «لقد أنشأت الإيميل»",
@@ -130,7 +117,6 @@ TRANSLATIONS = {
         "sell_new_finished": "✅ <b>تم إنهاء الطلب</b>\n\n📧 <code>{email}</code>\n\n📌 الطلب الآن في قسم الطلبات المعلقة بانتظار مراجعة الإدارة.",
         "sell_new_wrong_credentials": "❌ فشل التحقق: الإيميل أو كلمة المرور غير صحيحة.\nهل قمت بإنشاء الإيميل فعلياً على جوجل؟",
 
-        # --- المحفظة والسحب ---
         "wallet_title": "💰 <b>أموالي</b>",
         "wallet_pending": "⏳ قيد الانتظار: ${amount:.2f}",
         "wallet_hold": "⏳ معلق (24 ساعة): ${amount:.2f}",
@@ -142,7 +128,6 @@ TRANSLATIONS = {
         "store_buy_success": "✅ <b>تم طلب الخدمة!</b>\n\n🛒 <b>{name}</b>\n💰 <b>${price:.2f}</b>\n\n📝 {message}\n\n<i>📤 أرسل المعلومات في رسالة جديدة</i>",
         "store_buy_insufficient": "❌ رصيدك غير كافٍ. الرصيد: ${balance:.2f}, السعر: ${price:.2f}",
 
-        # --- التعليم والإحالة ---
         "tutorials_title": "📺 <b>اختر الدرس:</b>",
         "tutorials_general": "📖 شرح عام",
         "tutorials_email": "📹 إنشاء إيميل",
@@ -158,7 +143,6 @@ TRANSLATIONS = {
         "referral_bonus_received": "🎉 *مبروك!*\nحصلت على مكافأة إحالة بقيمة ${bonus:.2f}",
         "referral_approved_msg": "📢 *إشعار إحالة*\n\nالمستخدم `{uid}` تم قبول إيميله `{email}`.",
 
-        # --- لوحة المالك ---
         "owner_panel_title": "⚙️ *لوحة تحكم المالك*",
         "owner_maint_on": "🛑 إيقاف الصيانة",
         "owner_maint_off": "🛠️ تشغيل الصيانة",
@@ -198,14 +182,12 @@ TRANSLATIONS = {
         "owner_invalid_link": "⚠️ الرابط غير صالح. أرسل رابط HTTPS صحيحاً، مثل https://t.me/your_support.",
         "owner_support_saved": "✅ تم حفظ رابط الدعم وسيظهر للأعضاء في القائمة الرئيسية.",
 
-        # --- الأسعار ---
         "price_old_1": "💲 قديم: مستوى 1", "price_old_2": "💲 قديم: مستوى 2", "price_old_3": "💲 قديم: مستوى 3",
         "price_new_1": "💲 جديد: مستوى 1", "price_new_2": "💲 جديد: مستوى 2", "price_new_3": "💲 جديد: مستوى 3",
         "price_old": "القديم", "price_new": "الجديد",
         "price_menu": "💰 *إعدادات الأسعار*\n\n📝 *القديم:*\n1. إيميل + باسورد: ${o1:.2f}\n2. + 2FA: ${o2:.2f}\n3. + App Pass: ${o3:.2f}\n\n🆕 *الجديد:*\n1. إيميل + باسورد: ${n1:.2f}\n2. + 2FA: ${n2:.2f}\n3. + App Pass: ${n3:.2f}\n\nاختر المستوى لتعديله:",
         "price_edit_prompt": "💰 *تعديل سعر {type} - المستوى {tier}*\n\nأرسل السعر الجديد:",
 
-        # --- إدارة الطلبات (الأدمن والمالك) ---
         "appr_title": "📋 *الطلبات*\n\nاختر القسم:",
         "appr_btn_pending": "⏳ منتظرة",
         "appr_btn_approved": "✅ مقبولة",
@@ -322,7 +304,6 @@ TRANSLATIONS = {
         "member_rejected_msg": "{reason}\n\n📧 الإيميل: `{email}`\nيمكنك إعادة المحاولة.{ban}",
         "member_rejected_msg_other": "❌ *تم رفض طلبك*\n\n📧 الإيميل: `{email}`\n📝 السبب: {text}{ban}",
 
-        # --- إدارة النقاط ---
         "points_btn_add": "➕ منح نقاط",
         "points_btn_deduct": "➖ خصم نقاط",
         "points_title": "💰 *إدارة النقاط*\n\nاختر الإجراء:",
@@ -331,7 +312,6 @@ TRANSLATIONS = {
         "points_invalid_format": "⚠️ الصيغة: `معرف المبلغ`",
         "appr_user_not_found": "⚠️ لم يتم العثور على مستخدم.",
 
-        # --- إدارة الحسابات ---
         "accounts_btn_unextracted_old": "🆕 غير المستخرجة (قديم)",
         "accounts_btn_unextracted_new": "🆕 غير المستخرجة (جديد)",
         "accounts_btn_all_old": "📋 جميع الإيميلات (قديم)",
@@ -359,7 +339,6 @@ TRANSLATIONS = {
         "accounts_export_caption": "✅ تم تصدير {count} إيميل.",
         "accounts_export_success": "✅ تم تصدير {count} إيميل.",
 
-        # --- فيديوهات واجهة المالك ---
         "videos_title": "📹 *قسم الفيديوهات*",
         "videos_general": "📖 شرح عام للبوت",
         "videos_email": "📹 فيديو إنشاء إيميل",
@@ -382,13 +361,11 @@ TRANSLATIONS = {
         "videos_saved": "✅ تم حفظ فيديو {type} بنجاح!",
         "videos_invalid": "⚠️ يرجى إرسال فيديو صحيح.",
 
-        # --- لوحة الأدمن ---
         "admin_btn_settings": "⚙️ إعدادات الأدمن",
         "admin_btn_requests": "📋 طلبات",
         "admin_panel_title": "🛠 *الإدارية*\n\nاختر القسم:",
         "admin_settings_title": "⚙️ *إعدادات الأدمن*\n\nاختر الإجراء:",
 
-        # --- فحص الأعضاء والإيميلات ---
         "owner_check_member_prompt": "🔎 <b>فحص عضو</b>\n\nأرسل معرف العضو الرقمي أو اليوزر مع @:\nمثال: <code>123456789</code>\nمثال: <code>@username</code>\n\nأو أرسل «إلغاء» للعودة.",
         "owner_member_not_found": "⚠️ لم يتم العثور على هذا العضو.",
         "owner_member_report": "تقرير فحص العضو",
@@ -415,21 +392,13 @@ TRANSLATIONS = {
         "owner_email_searching": "🔍 <b>تقرير فحص الإيميل</b>\n\n📧 <code>{email}</code>\n📊 عدد السجلات المطابقة: <b>{count}</b>\n\nسيتم إرسال كل سجل بتفاصيله الكاملة…",
         "owner_email_search_done": "✅ تم الانتهاء من التقرير.",
         
-        # --- الترقيم (Pagination) ---
         "pagination_prev": "⬅️ السابق",
         "pagination_next": "التالي ➡️",
         "pagination_page": "صفحة {page}/{total}",
     },
 
     "en": {
-        # --- General ---
-        "welcome": (
-            "👋 Welcome to the Email Purchase Bot!\n\n"
-            "💵 We buy emails at:\n"
-            "• Old email (4 steps): <b>${old_price:.2f}</b>\n"
-            "• New email (4 steps): <b>${new_price:.2f}</b>\n\n"
-            "Choose from the menu below:"
-        ),
+        "welcome": "👋 Welcome to the Email Purchase Bot!\n\n💵 We buy emails at:\n• Old email (4 steps): <b>${old_price:.2f}</b>\n• New email (4 steps): <b>${new_price:.2f}</b>\n\nChoose from the menu below:",
         "choose_language": "🌐 <b>Choose language:</b>",
         "language_set": "✅ Language set to English.",
         "main_menu": "🔙 Main Menu",
@@ -441,7 +410,6 @@ TRANSLATIONS = {
         "msg_success": "✅ Success.",
         "msg_unknown": "Unknown",
 
-        # --- Main Menu ---
         "btn_sell_old": "➕ Sell old email",
         "btn_sell_new": "🆕 Sell new email",
         "btn_wallet": "💰 My Balance",
@@ -457,16 +425,13 @@ TRANSLATIONS = {
         "btn_owner": "⚙️ Owner Settings",
         "btn_language": "🌐 Change Language",
 
-        # --- Top Sellers ---
         "top_sellers_title": "🏆 <b>Top Sellers</b>",
         "top_sellers_empty": "📭 No sales data yet.",
         "top_sellers_item": "{idx}- ID <code>{uid}</code> sold <b>{count}</b>",
 
-        # --- Transactions ---
         "transactions_title": "📜 <b>Last 20 transactions:</b>",
         "transactions_empty": "📭 No transactions yet.",
 
-        # --- My Accounts ---
         "accounts_title": "📋 <b>All my accounts:</b>",
         "accounts_empty": "📭 You have no accounts.",
         "accounts_approved_header": "✅ <b>Approved (newest first):</b>",
@@ -476,11 +441,9 @@ TRANSLATIONS = {
         "accounts_leave_hold": " ⏳ (24h hold)",
         "accounts_leave_done": " ✅ (transferred)",
 
-        # --- Rejected Emails ---
         "rejected_title": "❌ <b>Rejected emails (newest first)</b>",
         "rejected_empty": "📭 You have no rejected emails.",
 
-        # --- Edit Accounts ---
         "edit_title": "✏️ <b>Edit pending accounts</b>\nChoose an account to edit:",
         "edit_empty": "📭 No pending accounts to edit.",
         "edit_account_title": "✏️ <b>Edit account:</b> <code>{email}</code>\n\nChoose what to edit:",
@@ -497,7 +460,6 @@ TRANSLATIONS = {
         "edit_field_totp": "TOTP secret",
         "edit_field_app_pass": "app password",
 
-        # --- Add Old Email ---
         "add_old_title": "📝 <b>Sell old email</b>",
         "add_old_pricing": "💵 <b>Tiered rewards:</b>",
         "add_old_tier1": "• Email + password → <b>${price:.2f}</b>",
@@ -531,15 +493,16 @@ TRANSLATIONS = {
         "add_verify_failed": "❌ <b>Auto IMAP verification failed</b>\n\n📧 <code>{email}</code>\n\n📝 <b>Reason:</b>\n<i>{message}</i>\n\n💡 Check the data and try again. Send the app password again:",
         "add_success": "🎉 <b>Auto-verification successful!</b>\n\n📧 <code>{email}</code>\n\n💰 <b>${price:.2f}</b> (24h hold)\n⏰ Will be re-checked after 24 hours to release permanent points.",
 
-        # --- Sell New Email ---
         "sell_new_generating": "⏳ <b>Generating an available email...</b>\n\n<i>Please wait</i>",
         "sell_new_no_available": "⚠️ <b>Could not find an available email</b>\n\nPlease try again later.",
         "sell_new_title": "🆕 <b>Sell new email</b>\n\n👤 <b>First name:</b> {first_name}\n\n📧 <b>Email:</b>\n<code>{email}</code>\n\n🔑 <b>Password:</b>\n<code>{password}</code>\n\n━━━━━━━━━━━━━━━\n💰 <b>Full reward (4 steps):</b> ${price:.2f}\n━━━━━━━━━━━━━━━\n\n⚠️ <b>Warning: 3 consecutive rejections will ban you for 24 hours and delete all pending emails.</b>\n\n📌 <b>Steps:</b>\n1. Create this email on Gmail\n2. Enable 2FA\n3. Create an app password\n4. Click 'Complete' here",
         "sell_new_btn_complete": "✅ Complete",
+        
         "sell_new_btn_skip_2fa": "⏭️ Finish (without 2FA)",
-        "sell_new_finish_prompt": "⚠️ <b>Warning</b>\n\nWe highly recommend completing the 2FA verification and sending the app password to guarantee email approval and receive the full price.\n\nIf you finish now, the email (password only) will be sent to pending requests, and its approval may be delayed or rejected.\n\nAre you sure you want to finish?",
+        "sell_new_finish_prompt": "⚠️ <b>Are you sure?</b>\n\nIf you finish now, the email (password only) will be sent and you will get a lower reward.\n\n💡 <b>Tip:</b> If you complete the 2FA verification and app password, you will get the <b>full price (${full_price:.2f})</b> and your account will be approved faster!\n\nDo you want to finish now and miss the full reward?",
         "sell_new_btn_finish_confirm": "✅ Yes, finish request",
         "sell_new_btn_complete_2fa": "🔙 Complete verification (2FA)",
+        
         "sell_new_session_expired": "⚠️ Session expired. Click 'Sell new email' again.",
         "sell_new_checking_created": "⏳ <b>Verifying that you created the email...</b>\n\n📧 <code>{email}</code>\n\n<i>Please wait</i>",
         "sell_new_not_created": "❌ <b>You haven't created the email yet!</b>\n\n📧 <code>{email}</code>\n\nThis email is still <b>available for signup</b>, meaning you haven't reserved it.\n\n📌 <b>Required steps:</b>\n1. Go to <a href=\"https://accounts.google.com/signup\">Google signup page</a>\n2. Use the shown email, name, password\n3. Complete signup\n4. Return and click 'I created it'",
@@ -550,7 +513,6 @@ TRANSLATIONS = {
         "sell_new_finished": "✅ <b>Request finished</b>\n\n📧 <code>{email}</code>\n\n📌 The request is now in pending review.",
         "sell_new_wrong_credentials": "❌ Verification failed: wrong email or password.\nDid you actually create the email on Google?",
 
-        # --- Wallet & Store ---
         "wallet_title": "💰 <b>My Balance</b>",
         "wallet_pending": "⏳ Pending: ${amount:.2f}",
         "wallet_hold": "⏳ On hold (24h): ${amount:.2f}",
@@ -562,7 +524,6 @@ TRANSLATIONS = {
         "store_buy_success": "✅ <b>Service requested!</b>\n\n🛒 <b>{name}</b>\n💰 <b>${price:.2f}</b>\n\n📝 {message}\n\n<i>📤 Send the information in a new message</i>",
         "store_buy_insufficient": "❌ Insufficient balance. Balance: ${balance:.2f}, Price: ${price:.2f}",
 
-        # --- Tutorials & Referral ---
         "tutorials_title": "📺 <b>Choose a lesson:</b>",
         "tutorials_general": "📖 General overview",
         "tutorials_email": "📹 Create email",
@@ -578,7 +539,6 @@ TRANSLATIONS = {
         "referral_bonus_received": "🎉 *Congratulations!*\nYou received a referral bonus of ${bonus:.2f}",
         "referral_approved_msg": "📢 *Referral Notification*\n\nUser `{uid}` had their email `{email}` approved.",
 
-        # --- Owner Panel ---
         "owner_panel_title": "⚙️ *Owner Panel*",
         "owner_maint_on": "🛑 Disable Maintenance",
         "owner_maint_off": "🛠️ Enable Maintenance",
@@ -618,14 +578,12 @@ TRANSLATIONS = {
         "owner_invalid_link": "⚠️ Invalid link. Send a valid HTTPS link, e.g., https://t.me/your_support.",
         "owner_support_saved": "✅ Support link saved and will be visible to members in the main menu.",
 
-        # --- Prices ---
         "price_old_1": "💲 Old: Tier 1", "price_old_2": "💲 Old: Tier 2", "price_old_3": "💲 Old: Tier 3",
         "price_new_1": "💲 New: Tier 1", "price_new_2": "💲 New: Tier 2", "price_new_3": "💲 New: Tier 3",
         "price_old": "Old", "price_new": "New",
         "price_menu": "💰 *Price Settings*\n\n📝 *Old:*\n1. Email + password: ${o1:.2f}\n2. + 2FA: ${o2:.2f}\n3. + App Pass: ${o3:.2f}\n\n🆕 *New:*\n1. Email + password: ${n1:.2f}\n2. + 2FA: ${n2:.2f}\n3. + App Pass: ${n3:.2f}\n\nChoose a tier to edit:",
         "price_edit_prompt": "💰 *Edit price for {type} - Tier {tier}*\n\nSend the new price:",
 
-        # --- Approvals (Admin & Owner) ---
         "appr_title": "📋 *Requests*\n\nChoose a section:",
         "appr_btn_pending": "⏳ Pending",
         "appr_btn_approved": "✅ Approved",
@@ -742,7 +700,6 @@ TRANSLATIONS = {
         "member_rejected_msg": "{reason}\n\n📧 Email: `{email}`\nYou can try again.{ban}",
         "member_rejected_msg_other": "❌ *Request Rejected*\n\n📧 Email: `{email}`\n📝 Reason: {text}{ban}",
 
-        # --- Points Management ---
         "points_btn_add": "➕ Give Points",
         "points_btn_deduct": "➖ Deduct Points",
         "points_title": "💰 *Points Management*\n\nChoose action:",
@@ -751,7 +708,6 @@ TRANSLATIONS = {
         "points_invalid_format": "⚠️ Format: `ID Amount`",
         "appr_user_not_found": "⚠️ User not found.",
 
-        # --- Accounts Management ---
         "accounts_btn_unextracted_old": "🆕 Unextracted (Old)",
         "accounts_btn_unextracted_new": "🆕 Unextracted (New)",
         "accounts_btn_all_old": "📋 All Emails (Old)",
@@ -779,7 +735,6 @@ TRANSLATIONS = {
         "accounts_export_caption": "✅ Exported {count} emails.",
         "accounts_export_success": "✅ Exported {count} emails.",
 
-        # --- Videos ---
         "videos_title": "📹 *Videos Section*",
         "videos_general": "📖 General Overview",
         "videos_email": "📹 Create Email",
@@ -802,13 +757,11 @@ TRANSLATIONS = {
         "videos_saved": "✅ Video {type} saved successfully!",
         "videos_invalid": "⚠️ Please send a valid video.",
 
-        # --- Admin Panel ---
         "admin_btn_settings": "⚙️ Admin Settings",
         "admin_btn_requests": "📋 Requests",
         "admin_panel_title": "🛠 *Admin*\n\nChoose section:",
         "admin_settings_title": "⚙️ *Admin Settings*\n\nChoose action:",
 
-        # --- Check Member / Email ---
         "owner_check_member_prompt": "🔎 <b>Check Member</b>\n\nSend numeric ID or @username:\nExample: <code>123456789</code>\nExample: <code>@username</code>\n\nOr send 'cancel' to go back.",
         "owner_member_not_found": "⚠️ Member not found.",
         "owner_member_report": "Member Report",
@@ -835,21 +788,13 @@ TRANSLATIONS = {
         "owner_email_searching": "🔍 <b>Email Report</b>\n\n📧 <code>{email}</code>\n📊 Matches: <b>{count}</b>\n\nSending each record with full details…",
         "owner_email_search_done": "✅ Report finished.",
 
-        # --- Pagination ---
         "pagination_prev": "⬅️ Prev",
         "pagination_next": "Next ➡️",
         "pagination_page": "Page {page}/{total}",
     },
 
     "ru": {
-        # --- General ---
-        "welcome": (
-            "👋 Добро пожаловать в бот покупки email!\n\n"
-            "💵 Мы покупаем email по цене:\n"
-            "• Старый email (4 шага): <b>${old_price:.2f}</b>\n"
-            "• Новый email (4 шага): <b>${new_price:.2f}</b>\n\n"
-            "Выберите из меню ниже:"
-        ),
+        "welcome": "👋 Добро пожаловать в бот покупки email!\n\n💵 Мы покупаем email по цене:\n• Старый email (4 шага): <b>${old_price:.2f}</b>\n• Новый email (4 шага): <b>${new_price:.2f}</b>\n\nВыберите из меню ниже:",
         "choose_language": "🌐 <b>Выберите язык:</b>",
         "language_set": "✅ Язык установлен на русский.",
         "main_menu": "🔙 Главное меню",
@@ -861,7 +806,6 @@ TRANSLATIONS = {
         "msg_success": "✅ Успешно.",
         "msg_unknown": "Неизвестно",
 
-        # --- Main Menu ---
         "btn_sell_old": "➕ Продать старый email",
         "btn_sell_new": "🆕 Продать новый email",
         "btn_wallet": "💰 Мой баланс",
@@ -877,16 +821,13 @@ TRANSLATIONS = {
         "btn_owner": "⚙️ Настройки владельца",
         "btn_language": "🌐 Изменить язык",
 
-        # --- Top Sellers ---
         "top_sellers_title": "🏆 <b>Топ продавцов</b>",
         "top_sellers_empty": "📭 Пока нет данных о продажах.",
         "top_sellers_item": "{idx}- ID <code>{uid}</code> продал <b>{count}</b>",
 
-        # --- Transactions ---
         "transactions_title": "📜 <b>Последние 20 транзакций:</b>",
         "transactions_empty": "📭 Пока нет транзакций.",
 
-        # --- My Accounts ---
         "accounts_title": "📋 <b>Все мои аккаунты:</b>",
         "accounts_empty": "📭 У вас нет аккаунтов.",
         "accounts_approved_header": "✅ <b>Одобренные (сначала новые):</b>",
@@ -896,11 +837,9 @@ TRANSLATIONS = {
         "accounts_leave_hold": " ⏳ (удержание 24ч)",
         "accounts_leave_done": " ✅ (переведено)",
 
-        # --- Rejected Emails ---
         "rejected_title": "❌ <b>Отклонённые email (сначала новые)</b>",
         "rejected_empty": "📭 У вас нет отклонённых email.",
 
-        # --- Edit Accounts ---
         "edit_title": "✏️ <b>Редактировать ожидающие аккаунты</b>\nВыберите аккаунт:",
         "edit_empty": "📭 Нет ожидающих аккаунтов для редактирования.",
         "edit_account_title": "✏️ <b>Редактировать аккаунт:</b> <code>{email}</code>\n\nВыберите, что изменить:",
@@ -917,7 +856,6 @@ TRANSLATIONS = {
         "edit_field_totp": "секрет TOTP",
         "edit_field_app_pass": "пароль приложения",
 
-        # --- Add Old Email ---
         "add_old_title": "📝 <b>Продать старый email</b>",
         "add_old_pricing": "💵 <b>Многоуровневое вознаграждение:</b>",
         "add_old_tier1": "• Email + пароль → <b>${price:.2f}</b>",
@@ -951,15 +889,16 @@ TRANSLATIONS = {
         "add_verify_failed": "❌ <b>Автоматическая IMAP-проверка не удалась</b>\n\n📧 <code>{email}</code>\n\n📝 <b>Причина:</b>\n<i>{message}</i>\n\n💡 Проверьте данные и попробуйте снова. Отправьте пароль приложения ещё раз:",
         "add_success": "🎉 <b>Автопроверка успешна!</b>\n\n📧 <code>{email}</code>\n\n💰 <b>${price:.2f}</b> (удержание 24ч)\n⏰ Повторная проверка через 24 часа для зачисления баллов.",
 
-        # --- Sell New Email ---
         "sell_new_generating": "⏳ <b>Генерация доступного email...</b>\n\n<i>Подождите</i>",
         "sell_new_no_available": "⚠️ <b>Не удалось найти доступный email</b>\n\nПопробуйте позже.",
         "sell_new_title": "🆕 <b>Продать новый email</b>\n\n👤 <b>Имя:</b> {first_name}\n\n📧 <b>Email:</b>\n<code>{email}</code>\n\n🔑 <b>Пароль:</b>\n<code>{password}</code>\n\n━━━━━━━━━━━━━━━\n💰 <b>Полное вознаграждение (4 шага):</b> ${price:.2f}\n━━━━━━━━━━━━━━━\n\n⚠️ <b>Внимание: 3 подряд отклонения — бан на 24 часа и удаление всех ожидающих email.</b>\n\n📌 <b>Шаги:</b>\n1. Создайте этот email в Gmail\n2. Включите 2FA\n3. Создайте пароль приложения\n4. Нажмите «Завершить» здесь",
         "sell_new_btn_complete": "✅ Завершить",
+        
         "sell_new_btn_skip_2fa": "⏭️ Завершить (без 2FA)",
-        "sell_new_finish_prompt": "⚠️ <b>Внимание</b>\n\nНастоятельно рекомендуется завершить двухэтапную проверку (2FA) и отправить пароль приложения, чтобы гарантировать одобрение email и получить полную цену.\n\nЕсли вы завершите сейчас, email (только пароль) будет отправлен в ожидающие запросы, и его одобрение может быть задержано или отклонено.\n\nВы уверены, что хотите завершить?",
+        "sell_new_finish_prompt": "⚠️ <b>Вы уверены?</b>\n\nЕсли вы завершите сейчас, email (только пароль) будет отправлен, и вы получите меньшее вознаграждение.\n\n💡 <b>Совет:</b> Если вы завершите проверку 2FA и пароль приложения, вы получите <b>полную цену (${full_price:.2f})</b>, и ваш аккаунт будет одобрен быстрее!\n\nВы хотите завершить сейчас и упустить полное вознаграждение?",
         "sell_new_btn_finish_confirm": "✅ Да, завершить запрос",
         "sell_new_btn_complete_2fa": "🔙 Завершить проверку (2FA)",
+        
         "sell_new_session_expired": "⚠️ Сессия истекла. Нажмите «Продать новый email» снова.",
         "sell_new_checking_created": "⏳ <b>Проверка, что вы создали email...</b>\n\n📧 <code>{email}</code>\n\n<i>Подождите</i>",
         "sell_new_not_created": "❌ <b>Вы ещё не создали email!</b>\n\n📧 <code>{email}</code>\n\nЭтот email всё ещё <b>доступен для регистрации</b>, значит, вы его не зарезервировали.\n\n📌 <b>Требуемые шаги:</b>\n1. Перейдите на <a href=\"https://accounts.google.com/signup\">страницу регистрации Google</a>\n2. Используйте показанные email, имя, пароль\n3. Завершите регистрацию\n4. Вернитесь и нажмите «Я создал»",
@@ -970,7 +909,6 @@ TRANSLATIONS = {
         "sell_new_finished": "✅ <b>Заявка завершена</b>\n\n📧 <code>{email}</code>\n\n📌 Заявка находится в ожидании проверки.",
         "sell_new_wrong_credentials": "❌ Проверка не удалась: неверный email или пароль.\nВы действительно создали email в Google?",
 
-        # --- Wallet & Store ---
         "wallet_title": "💰 <b>Мой баланс</b>",
         "wallet_pending": "⏳ В ожидании: ${amount:.2f}",
         "wallet_hold": "⏳ Удержание (24ч): ${amount:.2f}",
@@ -982,7 +920,6 @@ TRANSLATIONS = {
         "store_buy_success": "✅ <b>Услуга заказана!</b>\n\n🛒 <b>{name}</b>\n💰 <b>${price:.2f}</b>\n\n📝 {message}\n\n<i>📤 Отправьте информацию новым сообщением</i>",
         "store_buy_insufficient": "❌ Недостаточно средств. Баланс: ${balance:.2f}, Цена: ${price:.2f}",
 
-        # --- Tutorials & Referral ---
         "tutorials_title": "📺 <b>Выберите урок:</b>",
         "tutorials_general": "📖 Обзор",
         "tutorials_email": "📹 Создать email",
@@ -998,7 +935,6 @@ TRANSLATIONS = {
         "referral_bonus_received": "🎉 *Поздравляем!*\nВы получили реферальный бонус ${bonus:.2f}",
         "referral_approved_msg": "📢 *Уведомление о реферале*\n\nПользователь `{uid}` одобрил email `{email}`.",
 
-        # --- Owner Panel ---
         "owner_panel_title": "⚙️ *Панель владельца*",
         "owner_maint_on": "🛑 Отключить обслуживание",
         "owner_maint_off": "🛠️ Включить обслуживание",
@@ -1038,14 +974,12 @@ TRANSLATIONS = {
         "owner_invalid_link": "⚠️ Неверная ссылка. Отправьте правильную HTTPS ссылку, например https://t.me/your_support.",
         "owner_support_saved": "✅ Ссылка поддержки сохранена и будет видна пользователям в главном меню.",
 
-        # --- Prices ---
         "price_old_1": "💲 Старый: Уровень 1", "price_old_2": "💲 Старый: Уровень 2", "price_old_3": "💲 Старый: Уровень 3",
         "price_new_1": "💲 Новый: Уровень 1", "price_new_2": "💲 Новый: Уровень 2", "price_new_3": "💲 Новый: Уровень 3",
         "price_old": "Старый", "price_new": "Новый",
         "price_menu": "💰 *Настройки цен*\n\n📝 *Старый:*\n1. Email + пароль: ${o1:.2f}\n2. + 2FA: ${o2:.2f}\n3. + App Pass: ${o3:.2f}\n\n🆕 *Новый:*\n1. Email + пароль: ${n1:.2f}\n2. + 2FA: ${n2:.2f}\n3. + App Pass: ${n3:.2f}\n\nВыберите уровень для изменения:",
         "price_edit_prompt": "💰 *Изменить цену {type} - Уровень {tier}*\n\nОтправьте новую цену:",
 
-        # --- Approvals (Admin & Owner) ---
         "appr_title": "📋 *Запросы*\n\nВыберите раздел:",
         "appr_btn_pending": "⏳ В ожидании",
         "appr_btn_approved": "✅ Одобренные",
@@ -1162,7 +1096,6 @@ TRANSLATIONS = {
         "member_rejected_msg": "{reason}\n\n📧 Email: `{email}`\nМожете попробовать снова.{ban}",
         "member_rejected_msg_other": "❌ *Запрос отклонён*\n\n📧 Email: `{email}`\n📝 Причина: {text}{ban}",
 
-        # --- Points Management ---
         "points_btn_add": "➕ Дать баллы",
         "points_btn_deduct": "➖ Вычесть баллы",
         "points_title": "💰 *Управление баллами*\n\nВыберите действие:",
@@ -1171,7 +1104,6 @@ TRANSLATIONS = {
         "points_invalid_format": "⚠️ Формат: `ID Сумма`",
         "appr_user_not_found": "⚠️ Пользователь не найден.",
 
-        # --- Accounts Management ---
         "accounts_btn_unextracted_old": "🆕 Неизвлечённые (Старые)",
         "accounts_btn_unextracted_new": "🆕 Неизвлечённые (Новые)",
         "accounts_btn_all_old": "📋 Все Emails (Старые)",
@@ -1199,7 +1131,6 @@ TRANSLATIONS = {
         "accounts_export_caption": "✅ Экспортировано {count} emails.",
         "accounts_export_success": "✅ Экспортировано {count} emails.",
 
-        # --- Videos ---
         "videos_title": "📹 *Раздел видео*",
         "videos_general": "📖 Обзор бота",
         "videos_email": "📹 Создать email",
@@ -1222,13 +1153,11 @@ TRANSLATIONS = {
         "videos_saved": "✅ Видео {type} успешно сохранено!",
         "videos_invalid": "⚠️ Пожалуйста, отправьте правильное видео.",
 
-        # --- Admin Panel ---
         "admin_btn_settings": "⚙️ Настройки админа",
         "admin_btn_requests": "📋 Запросы",
         "admin_panel_title": "🛠 *Админ*\n\nВыберите раздел:",
         "admin_settings_title": "⚙️ *Настройки админа*\n\nВыберите действие:",
 
-        # --- Check Member / Email ---
         "owner_check_member_prompt": "🔎 <b>Проверить участника</b>\n\nОтправьте числовой ID или @username:\nПример: <code>123456789</code>\nПример: <code>@username</code>\n\nИли отправьте 'отмена' для возврата.",
         "owner_member_not_found": "⚠️ Участник не найден.",
         "owner_member_report": "Отчет об участнике",
@@ -1255,7 +1184,6 @@ TRANSLATIONS = {
         "owner_email_searching": "🔍 <b>Отчет об Email</b>\n\n📧 <code>{email}</code>\n📊 Совпадений: <b>{count}</b>\n\nОтправка каждой записи с деталями…",
         "owner_email_search_done": "✅ Отчет завершен.",
 
-        # --- Pagination ---
         "pagination_prev": "⬅️ Назад",
         "pagination_next": "Вперед ➡️",
         "pagination_page": "Страница {page}/{total}",
