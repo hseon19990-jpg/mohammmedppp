@@ -1,5 +1,5 @@
 """
-Advanced Telegram Account Manager Bot - v6.0
+Advanced Telegram Account Manager Bot - v6.1
 - IMAP verification happens ONLY at step 4 (app_pass)
 - On first IMAP success: account → approved_accounts + hold 24h
 - On first IMAP failure: request stays in pending_requests
@@ -25,7 +25,7 @@ import string
 import time
 import urllib.parse
 import urllib.request
-from urllib.parse import urlsplit  # <--- تم إضافة هذا السطر لحل المشكلة
+from urllib.parse import urlsplit
 from dataclasses import dataclass, asdict
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import datetime, timedelta, timezone
@@ -755,17 +755,18 @@ async def _safe_edit(query, text: str, **kwargs):
 
 
 # ==================== PRICING ====================
-def get_tier_prices() -> dict:
+def get_tier_prices(account_type: str = "old") -> dict:
     config = load_config()
+    prefix = f"{account_type}_tier_"
     return {
-        "tier_1": float(config.get("tier_1_price", 0.10)),
-        "tier_2": float(config.get("tier_2_price", 0.15)),
-        "tier_3": float(config.get("tier_3_price", 0.20)),
+        "tier_1": float(config.get(f"{prefix}1_price", 0.10 if account_type == "old" else 0.30)),
+        "tier_2": float(config.get(f"{prefix}2_price", 0.15 if account_type == "old" else 0.35)),
+        "tier_3": float(config.get(f"{prefix}3_price", 0.20 if account_type == "old" else 0.40)),
     }
 
 
-def calculate_account_price(totp_submitted: bool, app_pass_submitted: bool) -> float:
-    prices = get_tier_prices()
+def calculate_account_price(account_type: str, totp_submitted: bool, app_pass_submitted: bool) -> float:
+    prices = get_tier_prices(account_type)
     if app_pass_submitted and totp_submitted:
         return prices["tier_3"]
     elif totp_submitted:
@@ -1508,9 +1509,7 @@ async def check_contest_award(context: ContextTypes.DEFAULT_TYPE, uid: int):
         pass
 
 
-
 # Shared date and time helpers
-
 def parse_iso_datetime(value: Any) -> Optional[datetime]:
     if not isinstance(value, str) or not value.strip():
         return None
@@ -1531,8 +1530,5 @@ def _format_iso_time(value: Any) -> str:
         return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
     except Exception:
         return value[:19]
-
-
-
 
 __all__ = [name for name in globals() if not name.startswith("__")]
