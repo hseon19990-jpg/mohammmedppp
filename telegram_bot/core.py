@@ -376,6 +376,37 @@ async def check_email_availability(email: str, use_cache: bool = True) -> Option
     return result
 
 
+# ★★★ إضافات جديدة لضمان نتيجة مؤكدة ★★★
+def is_gmail_address(email: str) -> bool:
+    """هل الإيميل من جوجل؟ (فحص التوفر يعمل فقط مع جوجل)."""
+    return str(email or "").strip().lower().endswith(("@gmail.com", "@googlemail.com"))
+
+
+async def check_email_availability_retry(
+    email: str,
+    max_attempts: int = 3,
+    base_delay: float = 2.0,
+) -> Optional[bool]:
+    """
+    يفحص توفر الإيميل عبر جوجل بعدة محاولات لضمان نتيجة مؤكدة.
+    يعيد:
+      True  → الإيميل شاغر (يمكن إنشاؤه)
+      False → الإيميل محجوز (موجود مسبقاً)
+      None  → تعذّر التحقق بعد كل المحاولات
+    """
+    if not is_gmail_address(email):
+        return None
+    for attempt in range(max_attempts):
+        if attempt > 0:
+            await asyncio.sleep(base_delay * attempt)
+        result = await check_email_availability(email, use_cache=False)
+        if result is not None:
+            return result
+        logger.warning("Availability check attempt %d failed for %s", attempt + 1, email)
+    return None
+# ★★★ نهاية الإضافات ★★★
+
+
 # ==================== REJECT REASONS ====================
 REJECT_REASON_KEYS = ("email", "password", "totp", "app_pass", "phone", "other")
 
