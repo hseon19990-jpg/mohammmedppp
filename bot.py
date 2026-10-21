@@ -669,13 +669,29 @@ def load_pending_purchases_from_disk():
 
 
 # ==================== KEYBOARD HELPERS ====================
-def kb_vertical(buttons: List[Union[tuple, list]]) -> InlineKeyboardMarkup:
+def kb_vertical(buttons: List[Union[tuple, list, InlineKeyboardButton]]) -> InlineKeyboardMarkup:
     rows = []
+    pending_button = None
     for button in buttons:
         if isinstance(button, tuple) and len(button) == 2:
-            rows.append([InlineKeyboardButton(button[0], callback_data=button[1])])
+            inline_button = InlineKeyboardButton(button[0], callback_data=button[1])
+        elif isinstance(button, InlineKeyboardButton):
+            inline_button = button
         elif isinstance(button, list):
+            if pending_button is not None:
+                rows.append([pending_button])
+                pending_button = None
             rows.append([InlineKeyboardButton(btn[0], callback_data=btn[1]) for btn in button])
+            continue
+        else:
+            continue
+        if pending_button is None:
+            pending_button = inline_button
+        else:
+            rows.append([pending_button, inline_button])
+            pending_button = None
+    if pending_button is not None:
+        rows.append([pending_button])
     return InlineKeyboardMarkup(rows)
 
 
@@ -684,13 +700,12 @@ def kb_single(button_text: str, callback_data: str) -> InlineKeyboardMarkup:
 
 
 def member_menu_keyboard(buttons: List[Union[tuple, list]]) -> InlineKeyboardMarkup:
-    rows = list(kb_vertical(buttons).inline_keyboard)
     support_link = normalize_support_link(load_config().get("support_link"))
     if support_link:
-        rows.append([InlineKeyboardButton("📞 تواصل مع الدعم", url=support_link)])
+        support_button = InlineKeyboardButton("📞 تواصل مع الدعم", url=support_link)
     else:
-        rows.append([InlineKeyboardButton("📞 تواصل مع الدعم", callback_data="support_link_unavailable")])
-    return InlineKeyboardMarkup(rows)
+        support_button = InlineKeyboardButton("📞 تواصل مع الدعم", callback_data="support_link_unavailable")
+    return kb_vertical(list(buttons) + [support_button])
 
 
 def clear_edit_state(context: ContextTypes.DEFAULT_TYPE):
