@@ -1,1714 +1,1108 @@
-"""
-Advanced Telegram Account Manager Bot - v6.3
-"""
-
-import asyncio
-import hashlib
-import html
-import imaplib
-import io
-import json
-import logging
-import os
-import random
-import re
-import secrets
-import shutil
-import socket
-import ssl
-import string
-import time
-import urllib.parse
-import urllib.request
-from urllib.parse import urlsplit
-from urllib.request import Request, urlopen
-from dataclasses import dataclass, asdict
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from typing import Dict, Optional, List, Any, Union, Tuple
-
-import pyotp
-from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.constants import ParseMode
-from telegram.ext import (
-    Application,
-    CallbackQueryHandler,
-    CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
-)
-
-from dotenv import load_dotenv
-
-try:
-    from cryptography.fernet import Fernet, InvalidToken
-    CRYPTO_AVAILABLE = True
-except ImportError:
-    CRYPTO_AVAILABLE = False
-    Fernet = None
-    InvalidToken = Exception
-
-load_dotenv()
-
-# ==================== CONFIGURATION ====================
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
-owner_id_value = (
-    os.environ.get("OWNER_TELEGRAM_ID")
-    or os.environ.get("OWNER_ID")
-    or "0"
-).strip()
-try:
-    OWNER_ID = int(owner_id_value)
-except ValueError:
-    OWNER_ID = 0
-PURCHASE_CHANNEL_1 = os.environ.get("PURCHASE_CHANNEL_1", "").strip()
-PURCHASE_CHANNEL_2 = os.environ.get("PURCHASE_CHANNEL_2", "").strip()
-
-configured_data_dir = os.environ.get("DATA_DIR", "").strip()
-railway_volume_dir = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
-DATA_DIR = Path(configured_data_dir or railway_volume_dir or "/app/data").resolve()
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-MONEY_QUANTUM = Decimal("0.01")
-
-
-def money_to_cents(value: Any) -> int:
-    try:
-        amount = Decimal(str(value if value is not None else 0))
-    except (InvalidOperation, TypeError, ValueError):
-        return 0
-    return int(amount.quantize(MONEY_QUANTUM, rounding=ROUND_HALF_UP) * 100)
-
-
-def cents_to_money(cents: int) -> float:
-    return round(cents / 100, 2)
-
-
-def clamp_money(value: Any) -> float:
-    try:
-        return max(0.0, round(float(value or 0.0), 2))
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def spendable_balance_cents(user_data: dict) -> int:
-    return (
-        money_to_cents(user_data.get("balance", 0))
-        + money_to_cents(user_data.get("admin_received_balance", 0))
-    )
-
-
-def debit_spendable_balance(user_data: dict, amount_cents: int) -> bool:
-    if amount_cents < 0 or spendable_balance_cents(user_data) < amount_cents:
-        return False
-    regular_cents = money_to_cents(user_data.get("balance", 0))
-    admin_cents = money_to_cents(user_data.get("admin_received_balance", 0))
-    regular_debit = min(regular_cents, amount_cents)
-    admin_debit = amount_cents - regular_debit
-    user_data["balance"] = cents_to_money(regular_cents - regular_debit)
-    user_data["admin_received_balance"] = cents_to_money(admin_cents - admin_debit)
-    user_data["spent_balance"] = cents_to_money(
-        money_to_cents(user_data.get("spent_balance", 0)) + amount_cents
-    )
-    return True
-
-
-logging.basicConfig(
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    level=logging.INFO,
-)
-logger = logging.getLogger("bot")
-
-# ==================== ENCRYPTION ====================
-ENCRYPTION_KEY_FILE = DATA_DIR / ".encryption_key"
-SECRET_FIELDS = {"password", "totp", "app_pass"}
-_FERNET: Optional["Fernet"] = None
-
-
-def _init_fernet() -> Optional["Fernet"]:
-    global _FERNET
-    if _FERNET is not None:
-        return _FERNET
-    if not CRYPTO_AVAILABLE:
-        logger.warning("cryptography غير مثبت — تخزين بدون تشفير.")
-        return None
-    env_key = os.environ.get("ENCRYPTION_KEY", "").strip()
-    key_bytes = env_key.encode() if env_key else None
-    if not key_bytes:
-        if ENCRYPTION_KEY_FILE.exists():
-            try:
-                key_bytes = ENCRYPTION_KEY_FILE.read_bytes().strip()
-            except OSError:
-                key_bytes = None
-        if not key_bytes:
-            key_bytes = Fernet.generate_key()
-            try:
-                ENCRYPTION_KEY_FILE.write_bytes(key_bytes)
-                os.chmod(ENCRYPTION_KEY_FILE, 0o600)
-                logger.info("تم توليد مفتاح تشفير جديد.")
-            except OSError:
-                logger.exception("فشل حفظ مفتاح التشفير.")
-    try:
-        _FERNET = Fernet(key_bytes)
-    except Exception:
-        logger.exception("مفتاح التشفير غير صالح.")
-        _FERNET = None
-    return _FERNET
-
-
-def enc(value: Any) -> str:
-    if value is None or value == "":
-        return ""
-    f = _init_fernet()
-    if f is None:
-        return str(value)
-    try:
-        return f.encrypt(str(value).encode("utf-8")).decode("ascii")
-    except Exception:
-        logger.exception("فشل التشفير.")
-        return str(value)
-
-
-def dec(value: Any) -> str:
-    if value is None or value == "":
-        return ""
-    f = _init_fernet()
-    if f is None:
-        return str(value)
-    try:
-        return f.decrypt(str(value).encode("ascii")).decode("utf-8")
-    except Exception:
-        return str(value)
-
-
-def encrypt_record(record: dict) -> dict:
-    if not isinstance(record, dict):
-        return record
-    result = dict(record)
-    for field_name in SECRET_FIELDS:
-        if field_name in result and result[field_name]:
-            raw = str(result[field_name])
-            if not raw.startswith("gAAAAA"):
-                result[field_name] = enc(raw)
-    return result
-
-
-def decrypt_record(record: dict) -> dict:
-    if not isinstance(record, dict):
-        return record
-    result = dict(record)
-    for field_name in SECRET_FIELDS:
-        if field_name in result and result[field_name]:
-            result[field_name] = dec(result[field_name])
-    return result
-
-
-def encrypt_user_data(user_data: dict) -> dict:
-    if not isinstance(user_data, dict):
-        return user_data
-    result = dict(user_data)
-    for collection_name in ("approved_accounts", "pending_requests", "rejected_requests"):
-        items = result.get(collection_name)
-        if isinstance(items, list):
-            result[collection_name] = [encrypt_record(it) for it in items]
-    return result
-
-
-def decrypt_user_data(user_data: dict) -> dict:
-    if not isinstance(user_data, dict):
-        return user_data
-    result = dict(user_data)
-    for collection_name in ("approved_accounts", "pending_requests", "rejected_requests"):
-        items = result.get(collection_name)
-        if isinstance(items, list):
-            result[collection_name] = [decrypt_record(it) for it in items]
-    return result
-
-
-# ==================== DATA MIGRATION ====================
-def migrate_legacy_data():
-    legacy_dirs = {
-        Path("/railway/volume/data"),
-        Path("/app/data"),
-        Path.cwd() / "data",
-        Path(__file__).resolve().parent / "data",
-    }
-    legacy_dirs.discard(DATA_DIR)
-    for legacy_dir in legacy_dirs:
-        if not legacy_dir.exists():
-            continue
-        for filename in ("users.json", "config.json", "admins.json"):
-            source = legacy_dir / filename
-            destination = DATA_DIR / filename
-            if source.is_file() and not destination.exists():
-                try:
-                    shutil.copy2(source, destination)
-                    logger.info("Migrated %s.", filename)
-                except OSError:
-                    logger.exception("Migration failed.")
-        source_videos = legacy_dir / "videos"
-        destination_videos = DATA_DIR / "videos"
-        if source_videos.is_dir():
-            for source_video in source_videos.iterdir():
-                destination_video = destination_videos / source_video.name
-                if source_video.is_file() and not destination_video.exists():
-                    destination_videos.mkdir(parents=True, exist_ok=True)
-                    try:
-                        shutil.copy2(source_video, destination_video)
-                    except OSError:
-                        pass
-
-
-migrate_legacy_data()
-
-# ==================== CONSTANTS ====================
-USERS_DB = DATA_DIR / "users.json"
-SESSIONS_DB = DATA_DIR / "sessions.json"
-PENDING_PURCHASES_DB = DATA_DIR / "pending_purchases.json"
-ADMINS_DB = DATA_DIR / "admins.json"
-VIDEOS_DIR = DATA_DIR / "videos"
-BACKUP_DIR = DATA_DIR / "backups"
-VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
-BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-
-PAGE_SIZE = 8
-LEAVE_HOLD_SECONDS = 24 * 60 * 60
-LEAVE_HOLD_48H_SECONDS = 48 * 60 * 60
-IMAP_RATE_LIMIT_SECONDS = 60
-AUTO_VERIFY_ENABLED = True
-ADMIN_TIER3_PRICE = 0.20
-
-BAN_THRESHOLD = 3
-BAN_FIRST_DURATION_HOURS = 24
-BAN_WEEKLY_DURATION_HOURS = 24 * 7
-
-# ==================== SELL NEW EMAIL GENERATOR ====================
-FIRST_NAMES_EN = [
-    "James", "John", "Robert", "Michael", "William", "David", "Richard", "Joseph",
-    "Thomas", "Charles", "Christopher", "Daniel", "Matthew", "Anthony", "Mark",
-    "Donald", "Steven", "Paul", "Andrew", "Joshua", "Kenneth", "Kevin", "Brian",
-    "George", "Edward", "Ronald", "Timothy", "Jason", "Jeffrey", "Ryan",
-    "Jacob", "Gary", "Nicholas", "Eric", "Jonathan", "Stephen", "Larry",
-    "Justin", "Scott", "Brandon", "Benjamin", "Samuel", "Frank", "Gregory",
-    "Alexander", "Patrick", "Jack", "Dennis", "Jerry", "Tyler", "Aaron",
-    "Jose", "Adam", "Nathan", "Henry", "Douglas", "Zachary", "Peter",
-    "Ethan", "Walter", "Kyle", "Harold", "Jeremy", "Terry", "Keith", "Roger",
-]
-
-
-def generate_sell_email_credentials() -> dict:
-    """توليد اسم + إيميل + باسورد عشوائي لعملية (بيع إيميل جديد)."""
-    first_name = random.choice(FIRST_NAMES_EN)
-    letters = "".join(secrets.choice(string.ascii_lowercase) for _ in range(18))
-    digits = "".join(secrets.choice(string.digits) for _ in range(5))
-    email = f"{letters}{digits}@gmail.com"
-    password = "".join(secrets.choice(string.ascii_letters) for _ in range(10))
-    return {"first_name": first_name, "email": email, "password": password}
-
-
-# ==================== EMAIL AVAILABILITY CHECKER ====================
-_EMAIL_AVAILABILITY_CACHE: Dict[str, Tuple[float, Optional[bool]]] = {}
-_LAST_CHECK_TIME = 0.0
-_CHECK_MIN_INTERVAL = 1.5
-
-
-def check_email_availability_sync(username: str) -> Optional[bool]:
-    """
-    فحص توفر اسم المستخدم في جوجل بدون فتح متصفح (خفيف جداً على السيرفر).
-    يعيد:
-      True  -> متاح (غير محجوز)
-      False -> محجوز (مستخدم)
-      None  -> فشل الفحص (خطأ شبكة أو حظر مؤقت)
-    """
-    try:
-        url = "https://accounts.google.com/InputValidator?resource=SignUp"
-        payload = json.dumps({
-            "input01": {
-                "Input": "GmailAddress",
-                "GmailAddress": username,
-                "FirstName": "Test",
-                "LastName": "User",
-            }
-        }).encode("utf-8")
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                          "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            "Content-Type": "application/json",
-            "Accept-Language": "en-US,en;q=0.9",
-        }
-        req = Request(url, data=payload, headers=headers, method="POST")
-        with urlopen(req, timeout=10) as response:
-            body = response.read().decode("utf-8", errors="ignore")
-        try:
-            data = json.loads(body)
-        except json.JSONDecodeError:
-            return None
-        if isinstance(data, dict) and data.get("errors"):
-            return False
-        return True
-    except Exception as exc:
-        logger.warning(f"Availability check failed: {type(exc).__name__}")
-        return None
-
-
-async def check_email_availability(email: str, use_cache: bool = True) -> Optional[bool]:
-    """نسخة Async مع كاش + Rate Limit."""
-    global _LAST_CHECK_TIME
-
-    if use_cache:
-        cached = _EMAIL_AVAILABILITY_CACHE.get(email)
-        if cached and (time.time() - cached[0]) < 180:
-            return cached[1]
-
-    elapsed = time.time() - _LAST_CHECK_TIME
-    if elapsed < _CHECK_MIN_INTERVAL:
-        await asyncio.sleep(_CHECK_MIN_INTERVAL - elapsed)
-    _LAST_CHECK_TIME = time.time()
-
-    username = email.split("@")[0]
-    result = await asyncio.to_thread(check_email_availability_sync, username)
-
-    if result is not None:
-        _EMAIL_AVAILABILITY_CACHE[email] = (time.time(), result)
-
-    return result
-
-
-# ==================== REJECT REASONS ====================
-REJECT_REASON_KEYS = ("email", "password", "totp", "app_pass", "phone", "other")
-
-REJECT_REASON_ICONS = {
-    "email": "📧", "password": "🔑", "totp": "🔐", "app_pass": "🗝",
-    "phone": "📱", "other": "📝", "custom": "📝", "unknown": "❌",
-    "imap_failed_24h": "🔴",
-}
-
-REJECT_REASON_LABELS = {
-    "email": "إيميل خطأ", "password": "باسورد خطأ", "totp": "رمز مصادقة خطأ",
-    "app_pass": "كلمة مرور تطبيق خطأ", "phone": "يحتاج رقم هاتف",
-    "other": "خطأ آخر", "custom": "سبب مخصص", "unknown": "غير معروف",
-    "owner_manual": "رفض يدوي من المالك",
-    "imap_failed_24h": "فشل الفحص الثاني (24 ساعة)",
-}
-
-REJECT_REASON_MESSAGES = {
-    "email": "❌ الإيميل غير صحيح أو غير مقبول.",
-    "password": "❌ كلمة المرور غير صحيحة.",
-    "totp": "❌ رمز المصادقة غير صحيح.",
-    "app_pass": "❌ كلمة مرور التطبيق غير صحيحة.",
-    "phone": "📱 هذا الحساب يحتاج رقم هاتف للتفعيل.",
-    "other": "❌ تم رفض طلبك لسبب آخر.",
-}
-
-REJECT_REASON_VIDEO_KEY = {
-    "email": "video_email", "password": "video_password", "totp": "video_totp",
-    "app_pass": "video_app_pass", "phone": "video_phone",
-}
-
-
-# ==================== DATA HELPERS ====================
-def load_json(path: Path) -> dict:
-    backup_path = path.with_name(f"{path.name}.bak")
-    for candidate in (path, backup_path):
-        if not candidate.exists():
-            continue
-        try:
-            value = json.loads(candidate.read_text(encoding="utf-8"))
-            if isinstance(value, dict):
-                return value
-        except (OSError, json.JSONDecodeError):
-            logger.exception("Could not read %s.", candidate)
-    return {}
-
-
-def save_json(path: Path, data: dict):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = path.with_name(f".{path.name}.tmp")
-    backup_path = path.with_name(f"{path.name}.bak")
-    payload = json.dumps(data, indent=2, ensure_ascii=False)
-    with temporary_path.open("w", encoding="utf-8") as temporary_file:
-        temporary_file.write(payload)
-        temporary_file.flush()
-        os.fsync(temporary_file.fileno())
-    if path.exists():
-        try:
-            shutil.copy2(path, backup_path)
-        except OSError:
-            pass
-    os.replace(temporary_path, path)
-
-
-# ==================== CONFIG CACHE ====================
-_CONFIG_CACHE: Dict[str, Any] = {"data": None, "mtime": 0.0, "loaded_at": 0.0}
-_CONFIG_TTL = 30
-
-
-def invalidate_config_cache():
-    _CONFIG_CACHE["data"] = None
-    _CONFIG_CACHE["mtime"] = 0.0
-    _CONFIG_CACHE["loaded_at"] = 0.0
-
-
-def load_config() -> dict:
-    config_path = DATA_DIR / "config.json"
-    now = time.time()
-    cached = _CONFIG_CACHE.get("data")
-    if cached is not None and (now - _CONFIG_CACHE.get("loaded_at", 0.0)) < _CONFIG_TTL:
-        return cached
-    try:
-        mtime = config_path.stat().st_mtime if config_path.exists() else 0.0
-    except OSError:
-        mtime = 0.0
-    if cached is not None and mtime == _CONFIG_CACHE.get("mtime"):
-        _CONFIG_CACHE["loaded_at"] = now
-        return cached
-    data = load_json(config_path)
-    _CONFIG_CACHE["data"] = data
-    _CONFIG_CACHE["mtime"] = mtime
-    _CONFIG_CACHE["loaded_at"] = now
-    return data
-
-
-def save_config(data: dict):
-    save_json(DATA_DIR / "config.json", data)
-    invalidate_config_cache()
-
-
-def normalize_support_link(value: Any) -> str:
-    link = str(value or "").strip()
-    if not link or len(link) > 500 or any(character.isspace() for character in link):
-        return ""
-    try:
-        parsed = urlsplit(link)
-    except ValueError:
-        return ""
-    if (parsed.scheme.lower() != "https" or not parsed.hostname
-            or parsed.username or parsed.password):
-        return ""
-    return link
-
-
-def maintenance_is_enabled() -> bool:
-    return bool(load_config().get("maintenance_mode", False))
-
-
-def maintenance_toggle_button():
-    if maintenance_is_enabled():
-        return ("🛑 إيقاف الصيانة", "maintenance_toggle")
-    return ("🛠️ تشغيل الصيانة", "maintenance_toggle")
-
-
-async def maintenance_access_allowed(update: Update) -> bool:
-    user = update.effective_user
-    if not maintenance_is_enabled() or (user and user.id == OWNER_ID):
-        return True
-    notice = "🛠️ البوت تحت الصيانة حالياً. يرجى المحاولة لاحقاً."
-    if update.callback_query:
-        await update.callback_query.answer(notice, show_alert=True)
-    elif update.effective_message:
-        await update.effective_message.reply_text(notice)
-    return False
-
-
-# ==================== ADMINS ====================
-def load_admins() -> set:
-    data = load_json(ADMINS_DB)
-    admins = data.get("admins", [])
-    result = set()
-    for a in admins:
-        try:
-            result.add(int(a))
-        except (TypeError, ValueError):
-            continue
-    return result
-
-
-def save_admins(admins: set):
-    save_json(ADMINS_DB, {"admins": sorted(int(a) for a in admins)})
-
-
-def is_admin(user_id: int) -> bool:
-    return user_id in load_admins()
-
-
-def is_admin_or_owner(user_id: int) -> bool:
-    return user_id == OWNER_ID or is_admin(user_id)
-
-
-# ==================== USER DATA ====================
-DEFAULT_USER_FIELDS = {
-    "balance": 0.0, "pending_balance": 0.0, "hold_balance": 0.0,
-    "admin_pending_balance": 0.0, "admin_received_balance": 0.0,
-    "total_credited_balance": 0.0, "spent_balance": 0.0,
-    "approved_accounts": [], "pending_requests": [], "rejected_emails": [],
-    "rejected_requests": [], "referral_code": "", "referred_by": None,
-    "referral_earnings": 0.0, "total_referrals": 0, "total_approved_emails": 0,
-    "pending_purchases": [], "used_app_passwords": [], "transactions": [],
-    "contest_wins": [], "consecutive_rejections": 0, "ban_until": "",
-    "ban_level": 0, "total_rejections": 0,
-    "language": "ar",
-}
-
-
-def get_user(user_id: int) -> dict:
-    users = load_json(USERS_DB)
-    raw = users.get(str(user_id), {})
-    merged = {**DEFAULT_USER_FIELDS, **raw}
-    merged["balance"] = clamp_money(merged.get("balance"))
-    merged["pending_balance"] = clamp_money(merged.get("pending_balance"))
-    merged["hold_balance"] = clamp_money(merged.get("hold_balance"))
-    merged["admin_pending_balance"] = clamp_money(merged.get("admin_pending_balance"))
-    merged["admin_received_balance"] = clamp_money(merged.get("admin_received_balance"))
-    merged["total_credited_balance"] = clamp_money(merged.get("total_credited_balance"))
-    merged["spent_balance"] = clamp_money(merged.get("spent_balance"))
-    merged["referral_earnings"] = clamp_money(merged.get("referral_earnings"))
-    return decrypt_user_data(merged)
-
-
-def save_user(user_id: int, user_data: dict):
-    users = load_json(USERS_DB)
-    for field_name in ("balance", "pending_balance", "hold_balance",
-                       "admin_pending_balance", "admin_received_balance",
-                       "total_credited_balance", "spent_balance", "referral_earnings"):
-        if field_name in user_data:
-            user_data[field_name] = clamp_money(user_data[field_name])
-    if isinstance(user_data.get("transactions"), list) and len(user_data["transactions"]) > 200:
-        user_data["transactions"] = user_data["transactions"][-200:]
-    users[str(user_id)] = encrypt_user_data(user_data)
-    save_json(USERS_DB, users)
-
-
-def add_transaction(user_data: dict, kind: str, amount: float, note: str = "", email: str = ""):
-    user_data.setdefault("transactions", []).append({
-        "kind": kind, "amount": round(float(amount), 2),
-        "note": note[:200], "email": email,
-        "at": datetime.now(timezone.utc).isoformat(),
+"""Purchase channels, catalog, wallet, store, and referrals."""
+
+from telegram_bot.core import *
+
+# ==================== PURCHASE CHANNELS ====================
+def purchase_channels_keyboard():
+    return kb_vertical([("1️⃣ ضبط الأول", "set_purchase_channel_1"),
+                        ("2️⃣ ضبط الثاني", "set_purchase_channel_2"),
+                        ("🔙 إعدادات المالك", "owner_panel")])
+
+
+async def purchase_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    ch1, ch2 = get_configured_purchase_channels()
+    await query.edit_message_text(
+        f"📨 *إشعارات الشراء*\n\n1️⃣ `{ch1 or 'غير مضبوط'}`\n2️⃣ `{ch2 or 'غير مضبوط'}`",
+        parse_mode=ParseMode.MARKDOWN, reply_markup=purchase_channels_keyboard())
+
+
+async def set_purchase_channel(update: Update, context: ContextTypes.DEFAULT_TYPE, channel_number: int):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    context.user_data["store_action"] = f"set_purchase_channel_{channel_number}"
+    await query.edit_message_text(f"✏️ أرسل معرف الكروب {channel_number}:",
+                                  parse_mode=ParseMode.MARKDOWN,
+                                  reply_markup=purchase_channels_keyboard())
+
+
+async def forced_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    config = load_config()
+    current_channel = config.get("forced_channel", "")
+    buttons = [("🗑️ إلغاء القناة", "remove_channel"), ("🔙 إعدادات المالك", "owner_panel")]
+    await query.edit_message_text(
+        f"📢 *القناة الإجبارية*\n\n📌 الحالية: `{current_channel or 'لا توجد'}`\n\n"
+        "أرسل معرف قناة عامة مثل `@channel` أو رابطها.\n"
+        "للقناة الخاصة أرسل المعرف الرقمي ورابط الدعوة بهذا الشكل:\n"
+        "`-1001234567890 | https://t.me/+invite`",
+        parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
+    context.user_data["store_action"] = "set_channel"
+
+
+async def remove_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    config = load_config()
+    config["forced_channel"] = ""
+    config.pop("forced_channel_link", None)
+    save_config(config)
+    context.user_data.pop("store_action", None)
+    await query.edit_message_text("✅ تم إلغاء القناة.",
+                                  reply_markup=kb_single("🔙 إعدادات المالك", "owner_panel"))
+
+
+# ==================== WITHDRAW STORE ====================
+
+def _tg_lion_fetch_countries_sync() -> Tuple[Optional[List[dict]], str]:
+    api_key = os.environ.get("TG_LION_API_KEY", "").strip()
+    your_id = os.environ.get("TG_LION_USER_ID", "").strip()
+    if not api_key or not your_id:
+        return None, "not_configured"
+
+    params = urllib.parse.urlencode({
+        "action": "available_countries",
+        "apiKey": api_key,
+        "YourID": your_id,
     })
-
-
-# ==================== LANGUAGE HELPERS ====================
-SUPPORTED_LANGUAGES = ("ar", "en", "ru")
-
-
-def get_user_language(user_id: int) -> str:
-    user_data = get_user(user_id)
-    lang = str(user_data.get("language", "ar") or "ar").lower()
-    if lang not in SUPPORTED_LANGUAGES:
-        return "ar"
-    return lang
-
-
-def set_user_language(user_id: int, lang: str):
-    if lang not in SUPPORTED_LANGUAGES:
-        return
-    user_data = get_user(user_id)
-    user_data["language"] = lang
-    save_user(user_id, user_data)
-
-
-def t(user_id: int, key: str, **kwargs) -> str:
-    """ترجمة مفتاح حسب لغة المستخدم."""
-    from telegram_bot.locales import TRANSLATIONS
-    lang = get_user_language(user_id)
-    text = (
-        TRANSLATIONS.get(lang, {}).get(key)
-        or TRANSLATIONS.get("ar", {}).get(key)
-        or key
+    request = urllib.request.Request(
+        f"{TG_LION_API_URL}?{params}",
+        headers={"Accept": "application/json", "User-Agent": "mohammmedppp-bot"},
     )
     try:
-        return text.format(**kwargs)
-    except (KeyError, IndexError):
-        return text
+        with urllib.request.urlopen(request, timeout=15) as response:
+            raw_body = response.read(1024 * 1024 + 1)
+        if len(raw_body) > 1024 * 1024:
+            return None, "invalid_response"
+        payload = json.loads(raw_body.decode("utf-8"))
+    except Exception as exc:
+        logger.warning("TG-Lion country-list request failed (%s)", type(exc).__name__)
+        return None, "provider_error"
 
-
-# ==================== AUTO-BAN HELPERS ====================
-def _ban_duration_hours_for_level(level: int) -> int:
-    return BAN_FIRST_DURATION_HOURS if level <= 1 else BAN_WEEKLY_DURATION_HOURS
-
-
-def get_active_ban_message(user_data: dict) -> Optional[str]:
-    ban_until_str = str(user_data.get("ban_until", "") or "").strip()
-    if not ban_until_str:
-        return None
-    try:
-        ban_until = datetime.fromisoformat(ban_until_str)
-    except ValueError:
-        return None
-    if ban_until.tzinfo is None:
-        ban_until = ban_until.replace(tzinfo=timezone.utc)
-    now = datetime.now(timezone.utc)
-    if now >= ban_until:
-        return None
-    remaining = ban_until - now
-    hours = int(remaining.total_seconds() // 3600)
-    minutes = int((remaining.total_seconds() % 3600) // 60)
-    return (f"🚫 <b>أنت محظور من إرسال حسابات جديدة</b>\n"
-            f"⏳ الوقت المتبقي: {hours} ساعة و {minutes} دقيقة.\n"
-            f"<i>السبب: 3 رفضات متتالية.</i>")
-
-
-def register_rejection_and_maybe_ban(user_data: dict) -> Optional[Tuple[int, str]]:
-    consecutive = int(user_data.get("consecutive_rejections", 0) or 0) + 1
-    user_data["consecutive_rejections"] = consecutive
-    user_data["total_rejections"] = int(user_data.get("total_rejections", 0) or 0) + 1
-    if consecutive < BAN_THRESHOLD:
-        return None
-    ban_level = int(user_data.get("ban_level", 0) or 0) + 1
-    user_data["ban_level"] = ban_level
-    user_data["consecutive_rejections"] = 0
-    duration_hours = _ban_duration_hours_for_level(ban_level)
-    ban_until = datetime.now(timezone.utc) + timedelta(hours=duration_hours)
-    user_data["ban_until"] = ban_until.isoformat()
-    # ═══ حذف جميع الإيميلات المعلقة عند تفعيل الحظر ═══
-    pending = user_data.get("pending_requests", []) or []
-    if pending:
-        total_pending = 0.0
-        for req in pending:
-            try:
-                total_pending += float(req.get("amount", 0.0) or 0.0)
-            except (TypeError, ValueError):
-                continue
-        user_data["pending_balance"] = clamp_money(
-            float(user_data.get("pending_balance", 0.0)) - total_pending)
-    user_data["pending_requests"] = []
-    duration_text = "يوم واحد" if ban_level == 1 else "أسبوع"
-    return ban_level, duration_text
-
-
-def register_approval_reset(user_data: dict):
-    user_data["consecutive_rejections"] = 0
-
-
-# ==================== SESSION PERSISTENCE ====================
-@dataclass
-class Session:
-    step: str = ""
-    email: str = ""
-    password: str = ""
-    totp: str = ""
-    app_pass: str = ""
-    editing_email: str = ""
-    has_password: bool = False
-    has_totp: bool = False
-    has_app_pass: bool = False
-
-
-SESSIONS: Dict[int, Session] = {}
-PENDING_PURCHASES: Dict[int, Dict] = {}
-TG_LION_API_URL = "https://TG-Lion.net/"
-TG_LION_COUNTRY_CACHE = {"countries": None, "expires_at": 0.0}
-TG_LION_COUNTRY_CACHE_TTL = 60
-TG_LION_ORDER_LOCK = asyncio.Lock()
-_IMAP_RATE: Dict[str, float] = {}
-
-_TG_LION_CALLING_CODES = {
-    "AD": "376", "AE": "971", "AF": "93", "AG": "1268", "AI": "1264",
-    "AL": "355", "AM": "374", "AO": "244", "AR": "54", "AS": "1684",
-    "AT": "43", "AU": "61", "AW": "297", "AX": "358", "AZ": "994",
-    "BA": "387", "BB": "1246", "BD": "880", "BE": "32", "BF": "226",
-    "BG": "359", "BH": "973", "BI": "257", "BJ": "229", "BL": "590",
-    "BM": "1441", "BN": "673", "BO": "591", "BQ": "599", "BR": "55",
-    "BS": "1242", "BT": "975", "BW": "267", "BY": "375", "BZ": "501",
-    "CA": "1", "CC": "61", "CD": "243", "CF": "236", "CG": "242",
-    "CH": "41", "CI": "225", "CK": "682", "CL": "56", "CM": "237",
-    "CN": "86", "CO": "57", "CR": "506", "CU": "53", "CV": "238",
-    "CW": "599", "CX": "61", "CY": "357", "CZ": "420", "DE": "49",
-    "DJ": "253", "DK": "45", "DM": "1767", "DO": "1809", "DZ": "213",
-    "EC": "593", "EE": "372", "EG": "20", "ER": "291", "ES": "34",
-    "ET": "251", "FI": "358", "FJ": "679", "FK": "500", "FM": "691",
-    "FO": "298", "FR": "33", "GA": "241", "GB": "44", "GD": "1473",
-    "GE": "995", "GF": "594", "GG": "44", "GH": "233", "GI": "350",
-    "GL": "299", "GM": "220", "GN": "224", "GP": "590", "GQ": "240",
-    "GR": "30", "GT": "502", "GU": "1671", "GW": "245", "GY": "592",
-    "HK": "852", "HN": "504", "HR": "385", "HT": "509", "HU": "36",
-    "ID": "62", "IE": "353", "IL": "972", "IM": "44", "IN": "91",
-    "IO": "246", "IQ": "964", "IR": "98", "IS": "354", "IT": "39",
-    "JE": "44", "JM": "1876", "JO": "962", "JP": "81", "KE": "254",
-    "KG": "996", "KH": "855", "KI": "686", "KM": "269", "KN": "1869",
-    "KP": "850", "KR": "82", "KW": "965", "KY": "1345", "KZ": "7",
-    "LA": "856", "LB": "961", "LC": "1758", "LI": "423", "LK": "94",
-    "LR": "231", "LS": "266", "LT": "370", "LU": "352", "LV": "371",
-    "LY": "218", "MA": "212", "MC": "377", "MD": "373", "ME": "382",
-    "MF": "590", "MG": "261", "MH": "692", "MK": "389", "ML": "223",
-    "MM": "95", "MN": "976", "MO": "853", "MP": "1670", "MQ": "596",
-    "MR": "222", "MS": "1664", "MT": "356", "MU": "230", "MV": "960",
-    "MW": "265", "MX": "52", "MY": "60", "MZ": "258", "NA": "264",
-    "NC": "687", "NE": "227", "NF": "672", "NG": "234", "NI": "505",
-    "NL": "31", "NO": "47", "NP": "977", "NR": "674", "NU": "683",
-    "NZ": "64", "OM": "968", "PA": "507", "PE": "51", "PF": "689",
-    "PG": "675", "PH": "63", "PK": "92", "PL": "48", "PM": "508",
-    "PR": "1787", "PS": "970", "PT": "351", "PW": "680", "PY": "595",
-    "QA": "974", "RE": "262", "RO": "40", "RS": "381", "RU": "7",
-    "RW": "250", "SA": "966", "SB": "677", "SC": "248", "SD": "249",
-    "SE": "46", "SG": "65", "SH": "290", "SI": "386", "SK": "421",
-    "SL": "232", "SM": "378", "SN": "221", "SO": "252", "SR": "597",
-    "SS": "211", "ST": "239", "SV": "503", "SX": "1721", "SY": "963",
-    "SZ": "268", "TC": "1649", "TD": "235", "TG": "228", "TH": "66",
-    "TJ": "992", "TK": "690", "TL": "670", "TM": "993", "TN": "216",
-    "TO": "676", "TR": "90", "TT": "1868", "TV": "688", "TW": "886",
-    "TZ": "255", "UA": "380", "UG": "256", "US": "1", "UY": "598",
-    "UZ": "998", "VA": "379", "VC": "1784", "VE": "58", "VG": "1284",
-    "VI": "1340", "VN": "84", "VU": "678", "WF": "681", "WS": "685",
-    "YE": "967", "YT": "262", "ZA": "27", "ZM": "260", "ZW": "263",
-}
-
-
-def tg_lion_country_flag(country_code: str) -> str:
-    code = str(country_code or "").upper()
-    if len(code) != 2 or not all("A" <= letter <= "Z" for letter in code):
-        return "🌐"
-    return "".join(chr(ord(letter) + 127397) for letter in code)
-
-
-def normalize_tg_lion_calling_code(value: Any) -> str:
-    digits = re.sub(r"\D", "", str(value or ""))
-    return digits[2:] if digits.startswith("00") else digits
-
-
-def _sessions_to_json() -> dict:
-    return {str(uid): asdict(sess) for uid, sess in SESSIONS.items()}
-
-
-def load_sessions_from_disk():
-    raw = load_json(SESSIONS_DB)
-    for key, data in raw.items():
-        try:
-            uid = int(key)
-            SESSIONS[uid] = Session(**{**asdict(Session()), **data})
-        except (ValueError, TypeError):
-            continue
-    logger.info("Loaded %d active sessions.", len(SESSIONS))
-
-
-def save_sessions():
-    try:
-        save_json(SESSIONS_DB, _sessions_to_json())
-    except Exception:
-        logger.exception("فشل حفظ الجلسات.")
-
-
-def save_pending_purchases():
-    try:
-        save_json(PENDING_PURCHASES_DB, {str(k): v for k, v in PENDING_PURCHASES.items()})
-    except Exception:
-        logger.exception("فشل حفظ مشتريات معلقة.")
-
-
-def load_pending_purchases_from_disk():
-    raw = load_json(PENDING_PURCHASES_DB)
-    for key, data in raw.items():
-        try:
-            PENDING_PURCHASES[int(key)] = data
-        except (ValueError, TypeError):
-            continue
-    logger.info("Loaded %d pending purchases.", len(PENDING_PURCHASES))
-
-
-# ==================== KEYBOARD HELPERS ====================
-def kb_vertical(buttons: List[Union[tuple, list, InlineKeyboardButton]]) -> InlineKeyboardMarkup:
-    rows = []
-    pending_button = None
-    for button in buttons:
-        if isinstance(button, tuple) and len(button) == 2:
-            inline_button = InlineKeyboardButton(button[0], callback_data=button[1])
-        elif isinstance(button, InlineKeyboardButton):
-            inline_button = button
-        elif isinstance(button, list):
-            if pending_button is not None:
-                rows.append([pending_button])
-                pending_button = None
-            rows.append([InlineKeyboardButton(btn[0], callback_data=btn[1]) for btn in button])
-            continue
-        else:
-            continue
-        if pending_button is None:
-            pending_button = inline_button
-        else:
-            rows.append([pending_button, inline_button])
-            pending_button = None
-    if pending_button is not None:
-        rows.append([pending_button])
-    return InlineKeyboardMarkup(rows)
-
-
-def kb_single(button_text: str, callback_data: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton(button_text, callback_data=callback_data)]])
-
-
-def member_menu_keyboard(buttons: List[Union[tuple, list]]) -> InlineKeyboardMarkup:
-    support_link = normalize_support_link(load_config().get("support_link"))
-    if support_link:
-        support_button = InlineKeyboardButton("📞 تواصل مع الدعم", url=support_link)
+    if not isinstance(payload, dict) or str(payload.get("status", "")).lower() != "ok":
+        return None, "provider_error"
+    raw_countries = payload.get("countries")
+    if isinstance(raw_countries, dict):
+        entries = raw_countries.items()
+    elif isinstance(raw_countries, list):
+        entries = [(item.get("code", ""), item) for item in raw_countries if isinstance(item, dict)]
     else:
-        support_button = InlineKeyboardButton("📞 تواصل مع الدعم", callback_data="support_link_unavailable")
-    return kb_vertical(list(buttons) + [support_button])
+        return None, "invalid_response"
 
-
-def clear_edit_state(context: ContextTypes.DEFAULT_TYPE):
-    for key in ("step", "editing_email", "editing_field", "editing_uid", "editing_index"):
-        context.user_data.pop(key, None)
-
-
-def tg_html_escape(value: Any) -> str:
-    return html.escape(str(value), quote=False)
-
-
-async def _safe_edit(query, text: str, **kwargs):
-    try:
-        await query.edit_message_text(text, **kwargs)
-    except Exception:
-        logger.exception("edit_message_text failed, falling back to send_message")
+    countries = []
+    seen_codes = set()
+    for fallback_code, item in entries:
+        if not isinstance(item, dict):
+            continue
+        code = str(item.get("code") or fallback_code or "").strip().upper()
+        if not code or len(code) > 12 or code in seen_codes:
+            continue
         try:
-            await query.message.reply_text(text, **kwargs)
-        except Exception:
-            logger.exception("send_message fallback failed")
+            source_price = Decimal(str(item.get("price")))
+            if not source_price.is_finite() or source_price < 0:
+                continue
+            base_price_cents = money_to_cents(source_price)
+            quantity = int(item.get("qty", 0))
+        except (InvalidOperation, TypeError, ValueError, OverflowError):
+            continue
+        if quantity <= 0:
+            continue
+        name = str(item.get("name") or code).strip()[:120]
+        raw_calling_code = next(
+            (item.get(key) for key in (
+                "calling_code", "callingCode", "dial_code", "dialCode",
+                "phone_code", "phoneCode", "prefix",
+            ) if item.get(key)),
+            _TG_LION_CALLING_CODES.get(code, ""),
+        )
+        countries.append({
+            "code": code,
+            "name": name,
+            "flag": str(item.get("flag") or tg_lion_country_flag(code)),
+            "calling_code": normalize_tg_lion_calling_code(raw_calling_code),
+            "qty": quantity,
+            "base_price_cents": base_price_cents,
+            "price_cents": base_price_cents + 5,
+        })
+        seen_codes.add(code)
+    return countries, "ok"
 
 
-# ==================== PRICING ====================
-def get_tier_prices(account_type: str = "old") -> dict:
-    config = load_config()
-    prefix = f"{account_type}_tier_"
-    return {
-        "tier_1": float(config.get(f"{prefix}1_price", 0.10 if account_type == "old" else 0.30)),
-        "tier_2": float(config.get(f"{prefix}2_price", 0.15 if account_type == "old" else 0.35)),
-        "tier_3": float(config.get(f"{prefix}3_price", 0.20 if account_type == "old" else 0.40)),
+async def get_tg_lion_countries(force_refresh: bool = False) -> Tuple[Optional[List[dict]], str]:
+    now = time.monotonic()
+    cached = TG_LION_COUNTRY_CACHE.get("countries")
+    if not force_refresh and cached is not None and now < TG_LION_COUNTRY_CACHE.get("expires_at", 0.0):
+        return cached, "ok"
+    countries, status = await asyncio.to_thread(_tg_lion_fetch_countries_sync)
+    if status == "ok" and countries is not None:
+        TG_LION_COUNTRY_CACHE["countries"] = countries
+        TG_LION_COUNTRY_CACHE["expires_at"] = time.monotonic() + TG_LION_COUNTRY_CACHE_TTL
+    return countries, status
+
+
+def tg_lion_country_keyboard(countries: List[dict], page: int) -> Tuple[InlineKeyboardMarkup, int]:
+    page_size = 14
+    total_pages = max(1, (len(countries) + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+    start = page * page_size
+    rows = []
+    page_items = countries[start:start + page_size]
+    for index in range(0, len(page_items), 2):
+        row = []
+        for country in page_items[index:index + 2]:
+            flag = country.get("flag") or tg_lion_country_flag(country["code"])
+            label = f"{flag} {country['code']} | {cents_to_money(country['price_cents']):.2f}$"
+            row.append(InlineKeyboardButton(label[:64], callback_data=f"tg_lion_country:{country['code']}:{page}"))
+        rows.append(row)
+    for start_page in range(0, total_pages, 7):
+        rows.append([
+            InlineKeyboardButton(
+                f"[{page_num + 1}]" if page_num == page else str(page_num + 1),
+                callback_data=f"tg_lion_page:{page_num}",
+            )
+            for page_num in range(start_page, min(start_page + 7, total_pages))
+        ])
+    rows.append([
+        InlineKeyboardButton("🔎 بحث عن الدولة", callback_data=f"tg_lion_search_start:{page}")
+    ])
+    return InlineKeyboardMarkup(rows), total_pages
+
+
+async def tg_lion_catalog(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 0):
+    if not await check_forced_channel(update, context):
+        return
+    query = update.callback_query
+    if not load_config().get("tg_lion_store_visible", True):
+        if query:
+            await query.answer("هذا القسم مخفي حالياً.", show_alert=True)
+        return
+    if query:
+        await query.answer()
+    countries, status = await get_tg_lion_countries()
+    if status != "ok" or countries is None:
+        if query:
+            await query.edit_message_text("⚠️ الخدمة غير متاحة حالياً. يرجى التواصل مع الإدارة.")
+        return
+    if not countries:
+        if query:
+            await query.edit_message_text("📭 لا توجد دول متاحة حالياً.")
+        return
+    keyboard, total_pages = tg_lion_country_keyboard(countries, page)
+    page = max(0, min(int(page), total_pages - 1))
+    if query:
+        await query.edit_message_text("\u2063", reply_markup=keyboard)
+
+
+async def tg_lion_search_start(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int):
+    query = update.callback_query
+    if not query:
+        return
+    if not load_config().get("tg_lion_store_visible", True):
+        await query.answer("هذا القسم مخفي حالياً.", show_alert=True)
+        return
+    await query.answer()
+    context.user_data["tg_lion_search_page"] = max(0, page)
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("↩️ الرجوع إلى الدول", callback_data=f"tg_lion_search_cancel:{max(0, page)}")
+    ]])
+    await query.edit_message_text(
+        "أرسل رمز الاتصال الدولي للدولة، مثل 964 أو +964.",
+        reply_markup=keyboard,
+    )
+
+
+async def tg_lion_search_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int):
+    context.user_data.pop("tg_lion_search_page", None)
+    await tg_lion_catalog(update, context, page)
+
+
+def tg_lion_find_countries_by_calling_code(countries: List[dict], calling_code: str) -> List[dict]:
+    normalized = normalize_tg_lion_calling_code(calling_code)
+    return [
+        country for country in countries
+        if normalize_tg_lion_calling_code(
+            country.get("calling_code") or _TG_LION_CALLING_CODES.get(country.get("code", "").upper(), "")
+        ) == normalized
+    ]
+
+
+async def tg_lion_search_country_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    page = max(0, int(context.user_data.get("tg_lion_search_page", 0)))
+    raw_text = update.message.text.strip()
+    candidate = raw_text.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+    if candidate.startswith("+"):
+        candidate = candidate[1:]
+    elif candidate.startswith("00"):
+        candidate = candidate[2:]
+    if not candidate.isascii() or not candidate.isdigit() or not 1 <= len(candidate) <= 4:
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("↩️ الرجوع إلى الدول", callback_data=f"tg_lion_search_cancel:{page}")
+        ]])
+        await update.message.reply_text(
+            "أرسل رمز اتصال دولياً بالأرقام فقط، مثل 964 أو +964.",
+            reply_markup=keyboard,
+        )
+        return
+
+    countries, status = await get_tg_lion_countries()
+    if status != "ok" or countries is None:
+        await update.message.reply_text(
+            "⚠️ تعذر تحميل قائمة الدول الآن. أعد إرسال الرمز بعد قليل."
+        )
+        return
+
+    matches = tg_lion_find_countries_by_calling_code(countries, candidate)
+    context.user_data.pop("tg_lion_search_page", None)
+    back_keyboard = [[
+        InlineKeyboardButton("↩️ الرجوع إلى الدول", callback_data=f"tg_lion_search_cancel:{page}")
+    ]]
+    if not matches:
+        await update.message.reply_text(
+            f"لم أجد دولة متاحة برمز الاتصال +{candidate}.",
+            reply_markup=InlineKeyboardMarkup(back_keyboard),
+        )
+        return
+
+    rows = []
+    for country in matches:
+        flag = country.get("flag") or tg_lion_country_flag(country["code"])
+        label = (
+            f"{flag} {country['name']} | "
+            f"{cents_to_money(country['price_cents']):.2f}$"
+        )
+        rows.append([InlineKeyboardButton(
+            label[:64],
+            callback_data=f"tg_lion_search_result:{country['code']}:{page}",
+        )])
+    rows.extend(back_keyboard)
+    await update.message.reply_text(
+        f"الدول المتاحة لرمز الاتصال +{candidate}:",
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
+async def tg_lion_country_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, code: str, page: int):
+    if not await check_forced_channel(update, context):
+        return
+    query = update.callback_query
+    if not load_config().get("tg_lion_store_visible", True):
+        if query:
+            await query.answer("هذا القسم مخفي حالياً.", show_alert=True)
+        return
+    if query:
+        await query.answer()
+    countries, status = await get_tg_lion_countries()
+    if status != "ok" or countries is None:
+        if query:
+            await query.edit_message_text("⚠️ الخدمة غير متاحة حالياً. يرجى التواصل مع الإدارة.")
+        return
+    country = next((item for item in countries if item["code"] == code.upper()), None)
+    if not country:
+        if query:
+            await query.edit_message_text("⚠️ لم تعد هذه الدولة متاحة. افتح القائمة وحاول مجدداً.")
+        return
+    await show_tg_lion_confirmation(update, context, country, page)
+
+
+async def show_tg_lion_confirmation(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    country: dict,
+    page: int,
+    price_changed: bool = False,
+):
+    query = update.callback_query
+    if not query:
+        return
+    price_cents = country["price_cents"]
+    context.user_data["tg_lion_confirmation"] = {
+        "code": country["code"],
+        "price_cents": price_cents,
+        "page": page,
+        "expires_at": time.time() + 600,
     }
-
-
-def calculate_account_price(account_type: str, totp_submitted: bool, app_pass_submitted: bool) -> float:
-    prices = get_tier_prices(account_type)
-    if app_pass_submitted and totp_submitted:
-        return prices["tier_3"]
-    elif totp_submitted:
-        return prices["tier_2"]
-    else:
-        return prices["tier_1"]
-
-
-# ==================== VALIDATION ====================
-def validate_totp_secret(secret: str) -> bool:
-    cleaned = secret.replace(" ", "").upper()
-    return len(cleaned) == 32 and bool(re.match(r'^[A-Z2-7]{32}$', cleaned))
-
-
-def validate_app_password(password: str) -> bool:
-    cleaned = password.replace(" ", "")
-    return len(cleaned) == 16 and bool(re.match(r'^[A-Za-z0-9]{16}$', cleaned))
-
-
-def format_app_password(password: str) -> str:
-    cleaned = password.replace(" ", "")
-    if len(cleaned) != 16:
-        return password
-    return f"{cleaned[0:4]} {cleaned[4:8]} {cleaned[8:12]} {cleaned[12:16]}"
-
-
-def format_totp_secret(secret: str) -> str:
-    cleaned = secret.replace(" ", "").upper()
-    if len(cleaned) != 32:
-        return secret
-    return " ".join([cleaned[i:i+4] for i in range(0, 32, 4)])
-
-
-def normalize_email(email: Any) -> str:
-    return str(email or "").strip().casefold()
-
-
-def clear_rejected_email_records(user_data: dict, email: str):
-    normalized_email = normalize_email(email)
-    if not normalized_email:
-        return
-    user_data["rejected_requests"] = [
-        request for request in user_data.get("rejected_requests", [])
-        if normalize_email(request.get("email", "")) != normalized_email
-    ]
-    user_data["rejected_emails"] = [
-        stored_email for stored_email in user_data.get("rejected_emails", [])
-        if normalize_email(stored_email) != normalized_email
-    ]
-
-
-def move_request_to_rejected(user_data: dict, request: dict, reason: str, reason_text: str = ""):
-    rejected_request = dict(request)
-    rejected_request["reject_reason"] = reason
-    if reason_text:
-        rejected_request["reject_reason_text"] = reason_text
-    user_data.setdefault("rejected_requests", []).append(rejected_request)
-    email = request.get("email", "")
-    rejected_emails = user_data.get("rejected_emails", [])
-    if not isinstance(rejected_emails, list):
-        rejected_emails = []
-    rejected_emails.append(email)
-    user_data["rejected_emails"] = rejected_emails
-    user_data["pending_balance"] = clamp_money(
-        float(user_data.get("pending_balance", 0.0)) - float(request.get("amount", 0.0))
+    change_note = "⚠️ تغيّر السعر؛ راجعه ثم أكّد الطلب مجدداً.\n\n" if price_changed else ""
+    text = (
+        f"{change_note}تأكيد طلب رقم من <b>{html.escape(country['name'])}</b>\n\n"
+        f"💰 السعر النهائي: <b>{cents_to_money(price_cents):.2f}$</b>\n"
+        f"📦 المتوفر عند المزوّد: {country['qty']}\n\n"
+        "سيُخصم السعر من رصيدك ويُرسل الطلب إلى قروب الطلبات للتنفيذ اليدوي."
     )
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ تأكيد الطلب", callback_data=f"tg_lion_confirm:{country['code']}:{page}")],
+        [InlineKeyboardButton("إلغاء الطلب", callback_data=f"tg_lion_cancel:{page}")],
+    ])
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
 
-def move_approved_account_to_rejected(user_data: dict, account: dict, reason: str, reason_text: str = ""):
-    rejected_account = dict(account)
-    rejected_account["reject_reason"] = reason
-    rejected_account["rejected_from_approved"] = True
-    rejected_account["rejected_at"] = datetime.now(timezone.utc).isoformat()
-    if reason_text:
-        rejected_account["reject_reason_text"] = reason_text
-    user_data.setdefault("rejected_requests", []).append(rejected_account)
-    email = account.get("email", "")
-    rejected_emails = user_data.get("rejected_emails", [])
-    if not isinstance(rejected_emails, list):
-        rejected_emails = []
-    if not any(normalize_email(item) == normalize_email(email) for item in rejected_emails):
-        rejected_emails.append(email)
-    user_data["rejected_emails"] = rejected_emails
+async def tg_lion_cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int):
+    context.user_data.pop("tg_lion_confirmation", None)
+    await tg_lion_catalog(update, context, page)
 
 
-def account_callback_token(email: Any) -> str:
-    return hashlib.sha256(normalize_email(email).encode("utf-8")).hexdigest()[:12]
+async def tg_lion_confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE, code: str, page: int):
+    if not await check_forced_channel(update, context):
+        return
+    query = update.callback_query
+    if not query:
+        return
+    config = load_config()
+    if not config.get("tg_lion_store_visible", True):
+        context.user_data.pop("tg_lion_confirmation", None)
+        await query.answer("هذا القسم مخفي حالياً.", show_alert=True)
+        return
+    confirmation = context.user_data.get("tg_lion_confirmation")
+    if (not confirmation or confirmation.get("code") != code.upper()
+            or confirmation.get("page") != page or confirmation.get("expires_at", 0) < time.time()):
+        context.user_data.pop("tg_lion_confirmation", None)
+        await query.answer("انتهت صلاحية التأكيد. اختر الدولة مجدداً.", show_alert=True)
+        return
+    await query.answer()
+    countries, status = await get_tg_lion_countries(force_refresh=True)
+    if status != "ok" or countries is None:
+        await query.edit_message_text("⚠️ تعذر تحديث قائمة الدول. لم يتم خصم أي رصيد؛ حاول مجدداً لاحقاً.")
+        return
+    country = next((item for item in countries if item["code"] == code.upper()), None)
+    if not country:
+        context.user_data.pop("tg_lion_confirmation", None)
+        await query.edit_message_text("⚠️ لم تعد هذه الدولة متاحة. لم يتم خصم أي رصيد.")
+        return
+    if country["price_cents"] != confirmation["price_cents"]:
+        await show_tg_lion_confirmation(update, context, country, page, price_changed=True)
+        return
 
+    _, purchase_channel = get_configured_purchase_channels()
+    if not purchase_channel:
+        await query.edit_message_text("⚠️ قروب الطلبات غير مضبوط. لم يتم خصم أي رصيد؛ تواصل مع الإدارة.")
+        return
 
-def find_pending_request(user_data: dict, token: str) -> Optional[Tuple[int, dict]]:
-    pending = user_data.get("pending_requests", [])
-    if not isinstance(pending, list):
-        return None
-    for index, request in enumerate(pending):
-        if account_callback_token(request.get("email", "")) == token:
-            return index, request
-    if token.isdigit():
-        index = int(token)
-        if 0 <= index < len(pending):
-            return index, pending[index]
-    return None
+    async with TG_LION_ORDER_LOCK:
+        confirmation = context.user_data.get("tg_lion_confirmation")
+        if (not confirmation or confirmation.get("code") != code.upper()
+                or confirmation.get("page") != page or confirmation.get("expires_at", 0) < time.time()):
+            await query.edit_message_text("انتهت صلاحية هذا الطلب أو تم تسجيله مسبقاً.")
+            return
+        user = update.effective_user
+        user_data = get_user(user.id)
+        total_cents = country["price_cents"]
+        if spendable_balance_cents(user_data) < total_cents:
+            await query.edit_message_text(
+                f"❌ رصيدك غير كافٍ. رصيدك: {cents_to_money(spendable_balance_cents(user_data)):.2f}$، "
+                f"السعر: {cents_to_money(total_cents):.2f}$",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("إلغاء الطلب", callback_data=f"tg_lion_cancel:{page}")]
+                ]),
+            )
+            return
 
-
-def find_approved_account(user_data: dict, token: str) -> Optional[Tuple[int, dict]]:
-    accounts = user_data.get("approved_accounts", [])
-    if not isinstance(accounts, list):
-        return None
-    for index, account in enumerate(accounts):
-        if account_callback_token(account.get("email", "")) == token:
-            return index, account
-    if token.isdigit():
-        index = int(token)
-        if 0 <= index < len(accounts):
-            return index, accounts[index]
-    return None
-
-
-def get_active_account_status(email: str) -> Optional[str]:
-    normalized_email = normalize_email(email)
-    if not normalized_email:
-        return None
-    users = load_json(USERS_DB)
-    for user_data in users.values():
-        for account in user_data.get("approved_accounts", []):
-            if account.get("rejected_at_24h"):
-                continue
-            if normalize_email(dec(account.get("email", ""))) == normalized_email:
-                return "approved"
-    for user_data in users.values():
-        for request in user_data.get("pending_requests", []):
-            if normalize_email(dec(request.get("email", ""))) == normalized_email:
-                return "pending"
-    for user_data in users.values():
-        for rejected in user_data.get("rejected_requests", []):
-            if normalize_email(dec(rejected.get("email", ""))) == normalized_email:
-                return "rejected"
-    return None
-
-
-def has_active_app_password(password: str) -> bool:
-    cleaned_password = str(password or "").replace(" ", "").upper()
-    if not cleaned_password:
-        return False
-    users = load_json(USERS_DB)
-    for user_data in users.values():
-        for collection_name in ("approved_accounts", "pending_requests"):
-            for record in user_data.get(collection_name, []):
-                if record.get("rejected_at_24h"):
-                    continue
-                stored = str(dec(record.get("app_pass", "")) or "").replace(" ", "").upper()
-                if stored == cleaned_password:
-                    return True
-    return False
-
-
-def has_active_account_password(password: str) -> bool:
-    candidate = str(password or "").strip()
-    if not candidate:
-        return False
-    users = load_json(USERS_DB)
-    for user_data in users.values():
-        for collection_name in ("approved_accounts", "pending_requests"):
-            for record in user_data.get(collection_name, []):
-                if record.get("rejected_at_24h"):
-                    continue
-                stored = str(dec(record.get("password", "")) or "").strip()
-                if stored and stored == candidate:
-                    return True
-    return False
-
-# ==================== IMAP VERIFICATION ====================
-IMAP_PROVIDERS = {
-    "gmail.com": ("imap.gmail.com", 993), "googlemail.com": ("imap.gmail.com", 993),
-    "outlook.com": ("outlook.office365.com", 993), "outlook.sa": ("outlook.office365.com", 993),
-    "hotmail.com": ("outlook.office365.com", 993), "hotmail.sa": ("outlook.office365.com", 993),
-    "live.com": ("outlook.office365.com", 993), "msn.com": ("outlook.office365.com", 993),
-    "yahoo.com": ("imap.mail.yahoo.com", 993), "ymail.com": ("imap.mail.yahoo.com", 993),
-    "icloud.com": ("imap.mail.me.com", 993), "me.com": ("imap.mail.me.com", 993),
-    "mac.com": ("imap.mail.me.com", 993), "aol.com": ("imap.aol.com", 993),
-    "zoho.com": ("imap.zoho.com", 993), "yandex.com": ("imap.yandex.com", 993),
-    "yandex.ru": ("imap.yandex.com", 993), "mail.ru": ("imap.mail.ru", 993),
-    "gmx.com": ("imap.gmx.com", 993), "gmx.net": ("imap.gmx.net", 993),
-}
-
-
-def get_imap_host(email: str) -> Tuple[str, int]:
-    domain = email.rsplit("@", 1)[-1].lower() if "@" in email else ""
-    if domain in IMAP_PROVIDERS:
-        return IMAP_PROVIDERS[domain]
-    if domain:
-        return (f"imap.{domain}", 993)
-    return ("", 0)
-
-
-def is_valid_email_domain(email: str) -> bool:
-    """التحقق من أن نطاق الإيميل موجود فعلاً وليس وهمياً (DNS Check)"""
-    if not email or "@" not in email:
-        return False
-    domain = email.rsplit("@", 1)[-1].strip().lower()
-    if not domain:
-        return False
-    host, port = get_imap_host(email)
-    if not host:
-        return False
-    try:
-        socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-        return True
-    except socket.gaierror:
+        snapshot = {
+            key: (key in user_data, user_data.get(key))
+            for key in ("balance", "admin_received_balance", "spent_balance", "transactions")
+        }
+        if not debit_spendable_balance(user_data, total_cents):
+            await query.edit_message_text("❌ رصيدك غير كافٍ. لم يتم تسجيل الطلب.")
+            return
+        add_transaction(
+            user_data,
+            "purchase",
+            cents_to_money(total_cents),
+            f"حسابات لكل الدول: {country['name']} ({country['code']})",
+        )
         try:
-            socket.getaddrinfo(domain, 25, type=socket.SOCK_STREAM)
-            return True
-        except socket.gaierror:
-            return False
-    except Exception:
-        return True
-
-
-def _imap_login_sync(email: str, password: str, timeout: int = 15) -> Tuple[bool, str]:
-    host, port = get_imap_host(email)
-    if not host:
-        return False, "⚠️ فشل تحديد مزود الإيميل: لا يوجد خادم IMAP معروف لهذا النطاق."
-
-    started = time.monotonic()
-
-    def elapsed() -> str:
-        return f"{time.monotonic() - started:.1f} ثوانٍ"
-
-    try:
-        socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-    except socket.gaierror as exc:
-        return False, f"❌ فشل DNS في تحويل {host} إلى عنوان IP بعد {elapsed()}: {exc}"
-    except (socket.timeout, TimeoutError) as exc:
-        return False, f"❌ انتهت مهلة DNS لـ {host} بعد {elapsed()}: {exc}"
-    except OSError as exc:
-        return False, f"❌ فشل DNS لـ {host} بعد {elapsed()}: {exc}"
-
-    raw_socket = None
-    try:
-        raw_socket = socket.create_connection((host, port), timeout=timeout)
-    except (socket.timeout, TimeoutError) as exc:
-        return False, (f"❌ فشل TCP: انتهت مهلة فتح الاتصال إلى {host}:{port} "
-                       f"بعد {elapsed()}. قد يكون الخروج من Railway محجوباً أو لا يوجد رد من الخادم. {exc}")
-    except ConnectionRefusedError as exc:
-        return False, f"❌ فشل TCP: الخادم رفض الاتصال بـ {host}:{port} بعد {elapsed()}: {exc}"
-    except OSError as exc:
-        return False, f"❌ فشل TCP إلى {host}:{port} بعد {elapsed()}: {exc}"
-
-    try:
-        ctx = ssl.create_default_context()
-        with raw_socket:
-            with ctx.wrap_socket(raw_socket, server_hostname=host):
-                pass
-    except (socket.timeout, TimeoutError) as exc:
-        return False, f"❌ فشل TLS: انتهت مهلة المصافحة مع {host} بعد {elapsed()}: {exc}"
-    except ssl.SSLError as exc:
-        return False, f"❌ فشل TLS مع {host} بعد {elapsed()}: {exc}"
-    except OSError as exc:
-        return False, f"❌ فشل TLS/الشبكة مع {host} بعد {elapsed()}: {exc}"
-
-    try:
-        with imaplib.IMAP4_SSL(host, port, ssl_context=ssl.create_default_context(), timeout=timeout) as imap:
-            imap.login(email, password)
+            save_user(user.id, user_data)
+        except Exception as exc:
+            for key, (existed, value) in snapshot.items():
+                if existed:
+                    user_data[key] = value
+                else:
+                    user_data.pop(key, None)
             try:
-                imap.logout()
+                save_user(user.id, user_data)
             except Exception:
-                pass
-            return True, f"✅ نجحت مراحل DNS وTCP وTLS ومصادقة IMAP خلال {elapsed()}."
-    except imaplib.IMAP4.error as exc:
-        err = str(exc)
-        low = err.lower()
-        prefix = f"✅ الشبكة سليمة (DNS/TCP/TLS)، لكن فشلت مصادقة IMAP بعد {elapsed()}: "
-        if "application-specific password required" in low:
-            return False, prefix + "يتطلب كلمة مرور تطبيق (App Password) وليس كلمة المرور العادية."
-        if "invalid credentials" in low or "authenticationfailed" in low or ("auth" in low and "fail" in low):
-            return False, prefix + f"رد Gmail العام: {err}. لا يحدد IMAP هل السبب كلمة المرور أو App Password أو سياسة الحساب."
-        if "account is disabled" in low or "disabled" in low:
-            return False, prefix + "الحساب معطّل من قبل المزود."
-        if "too many" in low or "rate" in low or "limit" in low:
-            return False, prefix + "تم تجاوز عدد محاولات الدخول. حاول لاحقاً."
-        return False, prefix + f"رد IMAP: {err}"
-    except (socket.timeout, TimeoutError) as exc:
-        return False, f"❌ نجحت مراحل DNS/TCP مبدئياً، لكن انتهت مهلة IMAP/TLS بعد {elapsed()}: {exc}"
-    except ssl.SSLError as exc:
-        return False, f"❌ نجحت الشبكة مبدئياً، لكن فشل TLS أثناء جلسة IMAP بعد {elapsed()}: {exc}"
-    except OSError as exc:
-        return False, f"❌ نجحت DNS مبدئياً، لكن فشلت جلسة IMAP بعد {elapsed()}: {exc}"
-    except Exception:
-        logger.exception("IMAP verification error for %s", email)
-        return False, f"❌ خطأ غير متوقع بعد نجاح فحص الشبكة ({elapsed()}). راجع سجل الخدمة."
+                logger.error("TG-Lion order balance rollback failed (%s)", type(exc).__name__)
+            await query.edit_message_text("⚠️ تعذر تسجيل الخصم. لم يتم إرسال الطلب؛ حاول مجدداً لاحقاً.")
+            return
 
-
-NETWORK_ERROR_MARKERS = ("timeout", "dns", "ssl", "connect", "unreachable", "refused", "تعذّر الاتصال", "انتهت مهلة")
-AUTH_ERROR_MARKERS = ("invalid credentials", "authenticationfailed", "username and password not accepted", "بيانات الدخول غير صحيحة")
-TWO_FA_ERROR_MARKERS = ("application-specific password", "app password", "two-factor", "2fa", "2-step", "app-specific", "يتطلب كلمة مرور تطبيق")
-
-
-def classify_imap_error(message: str) -> str:
-    low = (message or "").lower()
-    if any(m in low for m in TWO_FA_ERROR_MARKERS):
-        return "2fa"
-    if any(m in low for m in AUTH_ERROR_MARKERS):
-        return "auth_or_policy"
-    if any(m in low for m in NETWORK_ERROR_MARKERS):
-        return "network"
-    return "unknown"
-
-
-async def verify_account_credentials(email: str, password: str = "", app_pass: str = "", totp_secret: str = "") -> dict:
-    result = {"level": "failed", "badge": "🔴", "message": "", "imap_ok": False, "totp_ok": False, "category": "unknown"}
-    if totp_secret:
-        cleaned_totp = totp_secret.replace(" ", "").upper()
-        if validate_totp_secret(cleaned_totp):
-            try:
-                pyotp.TOTP(cleaned_totp).now()
-                result["totp_ok"] = True
-            except Exception:
-                result["totp_ok"] = False
-
-    imap_pass = ""
-    if app_pass:
-        imap_pass = app_pass.replace(" ", "")
-    elif password:
-        imap_pass = password
-
-    is_gmail_account = email.rsplit("@", 1)[-1].lower() in {"gmail.com", "googlemail.com"}
-    if password and not app_pass and is_gmail_account:
-        result["level"] = "unknown"
-        result["badge"] = "⚪"
-        result["category"] = "unsupported_auth"
-        result["message"] = "⚪ Gmail لا يسمح بالتحقق من الياسورد العادي عبر IMAP. استخدم App Password أو OAuth2."
-    elif imap_pass:
-        ok, msg = await asyncio.to_thread(_imap_login_sync, email, imap_pass)
-        result["imap_ok"] = ok
-        result["message"] = msg
-        if not ok:
-            result["category"] = classify_imap_error(msg)
-        else:
-            result["category"] = "ok"
-    else:
-        result["message"] = "لا توجد بيانات دخول للتحقق منها."
-        result["category"] = "no_credentials"
-
-    if result["imap_ok"]:
-        result["level"] = "verified"
-        result["badge"] = "🟢"
-        result["message"] = ("🟢 تم التحقق الكامل عبر IMAP باستخدام كلمة مرور التطبيق." if app_pass else "🟢 تم تسجيل الدخول عبر IMAP بنجاح.")
-    elif result["category"] == "2fa":
-        result["level"] = "partial" if result["totp_ok"] else "unknown"
-        result["badge"] = "🟡" if result["totp_ok"] else "⚪"
-        if result["totp_ok"]:
-            result["message"] = "🟡 رفض Gmail مصادقة IMAP بطريقة تشير إلى App Password/2FA؛ مفتاح TOTP صالح محليًا."
-        else:
-            result["message"] = "⚪ رفض Gmail مصادقة IMAP بطريقة تشير إلى App Password/2FA."
-    elif result["category"] == "unsupported_auth":
-        pass
-    elif result["category"] == "network":
-        result["level"] = "unknown"
-        result["badge"] = "⚪"
-    elif result["totp_ok"]:
-        result["level"] = "partial"
-        result["badge"] = "🟡"
-        if not result["message"]:
-            result["message"] = "🟡 مفتاح 2FA صالح، لكن لا يمكن التحقق الكامل."
-    else:
-        result["level"] = "failed"
-        result["badge"] = "🔴"
-        if not result["message"]:
-            result["message"] = "❌ فشل التحقق التلقائي."
-    return result
-
-
-def imap_rate_ok(email: str) -> Tuple[bool, int]:
-    normalized = normalize_email(email)
-    last = _IMAP_RATE.get(normalized, 0.0)
-    now = time.time()
-    if now - last < IMAP_RATE_LIMIT_SECONDS:
-        return False, int(IMAP_RATE_LIMIT_SECONDS - (now - last))
-    return True, 0
-
-
-def imap_rate_mark(email: str):
-    _IMAP_RATE[normalize_email(email)] = time.time()
-
-
-# ==================== TOTP CODE GENERATION ====================
-def generate_totp_code_info(totp_secret: str) -> Tuple[bool, str, str, int]:
-    if not totp_secret:
-        return False, "", "لا يوجد رمز مصادقة لهذا الطلب.", 0
-    cleaned = totp_secret.replace(" ", "").upper()
-    if not validate_totp_secret(cleaned):
-        return False, "", "رمز المصادقة غير صالح (يجب أن يكون 32 حرفاً Base32).", 0
-    try:
-        totp = pyotp.TOTP(cleaned)
-        code = totp.now()
-        if not code or len(code) != 6 or not code.isdigit():
-            return False, "", "فشل توليد الكود.", 0
-        seconds_remaining = 30 - (int(time.time()) % 30)
-        if seconds_remaining <= 0:
-            seconds_remaining = 30
-        return True, code, "", seconds_remaining
-    except Exception as exc:
-        logger.exception("TOTP generation error")
-        return False, "", f"خطأ في توليد الكود: {exc}", 0
-
-
-async def send_totp_code_message(context, chat_id: int, totp_secret: str, email: str = "",
-                                  title: str = "🔢 كود المصادقة الحالي", back_callback: str = "",
-                                  auto_refresh: bool = False):
-    ok, code, err, seconds = generate_totp_code_info(totp_secret)
-    if not ok:
-        await context.bot.send_message(chat_id=chat_id, text=f"⚠️ {err}", parse_mode=ParseMode.MARKDOWN)
-        return None
-    email_line = f"\n📧 `{email}`\n" if email else "\n"
-    text = (f"{title}\n{email_line}\n🔢 *الكود:* `{code}`\n\n⏰ صالح لمدة *{seconds}* ثانية\n\n"
-            f"_اضغط «🔄 كود جديد» للحصول على كود محدّث._")
-    buttons = []
-    if auto_refresh and back_callback:
-        buttons.append(("🔄 كود جديد", back_callback))
-    if back_callback:
-        buttons.append(("🔙 رجوع", back_callback))
-    reply_markup = kb_vertical(buttons) if buttons else None
-    try:
-        msg = await context.bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
-        return msg
-    except Exception as exc:
-        logger.exception("Failed to send TOTP code message")
+        order_ref = secrets.token_hex(4).upper()
+        username = f"@{user.username}" if user.username else "لا يوجد"
+        order_text = (
+            "📥 <b>طلب جديد — حسابات لكل الدول</b>\n\n"
+            f"🧾 رقم الطلب: <code>{order_ref}</code>\n"
+            f"👤 العضو: {html.escape(user.full_name or 'غير معروف')}\n"
+            f"🆔 المعرف: {html.escape(username)} | <code>{user.id}</code>\n"
+            f"🌍 الدولة: <b>{html.escape(country['name'])}</b> (<code>{html.escape(country['code'])}</code>)\n"
+            f"💵 سعر المزوّد المعروض: {cents_to_money(country['base_price_cents']):.2f}$\n"
+            f"💳 المخصوم من العضو: {cents_to_money(total_cents):.2f}$\n"
+            f"📦 الكمية المتاحة وقت الطلب: {country['qty']}\n"
+            "📝 الحالة: بانتظار التنفيذ اليدوي\n"
+            f"⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
+        )
         try:
-            await context.bot.send_message(chat_id=chat_id, text=f"🔢 الكود: {code}\n⏰ {seconds} ثانية")
+            await context.bot.send_message(
+                chat_id=purchase_channel,
+                text=order_text,
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception as exc:
+            for key, (existed, value) in snapshot.items():
+                if existed:
+                    user_data[key] = value
+                else:
+                    user_data.pop(key, None)
+            try:
+                save_user(user.id, user_data)
+            except Exception:
+                logger.error("TG-Lion order refund failed (%s)", type(exc).__name__)
+            logger.warning("TG-Lion order receipt delivery failed (%s)", type(exc).__name__)
+            await query.edit_message_text(
+                "⚠️ تعذر إرسال الطلب إلى قروب الطلبات؛ أُعيد الرصيد إن أمكن. حاول مجدداً لاحقاً."
+            )
+            return
+
+        context.user_data.pop("tg_lion_confirmation", None)
+        await query.edit_message_text(
+            f"✅ تم تسجيل طلبك وإرساله إلى قروب الطلبات.\n\n"
+            f"🧾 رقم الطلب: <code>{order_ref}</code>\n"
+            f"🌍 الدولة: <b>{html.escape(country['name'])}</b>\n"
+            f"💰 المخصوم: <b>{cents_to_money(total_cents):.2f}$</b>\n"
+            "سيتم تنفيذ الطلب يدوياً من الإدارة.",
+            parse_mode=ParseMode.HTML,
+        )
+
+
+async def withdraw_store(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_forced_channel(update, context):
+        return
+    query = update.callback_query
+    uid = update.effective_user.id
+    send_message = (query.edit_message_text if query else update.effective_message.reply_text)
+    config = load_config()
+    categories = config.get("store_categories", [])
+    lion_visible = config.get("tg_lion_store_visible", True)
+    if not categories and not lion_visible:
+        await send_message(t(uid, "store_empty"),
+                           reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
+        return
+    buttons = [(f"📂 {cat['name']}", f"user_category:{cat['id']}") for cat in categories]
+    if lion_visible:
+        buttons.append(("🌍 حسابات لكل الدول", "tg_lion_catalog"))
+    buttons.append((t(uid, "main_menu"), "main_menu"))
+    await send_message(t(uid, "store_title"), parse_mode=ParseMode.MARKDOWN,
+                       reply_markup=kb_vertical(buttons))
+
+
+async def user_category_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_forced_channel(update, context):
+        return
+    query = update.callback_query
+    uid = query.from_user.id
+    cat_id = query.data.split(":", 1)[1]
+    config = load_config()
+    category = next((c for c in config.get("store_categories", []) if c["id"] == cat_id), None)
+    if not category:
+        await query.edit_message_text("⚠️",
+                                      reply_markup=kb_single(t(uid, "store_back"), "withdraw_store"))
+        return
+    services = category.get("services", [])
+    if not services:
+        await query.edit_message_text("📭",
+                                      reply_markup=kb_single(t(uid, "store_back"), "withdraw_store"))
+        return
+    buttons = [(t(uid, "store_buy_btn", name=s['name'], price=s['price']),
+                f"user_buy:{s['id']}:{cat_id}") for s in services]
+    buttons.append((t(uid, "store_back"), "withdraw_store"))
+    await query.edit_message_text(f"📂 *{category['name']}*",
+                                  parse_mode=ParseMode.MARKDOWN,
+                                  reply_markup=kb_vertical(buttons))
+
+
+async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_forced_channel(update, context):
+        return
+    query = update.callback_query
+    uid = query.from_user.id
+    parts = query.data.split(":")
+    service_id = parts[1]
+    cat_id = parts[2]
+    config = load_config()
+    service = None
+    for cat in config.get("store_categories", []):
+        if cat["id"] == cat_id:
+            for s in cat["services"]:
+                if s["id"] == service_id:
+                    service = s
+                    break
+            break
+    if not service:
+        await query.edit_message_text("⚠️",
+                                      reply_markup=kb_single(t(uid, "store_back"), "withdraw_store"))
+        return
+    user_data = get_user(uid)
+    price_cents = money_to_cents(service.get("price", 0))
+    price = cents_to_money(price_cents)
+    balance_cents = spendable_balance_cents(user_data)
+    if balance_cents < price_cents:
+        await query.edit_message_text(
+            t(uid, "store_buy_insufficient",
+              balance=cents_to_money(balance_cents), price=price),
+            reply_markup=kb_single(t(uid, "store_back"), "withdraw_store"))
+        return
+    PENDING_PURCHASES[uid] = {
+        "service_id": service_id,
+        "service_name": service.get("name", ""),
+        "service_price": price,
+        "service_message": service.get("message", ""),
+        "purchased_at": datetime.now().isoformat(),
+    }
+    save_pending_purchases()
+    bot_username = (await context.bot.get_me()).username
+    total_emails = user_data.get("total_approved_emails", 0)
+    channel_1_text = (f"🛒 <b>طلب شراء جديد</b>\n\n"
+                      f"🤖 @{html.escape(bot_username or 'غير معروف')}\n"
+                      f"📦 <code>{html.escape(str(service.get('name', '')))}</code>\n"
+                      f"💰 <code>${service['price']:.2f}</code>\n"
+                      f"📧 عدد الإيميلات: <code>{total_emails}</code>")
+    purchase_channel_1, _ = get_configured_purchase_channels()
+    if purchase_channel_1:
+        try:
+            await context.bot.send_message(chat_id=purchase_channel_1, text=channel_1_text,
+                                           parse_mode=ParseMode.HTML)
         except Exception:
-            pass
-        return None
+            logger.exception("Could not send purchase notification.")
+    await query.edit_message_text(
+        t(uid, "store_buy_success", name=service.get('name', ''),
+          price=price, message=service.get('message', '')),
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_single(t(uid, "store_back"), "withdraw_store"))
 
 
-# ==================== FORCED CHANNEL ====================
-def normalize_forced_channel(value: str) -> str:
-    value = value.strip()
-    value = re.sub(r"^https?://t\.me/", "", value, flags=re.IGNORECASE)
-    value = value.split("?", 1)[0].split("/", 1)[0].strip()
-    if value and not value.startswith("@") and not value.lstrip("-").isdigit():
-        value = f"@{value}"
-    return value
+async def deliver_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    user_id = int(query.data.split(":")[1])
+    user_data = get_user(user_id)
+    total_emails = user_data.get("total_approved_emails", 0)
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"📦 *تم استلام طلبك!*\n\n✅ سيتم التواصل معك قريباً.",
+            parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        logger.error(f"Could not deliver: {e}")
+    PENDING_PURCHASES.pop(user_id, None)
+    save_pending_purchases()
+    await query.edit_message_text(
+        f"✅ *تم الإيصال!*\n\n👤 `{user_id}`\n📧 `{total_emails}`\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        parse_mode=ParseMode.MARKDOWN)
 
 
-def parse_forced_channel_input(value: str) -> Tuple[str, str]:
-    channel_value, separator, link_value = value.partition("|")
-    channel = normalize_forced_channel(channel_value)
-    invite_link = link_value.strip() if separator else ""
-    valid_handle = bool(re.fullmatch(r"@[A-Za-z0-9_]{5,32}", channel))
-    valid_chat_id = bool(re.fullmatch(r"-100\d+", channel))
-    valid_invite_link = not invite_link or bool(re.fullmatch(r"https?://t\.me/(?:\+[A-Za-z0-9_-]+|joinchat/[A-Za-z0-9_-]+)", invite_link, flags=re.IGNORECASE))
-    if not (valid_handle or valid_chat_id) or not valid_invite_link:
-        return "", ""
-    return channel, invite_link
-
-
-def get_configured_purchase_channels() -> Tuple[str, str]:
-    config = load_config()
-    channel_1 = str(config.get("purchase_channel_1") or PURCHASE_CHANNEL_1).strip()
-    channel_2 = str(config.get("purchase_channel_2") or PURCHASE_CHANNEL_2).strip()
-    return channel_1, channel_2
-
-
-def normalize_chat_id(value: str) -> str:
-    value = value.strip()
-    value = re.sub(r"^https?://t\.me/", "", value, flags=re.IGNORECASE)
-    value = value.split("?", 1)[0].split("/", 1)[0].strip()
-    if value and not value.startswith("@") and not value.lstrip("-").isdigit():
-        value = f"@{value}"
-    return value
-
-
-def forced_channel_link(channel: str, configured_link: str = "") -> str:
-    configured_link = configured_link.strip()
-    if configured_link.startswith(("http://", "https://")):
-        return configured_link
-    if channel.startswith("@"):
-        return f"https://t.me/{channel[1:]}"
-    return ""
-
-
-def forced_channel_keyboard(channel: str, configured_link: str = "") -> InlineKeyboardMarkup:
-    rows = []
-    join_link = forced_channel_link(channel, configured_link)
-    if join_link:
-        rows.append([InlineKeyboardButton("📢 الانضمام إلى القناة", url=join_link)])
-    rows.append([InlineKeyboardButton("✅ تحققت من الاشتراك", callback_data="check_forced_channel")])
-    return InlineKeyboardMarkup(rows)
-
-
-async def check_forced_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    config = load_config()
-    forced_channel = normalize_forced_channel(str(config.get("forced_channel", "")))
-    if not forced_channel:
-        return True
+async def handle_purchase_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from telegram_bot.application import text_input
     user_id = update.effective_user.id
-    if user_id == OWNER_ID:
-        return True
-    if context.user_data.get("_forced_channel_checked_update_id") == update.update_id:
-        return True
-    try:
-        member = await context.bot.get_chat_member(forced_channel, user_id)
-        if member.status in {"member", "administrator", "creator"} or (member.status == "restricted" and getattr(member, "is_member", False)):
-            context.user_data["_forced_channel_checked_update_id"] = update.update_id
-            return True
-    except Exception as exc:
-        logger.warning("Forced-channel check failed for %s: %s", user_id, exc)
-    text = f"📢 *يرجى الانضمام إلى القناة أولاً:*\n{forced_channel}\n\nبعد الانضمام اضغط على زر «تحققت من الاشتراك»."
-    reply_markup = forced_channel_keyboard(forced_channel, str(config.get("forced_channel_link", "")))
-    if update.callback_query:
+    text = update.message.text.strip()
+    if user_id not in PENDING_PURCHASES:
+        await text_input(update, context)
+        return
+    purchase = PENDING_PURCHASES[user_id]
+    user_data = get_user(user_id)
+    price_cents = money_to_cents(purchase.get("service_price", 0))
+    price = cents_to_money(price_cents)
+    balance_cents = spendable_balance_cents(user_data)
+    if balance_cents < price_cents:
+        await update.message.reply_text("❌ رصيدك غير كافٍ.",
+                                        reply_markup=kb_single("🔙 قسم السحب", "withdraw_store"))
+        PENDING_PURCHASES.pop(user_id, None)
+        save_pending_purchases()
+        return
+    debit_spendable_balance(user_data, price_cents)
+    add_transaction(user_data, "purchase", price, f"شراء: {purchase.get('service_name', '')}")
+    save_user(user_id, user_data)
+    user = update.effective_user
+    user_name = user.full_name or "غير معروف"
+    user_username = user.username or "لا يوجد"
+    total_emails = user_data.get("total_approved_emails", 0)
+    _, purchase_channel_2 = get_configured_purchase_channels()
+    if purchase_channel_2:
+        text2 = (f"📋 <b>طلب شراء مكتمل</b>\n\n"
+                 f"👤 <b>{html.escape(user_name)}</b>\n"
+                 f"🆔 @{html.escape(user_username)}\n"
+                 f"🆔 <code>{user_id}</code>\n"
+                 f"📦 <code>{html.escape(str(purchase['service_name']))}</code>\n"
+                 f"💰 <code>${price:.2f}</code>\n"
+                 f"📧 <code>{total_emails}</code>\n\n"
+                 f"📝 <b>الرسالة:</b>\n<code>{html.escape(text)}</code>\n"
+                 f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         try:
-            await update.callback_query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
+            await context.bot.send_message(chat_id=purchase_channel_2, text=text2,
+                                           parse_mode=ParseMode.HTML,
+                                           reply_markup=kb_single("✅ تم الإيصال", f"deliver_order:{user_id}"))
         except Exception:
-            await update.callback_query.answer("لم يتم العثور على اشتراكك بعد.", show_alert=True)
+            logger.exception("Could not send member message.")
+    if OWNER_ID:
+        try:
+            await context.bot.send_message(
+                chat_id=OWNER_ID,
+                text=f"📩 *رسالة من مستخدم*\n\n👤 `{user_name}`\n🆔 @{user_username}\n"
+                     f"🆔 `{user_id}`\n📦 `{purchase['service_name']}`\n"
+                     f"💰 `${price:.2f}`\n\n📝 `{text}`",
+                parse_mode=ParseMode.MARKDOWN)
+        except Exception as e:
+            logger.error(f"Error: {e}")
+    await update.message.reply_text(
+        f"✅ *تم استلام رسالتك!*\n\n💰 تم خصم `${price:.2f}`.\n"
+        f"📝 `{text}`\n\n_📌 سيتم التواصل معك قريباً._",
+        parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+    PENDING_PURCHASES.pop(user_id, None)
+    save_pending_purchases()
+
+
+async def my_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from telegram_bot.owner import admin_balance_stats
+    if not await check_forced_channel(update, context):
+        return
+    query = update.callback_query
+    uid = query.from_user.id
+    user = get_user(uid)
+    if is_admin(uid):
+        balances = admin_balance_stats(user, uid)
+        await query.edit_message_text(
+            f"💰 <b>Admin Wallet</b>\n\n"
+            f"⏳ Pending: ${balances['pending']:.2f}\n"
+            f"🔒 Hold (24/48h): ${balances['hold']:.2f}\n"
+            f"🛠 Completed emails: {balances['completed_count']}\n"
+            f"⏳ Restricted rewards: {balances['pending_count']}\n"
+            f"✅ Released rewards: {balances['released_count']}\n"
+            f"🛠 Admin rewards restricted: ${balances['admin_pending']:.2f}\n"
+            f"✅ Total admin rewards received: ${balances['received']:.2f}\n"
+            f"💳 Available admin balance: ${balances['available_admin']:.2f}\n"
+            f"📊 Total available: ${balances['total_owned']:.2f}",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
+        return
+    text = (
+        f"{t(uid, 'wallet_title')}\n\n"
+        f"{t(uid, 'wallet_pending', amount=float(user.get('pending_balance', 0.0)))}\n"
+        f"{t(uid, 'wallet_hold', amount=float(user.get('hold_balance', 0.0)))}\n"
+        f"{t(uid, 'wallet_balance', amount=float(user.get('balance', 0.0)))}"
+    )
+    await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN,
+                                  reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
+
+
+async def tutorials(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_forced_channel(update, context):
+        return
+    query = update.callback_query
+    uid = query.from_user.id
+    config = load_config()
+    buttons = []
+    for key, label in [
+        ("general", t(uid, "tutorials_general")),
+        ("email", t(uid, "tutorials_email")),
+        ("password", t(uid, "tutorials_password")),
+        ("totp", t(uid, "tutorials_totp")),
+        ("app_pass", t(uid, "tutorials_app_pass")),
+        ("leave", t(uid, "tutorials_leave")),
+        ("phone", t(uid, "tutorials_phone")),
+    ]:
+        if config.get(f"video_{key}") and Path(config.get(f"video_{key}", "")).exists():
+            buttons.append((label, f"play_video:{key}"))
+    buttons.append((t(uid, "main_menu"), "main_menu"))
+    await query.edit_message_text(t(uid, "tutorials_title"),
+                                  parse_mode=ParseMode.MARKDOWN,
+                                  reply_markup=kb_vertical(buttons))
+
+
+async def play_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_forced_channel(update, context):
+        return
+    query = update.callback_query
+    uid = query.from_user.id
+    vtype = query.data.split(":")[1]
+    config = load_config()
+    path = config.get(f"video_{vtype}")
+    if path and Path(path).exists():
+        try:
+            await context.bot.send_video(chat_id=uid, video=open(path, "rb"),
+                                         caption=f"📹 {t(uid, f'tutorials_{vtype}')}",
+                                         parse_mode=ParseMode.MARKDOWN,
+                                         supports_streaming=True)
+            await tutorials(update, context)
+        except Exception as e:
+            logger.error(f"Error: {e}")
+            await query.edit_message_text("⚠️",
+                                          reply_markup=kb_single(t(uid, "btn_back"), "tutorials"))
     else:
-        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
-    return False
+        await query.edit_message_text("⚠️",
+                                      reply_markup=kb_single(t(uid, "btn_back"), "tutorials"))
 
 
-async def check_forced_channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def generate_referral_code():
+    return secrets.token_hex(4).upper()
+
+
+async def referral_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_forced_channel(update, context):
+        return
+    query = update.callback_query
+    uid = update.effective_user.id
+    user_data = get_user(uid)
+    referral_code = user_data.get("referral_code", "")
+    if not referral_code:
+        referral_code = generate_referral_code()
+        user_data["referral_code"] = referral_code
+        save_user(uid, user_data)
+    bot_username = (await context.bot.get_me()).username
+    referral_link = f"https://t.me/{bot_username}?start={referral_code}"
+    msg = t(uid, "referral_title", link=referral_link,
+            earnings=float(user_data.get('referral_earnings', 0.0)),
+            count=user_data.get('total_referrals', 0))
+    buttons = [
+        (t(uid, "referral_btn_copy"), f"copy_referral:{referral_code}"),
+        (t(uid, "main_menu"), "main_menu"),
+    ]
+    await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN,
+                                  reply_markup=kb_vertical(buttons))
+
+
+async def copy_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_forced_channel(update, context):
+        return
+    query = update.callback_query
+    uid = query.from_user.id
+    code = query.data.split(":")[1]
+    bot_username = (await context.bot.get_me()).username
+    link = f"https://t.me/{bot_username}?start={code}"
+    buttons = [
+        (t(uid, "referral_btn_show"), "referral_menu"),
+        (t(uid, "main_menu"), "main_menu"),
+    ]
+    await query.edit_message_text(t(uid, "referral_link_shown", link=link),
+                                  parse_mode=ParseMode.MARKDOWN,
+                                  reply_markup=kb_vertical(buttons))
+
+
+async def referral_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    config = load_config()
+    referral_bonus = config.get("referral_bonus", 0.0)
+    buttons = [("💲 تغيير المكافأة", "set_referral_bonus"),
+               ("📊 إحصائيات", "referral_stats"),
+               ("🔙 إعدادات المالك", "owner_panel")]
+    await query.edit_message_text(
+        f"🔗 *إعدادات الإحالة*\n\n💰 المكافأة الحالية: ${referral_bonus:.2f}",
+        parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
+
+
+async def set_referral_bonus(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    await query.edit_message_text("💰 *مكافأة الإحالة*\n\nأرسل المبلغ الجديد:",
+                                  parse_mode=ParseMode.MARKDOWN,
+                                  reply_markup=kb_single("🔙 إلغاء", "referral_settings"))
+    context.user_data["mode"] = "set_referral_bonus"
+
+
+async def referral_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    users = load_json(USERS_DB)
+    total_referrals = 0
+    total_earnings = 0.0
+    top = []
+    for uid, encrypted_data in users.items():
+        data = decrypt_user_data(encrypted_data)
+        if data.get("total_referrals", 0) > 0:
+            total_referrals += data["total_referrals"]
+            total_earnings += float(data.get("referral_earnings", 0.0))
+            top.append({"user_id": uid, "count": data["total_referrals"],
+                        "earnings": float(data.get("referral_earnings", 0.0))})
+    top.sort(key=lambda x: x["count"], reverse=True)
+    msg = (f"📊 *إحصائيات الإحالة*\n\n👥 الإجمالي: {total_referrals}\n"
+           f"💰 المكافآت: ${total_earnings:.2f}\n\n")
+    if top:
+        msg += "🏆 *أفضل المحالين:*\n"
+        for idx, ref in enumerate(top[:5], 1):
+            msg += f"{idx}. {ref['user_id']} - {ref['count']} - ${ref['earnings']:.2f}\n"
+    await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN,
+                                  reply_markup=kb_single("🔙 إعدادات الإحالة", "referral_settings"))
+
+
+async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from telegram_bot.members import main_menu
-    if await check_forced_channel(update, context):
+    if update.effective_user.id != OWNER_ID:
+        return
+    text = update.message.text.strip()
+    action = context.user_data.get("store_action")
+    if action == "add_category":
+        config = load_config()
+        if "store_categories" not in config:
+            config["store_categories"] = []
+        if any(cat["name"].lower() == text.lower() for cat in config["store_categories"]):
+            await update.message.reply_text("⚠️ الفئة موجودة!")
+            return
+        config["store_categories"].append({"id": str(time.time_ns()), "name": text, "services": []})
+        save_config(config)
+        await update.message.reply_text(f"✅ تم إضافة الفئة: {text}")
+        context.user_data.pop("store_action", None)
+        await main_menu(update, context)
+    elif action == "set_channel":
+        channel, invite_link = parse_forced_channel_input(text)
+        if not channel:
+            await update.message.reply_text(
+                "⚠️ صيغة القناة غير صحيحة.\n"
+                "أرسل @username أو رابط قناة عامة. للقناة الخاصة أرسل:\n"
+                "-1001234567890 | https://t.me/+invite")
+            return
+        try:
+            chat = await context.bot.get_chat(channel)
+            if chat.type not in {"channel", "supergroup"}:
+                await update.message.reply_text("⚠️ المعرف لا يعود إلى قناة أو مجموعة.")
+                return
+            bot_user = await context.bot.get_me()
+            bot_member = await context.bot.get_chat_member(chat.id, bot_user.id)
+            if bot_member.status not in {"administrator", "creator"}:
+                await update.message.reply_text("⚠️ أضف البوت مشرفاً في القناة أولاً، ثم أعد إرسال بياناتها.")
+                return
+        except Exception:
+            logger.exception("Could not validate the forced channel")
+            await update.message.reply_text("⚠️ تعذر الوصول إلى القناة. تأكد من صحة المعرف وأن البوت مشرف فيها.")
+            return
+        join_link = invite_link or (f"https://t.me/{chat.username}" if getattr(chat, "username", None) else "")
+        if not join_link:
+            await update.message.reply_text("⚠️ هذه قناة خاصة. أرسل المعرف الرقمي مع رابط الدعوة، مفصولين بعلامة |.")
+            return
+        config = load_config()
+        config["forced_channel"] = str(chat.id)
+        config["forced_channel_link"] = join_link
+        save_config(config)
+        await update.message.reply_text(
+            f"✅ تمت إضافة القناة الإجبارية: {chat.title}\n"
+            "يجب على الأعضاء الانضمام إليها قبل استخدام البوت.")
+        context.user_data.pop("store_action", None)
+        await main_menu(update, context)
+    elif action in {"set_purchase_channel_1", "set_purchase_channel_2"}:
+        channel_id = normalize_chat_id(text)
+        if not channel_id or not (channel_id.startswith("@") or channel_id.lstrip("-").isdigit()):
+            await update.message.reply_text("⚠️ المعرف غير صحيح.")
+            return
+        channel_number = action.rsplit("_", 1)[1]
+        config = load_config()
+        config[f"purchase_channel_{channel_number}"] = channel_id
+        save_config(config)
+        context.user_data.pop("store_action", None)
+        await update.message.reply_text(
+            f"✅ تم حفظ الكروب رقم {channel_number}: {channel_id}",
+            reply_markup=purchase_channels_keyboard())
+    elif action == "add_service_name":
+        context.user_data["store_service_name"] = text
+        context.user_data["store_action"] = "add_service_price"
+        await update.message.reply_text(
+            "💰 *الخطوة 2/3*: أرسل السعر:",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=kb_single("🔙 إلغاء",
+                                   f"store_category:{context.user_data.get('current_category_id')}"))
+    elif action == "add_service_price":
+        try:
+            price = float(text)
+            if price <= 0:
+                await update.message.reply_text("⚠️ السعر > 0!")
+                return
+            context.user_data["store_service_price"] = price
+            context.user_data["store_action"] = "add_service_message"
+            await update.message.reply_text(
+                "📝 *الخطوة 3/3*: أرسل الرسالة للعميل:",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=kb_single("🔙 إلغاء",
+                                       f"store_category:{context.user_data.get('current_category_id')}"))
+        except ValueError:
+            await update.message.reply_text("⚠️ رقم صحيح!")
+    elif action == "add_service_message":
+        name = context.user_data.get("store_service_name")
+        price = context.user_data.get("store_service_price")
+        cat_id = context.user_data.get("current_category_id")
+        config = load_config()
+        for cat in config.get("store_categories", []):
+            if cat["id"] == cat_id:
+                cat["services"].append({"id": str(time.time_ns()), "name": name,
+                                        "price": price, "message": text})
+                break
+        save_config(config)
+        await update.message.reply_text("✅ تم إضافة المبيعة!")
+        for key in ("store_action", "store_service_name", "store_service_price", "current_category_id"):
+            context.user_data.pop(key, None)
         await main_menu(update, context)
 
 
-# ==================== SORT HELPERS ====================
-def _record_sort_key(record: dict) -> str:
-    return str(record.get("timestamp") or record.get("approval_time") or record.get("rejected_at") or record.get("completed_at") or record.get("confirmed_at") or "")
-
-
-def sort_records_newest_first(records: List[dict]) -> List[dict]:
-    if not isinstance(records, list):
-        return []
-    try:
-        return sorted(records, key=_record_sort_key, reverse=True)
-    except Exception:
-        return list(records)
-
-
-def sort_records_oldest_first(records: List[dict]) -> List[dict]:
-    if not isinstance(records, list):
-        return []
-    try:
-        return sorted(records, key=_record_sort_key)
-    except Exception:
-        return list(records)
-
-
-# ==================== TOP SELLERS & SALES STATS ====================
-def compute_top_sellers(limit: int = 10) -> List[dict]:
-    users = load_json(USERS_DB)
-    rows = []
-    for raw_uid, encrypted_data in users.items():
-        try:
-            uid = int(raw_uid)
-        except (TypeError, ValueError):
-            continue
-        user_data = decrypt_user_data(encrypted_data)
-        total = (len(user_data.get("approved_accounts", []) or []) + len(user_data.get("pending_requests", []) or []) + len(user_data.get("rejected_requests", []) or []))
-        if total <= 0:
-            continue
-        rows.append({"user_id": uid, "total": total})
-    rows.sort(key=lambda r: (-r["total"], r["user_id"]))
-    return rows[:limit]
-
-
-def compute_sales_stats(since_iso: Optional[str] = None) -> dict:
-    start_dt = None
-    if since_iso:
-        try:
-            start_dt = datetime.fromisoformat(since_iso)
-            if start_dt.tzinfo is None:
-                start_dt = start_dt.replace(tzinfo=timezone.utc)
-        except ValueError:
-            start_dt = None
-    users = load_json(USERS_DB)
-    total_accounts = 0
-    per_user: Dict[int, int] = {}
-
-    def _record_in_window(rec: dict) -> bool:
-        if start_dt is None:
-            return True
-        t = _record_sort_key(rec)
-        if not t:
-            return False
-        try:
-            dt = datetime.fromisoformat(t)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-        except ValueError:
-            return False
-        return dt >= start_dt
-
-    for raw_uid, encrypted_data in users.items():
-        try:
-            uid = int(raw_uid)
-        except (TypeError, ValueError):
-            continue
-        ud = decrypt_user_data(encrypted_data)
-        count = 0
-        for coll in ("approved_accounts", "pending_requests", "rejected_requests"):
-            for rec in ud.get(coll, []) or []:
-                if _record_in_window(rec):
-                    count += 1
-        if count > 0:
-            per_user[uid] = count
-            total_accounts += count
-    top = sorted(per_user.items(), key=lambda x: (-x[1], x[0]))[:10]
-    top_list = [{"user_id": uid, "total": c} for uid, c in top]
-    return {"total_accounts": total_accounts, "top": top_list, "since": since_iso}
-
-
-# ==================== CONTEST SYSTEM ====================
-def get_contest() -> dict:
+# ==================== STORE SECTION ====================
+async def owner_store_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
     config = load_config()
-    contest = config.get("contest")
-    if not isinstance(contest, dict):
-        return {}
-    if "tiers" not in contest:
-        old_target = int(contest.get("target_emails", 0) or 0)
-        old_reward = float(contest.get("reward_per_winner", 0) or 0)
-        if old_target > 0 and old_reward > 0:
-            contest["tiers"] = [{"emails": old_target, "reward": old_reward}]
-            migrated = []
-            for w in contest.get("winners", []) or []:
-                w2 = dict(w)
-                w2.setdefault("tier_index", 0)
-                w2.setdefault("tier_emails", old_target)
-                migrated.append(w2)
-            contest["winners"] = migrated
-        else:
-            contest["tiers"] = []
-    if "max_winners" not in contest:
-        contest["max_winners"] = 0
-    return contest
+    categories = config.get("store_categories", [])
+    buttons = [(f"📂 {cat['name']}", f"store_category:{cat['id']}") for cat in categories]
+    visible = config.get("tg_lion_store_visible", True)
+    toggle_label = "👁️ إخفاء حسابات لكل الدول عن الأعضاء" if visible else "👁️ إظهار حسابات لكل الدول للأعضاء"
+    buttons.append((toggle_label, "toggle_tg_lion_store"))
+    buttons.append(("➕ إضافة فئة", "store_add_category"))
+    buttons.append(("🔙 إعدادات المالك", "owner_panel"))
+    await query.edit_message_text("🛒 *إدارة المبيعات*", parse_mode=ParseMode.MARKDOWN,
+                                  reply_markup=kb_vertical(buttons))
 
 
-def save_contest(contest: dict):
+async def toggle_tg_lion_store(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
     config = load_config()
-    config["contest"] = contest
+    visible = not config.get("tg_lion_store_visible", True)
+    config["tg_lion_store_visible"] = visible
     save_config(config)
+    await query.answer("✅ تم إظهار القسم للأعضاء." if visible else "✅ تم إخفاء القسم عن الأعضاء.")
+    await owner_store_section(update, context)
 
 
-def _count_approved_in_window(user_data: dict, start_iso: Optional[str]) -> int:
-    if not start_iso:
-        return 0
-    try:
-        start_dt = datetime.fromisoformat(start_iso)
-        if start_dt.tzinfo is None:
-            start_dt = start_dt.replace(tzinfo=timezone.utc)
-    except ValueError:
-        return 0
-    count = 0
-    for acc in user_data.get("approved_accounts", []) or []:
-        if acc.get("rejected_at_24h"):
-            continue
-        t = _record_sort_key(acc)
-        if not t:
-            continue
-        try:
-            dt = datetime.fromisoformat(t)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-        except ValueError:
-            continue
-        if dt >= start_dt:
-            count += 1
-    return count
-
-
-def contest_summary_lines(contest: dict) -> List[str]:
-    if not contest:
-        return ["📭 لا توجد مسابقة حالياً."]
-    active = bool(contest.get("active"))
-    started_at = contest.get("started_at")
-    max_winners = int(contest.get("max_winners", 0) or 0)
-    tiers = contest.get("tiers", []) or []
-    winners = contest.get("winners", []) or []
-    total_pts = float(contest.get("total_points_awarded", 0) or 0)
-    total_emails_delivered = int(contest.get("total_emails_delivered", 0) or 0)
-    lines = []
-    lines.append(f"📌 <b>الحالة:</b> {'🟢 نشطة' if active else '🔴 متوقفة'}")
-    if started_at:
-        lines.append(f"🕐 <b>بدأت:</b> <code>{tg_html_escape(_format_iso_time(started_at))}</code>")
-    lines.append(f"🏅 <b>الحد الأقصى للفائزين:</b> <code>{max_winners}</code>")
-    lines.append("")
-    lines.append("🎁 <b>الجوائز:</b>")
-    if not tiers:
-        lines.append("_لا توجد جوائز._")
-    for i, tier in enumerate(tiers, 1):
-        emails = int(tier.get("emails", 0) or 0)
-        reward = float(tier.get("reward", 0) or 0)
-        lines.append(f"  {i}. عند <b>{emails}</b> إيميل → <code>${reward:.2f}</code>")
-    lines.append("")
-    lines.append(f"✅ <b>عدد الفائزين الحالي:</b> <code>{len(winners)}</code>")
-    lines.append(f"📨 <b>عدد الإيميلات الواصلة:</b> <code>{total_emails_delivered}</code>")
-    lines.append(f"💵 <b>النقاط الممنوحة:</b> <code>${total_pts:.2f}</code>")
-    return lines
-
-
-async def check_contest_award(context: ContextTypes.DEFAULT_TYPE, uid: int):
-    contest = get_contest()
-    if not contest or not contest.get("active"):
+async def store_add_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
         return
-    started_at = contest.get("started_at")
-    if not started_at:
-        return
-    tiers = contest.get("tiers", []) or []
-    max_winners = int(contest.get("max_winners", 0) or 0)
-    if not tiers or max_winners <= 0:
-        return
-    user_data = get_user(uid)
-    count = _count_approved_in_window(user_data, started_at)
-    contest["total_emails_delivered"] = int(contest.get("total_emails_delivered", 0) or 0) + 1
-    save_contest(contest)
-    winners = contest.get("winners", []) or []
-    awarded_now: List[Tuple[int, float]] = []
-    for tier_index, tier in enumerate(tiers):
-        tier_emails = int(tier.get("emails", 0) or 0)
-        tier_reward = float(tier.get("reward", 0) or 0)
-        if tier_emails <= 0 or tier_reward <= 0:
-            continue
-        if count < tier_emails:
-            continue
-        already_won = any(int(w.get("user_id", 0)) == uid and int(w.get("tier_index", -1)) == tier_index for w in winners)
-        if already_won:
-            continue
-        tier_winners_count = sum(1 for w in winners if int(w.get("tier_index", -1)) == tier_index)
-        if tier_winners_count >= max_winners:
-            continue
-        user_data["balance"] = clamp_money(float(user_data.get("balance", 0.0)) + tier_reward)
-        user_data["total_credited_balance"] = clamp_money(float(user_data.get("total_credited_balance", 0.0) or 0.0) + tier_reward)
-        add_transaction(user_data, "credit", tier_reward, f"جائزة المسابقة (هدف {tier_emails} إيميل)", "")
-        winners.append({"user_id": uid, "tier_index": tier_index, "tier_emails": tier_emails,
-                        "reward": tier_reward, "awarded_at": datetime.now(timezone.utc).isoformat()})
-        awarded_now.append((tier_emails, tier_reward))
-    if not awarded_now:
-        return
-    wins = user_data.get("contest_wins", []) or []
-    for tier_emails, tier_reward in awarded_now:
-        wins.append({"contest_started_at": started_at, "awarded_at": datetime.now(timezone.utc).isoformat(),
-                     "tier_emails": tier_emails, "reward": tier_reward})
-    user_data["contest_wins"] = wins
-    save_user(uid, user_data)
-    contest["winners"] = winners
-    total_now = sum(r for _, r in awarded_now)
-    contest["total_points_awarded"] = float(contest.get("total_points_awarded", 0) or 0) + total_now
-    save_contest(contest)
-    tiers_lines = "\n".join([f"  • عند {e} إيميل → <code>${r:.2f}</code>" for e, r in awarded_now])
-    try:
-        await context.bot.send_message(chat_id=uid, text=("🎉 <b>مبروك! فزت في المسابقة</b>\n\n"
-            f"✅ <b>عدد الإيميلات الحالية:</b> <code>{count}</code>\n"
-            f"💰 <b>المكافآت المكتسبة:</b>\n{tiers_lines}\n\n"
-            f"💵 <b>الإجمالي الممنوح الآن:</b> <code>${total_now:.2f}</code>\n"
-            "تم إضافة المكافأة إلى رصيدك مباشرة."), parse_mode=ParseMode.HTML)
-    except Exception:
-        pass
-    try:
-        await context.bot.send_message(chat_id=OWNER_ID, text=("🎉 <b>فائز جديد في المسابقة</b>\n\n"
-            f"👤 المستخدم: <code>{uid}</code>\n✅ الإيميلات الحالية: <code>{count}</code>\n"
-            f"💵 إجمالي الممنوح: <code>${total_now:.2f}</code>\n"
-            f"🎁 مكافآت: <code>{len(awarded_now)}</code>"), parse_mode=ParseMode.HTML)
-    except Exception:
-        pass
+    await query.edit_message_text("✏️ *اسم الفئة:*", parse_mode=ParseMode.MARKDOWN,
+                                  reply_markup=kb_single("🔙 إلغاء", "store_section"))
+    context.user_data["store_action"] = "add_category"
 
 
-# ==================== AUTO CLEANUP JOB ====================
-async def cleanup_fake_requests_job(context: ContextTypes.DEFAULT_TYPE):
-    """مهمة تلقائية لرفض الطلبات الوهمية أو المعلقة لفترة طويلة"""
+async def store_category_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    cat_id = query.data.split(":", 1)[1]
+    config = load_config()
+    category = next((c for c in config.get("store_categories", []) if c["id"] == cat_id), None)
+    if not category:
+        await query.edit_message_text("⚠️ الفئة غير موجودة.",
+                                      reply_markup=kb_single("🔙 المبيعات", "store_section"))
+        return
+    services = category.get("services", [])
+    msg = f"📂 *{category['name']}*\n\n"
+    if services:
+        for idx, s in enumerate(services, 1):
+            msg += f"{idx}. 🛒 {s['name']} - 💰 ${s['price']:.2f}\n"
+    else:
+        msg += "📭 لا توجد مبيعات.\n"
+    buttons = [("➕ إضافة", f"store_add_service:{cat_id}"),
+               ("🗑️ حذف", f"store_delete_service:{cat_id}"),
+               ("🔙 المبيعات", "store_section")]
+    await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
+
+
+async def store_add_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    cat_id = query.data.split(":", 1)[1]
+    context.user_data["current_category_id"] = cat_id
+    context.user_data["store_action"] = "add_service_name"
+    await query.edit_message_text("✏️ *اسم المبيعة:*", parse_mode=ParseMode.MARKDOWN,
+                                  reply_markup=kb_single("🔙 إلغاء", f"store_category:{cat_id}"))
+
+
+async def store_delete_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    cat_id = query.data.split(":", 1)[1]
+    config = load_config()
+    category = next((c for c in config.get("store_categories", []) if c["id"] == cat_id), None)
+    if not category:
+        await query.edit_message_text("⚠️ الفئة غير موجودة.")
+        return
+    services = category.get("services", [])
+    if not services:
+        await query.edit_message_text("📭 لا توجد مبيعات.",
+                                      reply_markup=kb_single("🔙 الفئة", f"store_category:{cat_id}"))
+        return
+    buttons = [(f"❌ {s['name']} - ${s['price']:.2f}", f"delete_service:{cat_id}:{s['id']}") for s in services]
+    buttons.append(("🔙 الفئة", f"store_category:{cat_id}"))
+    await query.edit_message_text("🗑️ *حذف مبيعة*", parse_mode=ParseMode.MARKDOWN,
+                                  reply_markup=kb_vertical(buttons))
+
+
+async def delete_service_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    parts = query.data.split(":")
+    cat_id = parts[1]
+    service_id = parts[2]
+    config = load_config()
+    for cat in config.get("store_categories", []):
+        if cat["id"] == cat_id:
+            cat["services"] = [s for s in cat["services"] if s["id"] != service_id]
+            break
+    save_config(config)
+    await query.edit_message_text("✅ تم الحذف.",
+                                  reply_markup=kb_single("🔙 الفئة", f"store_category:{cat_id}"))
+
+
+# ==================== REFERRAL HANDLER ====================
+async def handle_referral(update: Update, context: ContextTypes.DEFAULT_TYPE, referral_code: str):
+    user_id = update.effective_user.id
+    if context.user_data.get("my_referral_code") == referral_code:
+        await update.message.reply_text("⚠️ لا يمكنك استخدام رابطك!")
+        return
+    user_data = get_user(user_id)
+    if user_data.get("referred_by"):
+        await update.message.reply_text("ℹ️ أنت مشترك بالفعل.")
+        return
     users = load_json(USERS_DB)
-    changed = False
+    referrer_id = None
     for uid, encrypted_data in users.items():
-        ud = decrypt_user_data(encrypted_data)
-        pending = ud.get("pending_requests", [])
-        new_pending = []
-        rejected_any = False
-        for req in pending:
-            if req.get("has_app_pass"):
-                new_pending.append(req)
-                continue
-            
-            timestamp = req.get("timestamp")
-            is_old = False
-            if timestamp:
-                try:
-                    dt = datetime.fromisoformat(timestamp)
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
-                    if (datetime.now(timezone.utc) - dt).total_seconds() > 12 * 3600:
-                        is_old = True
-                except Exception:
-                    pass
-            
-            email = req.get("email", "")
-            valid_domain = await asyncio.to_thread(is_valid_email_domain, email)
-            
-            if not valid_domain or is_old:
-                move_request_to_rejected(ud, req, "other", "رفض تلقائي: إيميل وهمي أو لم يكتمل خلال 12 ساعة")
-                rejected_any = True
-                changed = True
-            else:
-                new_pending.append(req)
-                
-        if rejected_any:
-            ud["pending_requests"] = new_pending
-            save_user(int(uid), ud)
-            
-    if changed:
-        logger.info("Auto-rejected fake or abandoned pending requests.")
-
-
-# Shared date and time helpers
-def parse_iso_datetime(value: Any) -> Optional[datetime]:
-    if not isinstance(value, str) or not value.strip():
-        return None
+        data = decrypt_user_data(encrypted_data)
+        if data.get("referral_code") == referral_code:
+            referrer_id = int(uid)
+            break
+    if not referrer_id:
+        await update.message.reply_text("❌ رابط غير صالح.")
+        return
+    user_data["referred_by"] = referrer_id
+    save_user(user_id, user_data)
+    await update.message.reply_text(
+        f"✅ *تم تفعيل الإحالة!*\n\n👤 بواسطة: {referrer_id}\nاستخدم /start للبدء.",
+        parse_mode=ParseMode.MARKDOWN)
     try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed
-
-
-def _format_iso_time(value: Any) -> str:
-    if not value or not isinstance(value, str):
-        return ""
-    try:
-        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+        await context.bot.send_message(
+            chat_id=referrer_id,
+            text=f"🎉 *إحالة جديدة!*\n\n👤 المستخدم {user_id} انضم.",
+            parse_mode=ParseMode.MARKDOWN)
     except Exception:
-        return value[:19]
+        pass
+
 
 __all__ = [name for name in globals() if not name.startswith("__")]
