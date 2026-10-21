@@ -2242,7 +2242,8 @@ async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TY
         if ban_result:
             _, duration_text = ban_result
             ban_notice = (f"\n\n🚫 *تم حظرك من إرسال حسابات جديدة لمدة {duration_text}* "
-                          f"(3 رفضات متتالية).")
+                          f"(3 رفضات متتالية).\n"
+                          f"📌 *تم حذف جميع إيميلاتك المعلقة من قائمة الانتظار.*")
 
         try:
             await context.bot.send_message(
@@ -2257,7 +2258,7 @@ async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TY
             f"📝 السبب: {REJECT_REASON_LABELS.get(reason_type, reason_type)}"
         )
         if ban_result:
-            success_text += f"\n🚫 تم حظر البائع لمدة {ban_result[1]}."
+            success_text += f"\n🚫 تم حظر البائع لمدة {ban_result[1]} وحذف إيميلاته المعلقة."
         await _safe_edit(query, success_text, parse_mode=ParseMode.HTML,
                          reply_markup=kb_single("🔙 العودة", rejection_list_callback(actor_id)))
 
@@ -2304,7 +2305,8 @@ async def handle_reject_reason_text(update: Update, context: ContextTypes.DEFAUL
     ban_notice = ""
     if ban_result:
         _, duration_text = ban_result
-        ban_notice = f"\n\n🚫 *تم حظرك لمدة {duration_text}* بسبب 3 رفضات متتالية."
+        ban_notice = (f"\n\n🚫 *تم حظرك لمدة {duration_text}* بسبب 3 رفضات متتالية.\n"
+                      f"📌 *تم حذف جميع إيميلاتك المعلقة من قائمة الانتظار.*")
 
     try:
         await context.bot.send_message(
@@ -2317,7 +2319,7 @@ async def handle_reject_reason_text(update: Update, context: ContextTypes.DEFAUL
         context.user_data.pop(key, None)
     confirmation = f"✅ تم رفض الطلب `{email}`."
     if ban_result:
-        confirmation += f"\n🚫 تم حظر البائع لمدة {ban_result[1]}."
+        confirmation += f"\n🚫 تم حظر البائع لمدة {ban_result[1]} وحذف إيميلاته المعلقة."
     await update.message.reply_text(
         confirmation,
         reply_markup=kb_single("🔙 العودة", rejection_list_callback(actor_id)))
