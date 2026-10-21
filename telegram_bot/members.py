@@ -715,6 +715,7 @@ async def sell_new_email_start(update: Update, context: ContextTypes.DEFAULT_TYP
         parse_mode=ParseMode.HTML,
         reply_markup=kb_vertical([
             (t(uid, "sell_new_btn_complete"), "sell_new_email_complete"),
+            (t(uid, "sell_new_btn_skip_2fa"), "sell_new_email_finish_prompt"), # ← الزر الجديد
             (t(uid, "btn_cancel"), "sell_new_email_cancel"),
         ]))
 
@@ -748,8 +749,102 @@ async def sell_new_email_complete(update: Update, context: ContextTypes.DEFAULT_
         parse_mode=ParseMode.HTML,
         reply_markup=kb_vertical([
             (t(uid, "add_btn_video_totp"), "sell_show_video:totp"),
+            (t(uid, "sell_new_btn_skip_2fa"), "sell_new_email_finish_prompt"), # ← الزر الجديد
             (t(uid, "btn_cancel"), "sell_new_email_cancel"),
         ]))
+
+
+async def sell_new_email_finish_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """رسالة تنبيه عند محاولة الإنهاء بدون 2FA"""
+    query = update.callback_query
+    uid = query.from_user.id
+    creds = context.user_data.get("sell_new_email")
+    if not creds:
+        await query.answer("⚠️ انتهت الجلسة.", show_alert=True)
+        await query.edit_message_text(t(uid, "sell_new_session_expired"), reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
+        return
+    
+    await query.edit_message_text(
+        t(uid, "sell_new_finish_prompt"),
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_vertical([
+            (t(uid, "sell_new_btn_finish_confirm"), "sell_new_email_finish_confirm"),
+            (t(uid, "sell_new_btn_complete_2fa"), "sell_new_email_complete"),
+            (t(uid, "btn_cancel"), "sell_new_email_cancel"),
+        ]))
+
+
+async def sell_new_email_finish_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """إنهاء الطلب بدون 2FA وإرساله للطلبات"""
+    query = update.callback_query
+    uid = update.effective_user.id
+    creds = context.user_data.get("sell_new_email")
+    if not creds:
+        await query.answer("⚠️ انتهت الجلسة.", show_alert=True)
+        await query.edit_message_text(t(uid, "sell_new_session_expired"), reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
+        return
+    
+    await query.edit_message_text(t(uid, "sell_new_checking_created", email=tg_html_escape(creds['email'])), parse_mode=ParseMode.HTML)
+    
+    result = await check_email_availability(creds["email"], use_cache=False)
+    if result is True:
+        await query.edit_message_text(
+            t(uid, "sell_new_not_created", email=tg_html_escape(creds['email'])),
+            parse_mode=ParseMode.HTML, disable_web_page_preview=True,
+            reply_markup=kb_vertical([
+                (t(uid, "sell_new_btn_recheck"), "sell_new_email_finish_confirm"),
+                (t(uid, "sell_new_btn_complete_2fa"), "sell_new_email_complete"),
+                (t(uid, "btn_cancel"), "sell_new_email_cancel"),
+            ]))
+        return
+        
+    user = update.effective_user
+    user_data = get_user(uid)
+    prices = get_tier_prices("new")
+    amount = prices["tier_1"]
+    
+    # حذف أي طلب سابق لنفس الإيميل
+    user_data["pending_requests"] = [r for r in user_data.get("pending_requests", []) if normalize_email(r.get("email", "")) != normalize_email(creds["email"])]
+    
+    pending_request = {
+        "email": creds["email"],
+        "password": creds["password"],
+        "totp": "",
+        "app_pass": "",
+        "amount": amount,
+        "requested_amount": amount,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "has_totp": False,
+        "has_app_pass": False,
+        "account_type": "new",
+        "user_name": user.full_name or "غير معروف",
+        "user_username": user.username or "لا يوجد",
+        "first_name": creds.get("first_name", ""),
+        "is_bot_generated": True,
+    }
+    user_data.setdefault("pending_requests", []).append(pending_request)
+    user_data["pending_balance"] = clamp_money(float(user_data.get("pending_balance", 0.0)) + amount)
+    add_transaction(user_data, "hold", amount, "طلب بيع إيميل جديد (بدون 2FA)", creds["email"])
+    save_user(uid, user_data)
+    
+    context.user_data.pop("sell_new_email", None)
+    context.user_data.pop("step", None)
+    
+    await query.edit_message_text(
+        t(uid, "sell_new_finished", email=tg_html_escape(creds["email"])),
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_single(t(uid, "main_menu"), "main_menu")
+    )
+    try:
+        await context.bot.send_message(
+            chat_id=OWNER_ID,
+            text=(f"🆕 <b>طلب بيع إيميل جديد (بدون 2FA)</b>\n\n"
+                  f"👤 {tg_html_escape(user.full_name or 'غير معروف')} (@{tg_html_escape(user.username or 'لا يوجد')})\n"
+                  f"🆔 <code>{uid}</code>\n"
+                  f"📧 <code>{tg_html_escape(creds['email'])}</code>"),
+            parse_mode=ParseMode.HTML)
+    except Exception:
+        pass
 
 
 async def sell_new_email_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
