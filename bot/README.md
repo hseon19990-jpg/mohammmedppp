@@ -50,3 +50,12 @@ python -m venv .venv
 pip install -r requirements.txt
 python bot.py
 ```
+## Source layout
+
+- bot.py remains the deployment entry point (python bot.py).
+- telegram_bot/core.py contains shared configuration, persistence, validation, and data helpers.
+- telegram_bot/members.py contains member menus and account workflows.
+- telegram_bot/owner.py contains owner and administrator panels and reports.
+- telegram_bot/approvals.py contains account review and approval flows.
+- telegram_bot/store.py contains purchases, the catalog, channels, and referrals.
+- telegram_bot/application.py wires Telegram commands, messages, and callback routing.
