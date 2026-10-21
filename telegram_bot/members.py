@@ -12,34 +12,75 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     SESSIONS.pop(update.effective_user.id, None)
     save_sessions()
     user = update.effective_user
-    user_data = get_user(user.id)
+    uid = user.id
+    user_data = get_user(uid)
     ban_msg = get_active_ban_message(user_data)
     prefix = (ban_msg + "\n\n") if ban_msg else ""
+
+    prices_old = get_tier_prices("old")
+    prices_new = get_tier_prices("new")
+    welcome_text = t(uid, "welcome",
+                     old_price=prices_old["tier_3"],
+                     new_price=prices_new["tier_3"])
+
     buttons = [
-        ("➕ بيع إيميل قديم", "add_account"),
-        ("🆕 بيع إيميل جديد", "sell_new_email"),
-        ("💰 أموالي", "my_wallet"),
-        ("📜 سجل معاملاتي", "my_transactions"),
-        ("📋 حساباتي", "my_accounts"),
-        ("🏆 الأكثر بيعاً", "top_sellers"),
-        ("📧 الإيميلات المرفوضة", "rejected_emails"),
-        ("📺 تعليم", "tutorials"),
-        ("🛒 سحب", "withdraw_store"),
-        ("🔗 الإحالة", "referral_menu"),
-        ("✏️ تعديل حساباتي", "edit_my_accounts"),
+        (t(uid, "btn_sell_old"), "add_account"),
+        (t(uid, "btn_sell_new"), "sell_new_email"),
+        (t(uid, "btn_wallet"), "my_wallet"),
+        (t(uid, "btn_transactions"), "my_transactions"),
+        (t(uid, "btn_my_accounts"), "my_accounts"),
+        (t(uid, "btn_top_sellers"), "top_sellers"),
+        (t(uid, "btn_rejected"), "rejected_emails"),
+        (t(uid, "btn_tutorials"), "tutorials"),
+        (t(uid, "btn_store"), "withdraw_store"),
+        (t(uid, "btn_referral"), "referral_menu"),
+        (t(uid, "btn_edit_accounts"), "edit_my_accounts"),
+        (t(uid, "btn_language"), "language_menu"),
     ]
-    if is_admin(user.id):
-        buttons.append(("🛠 الإدارية", "admin_panel"))
-    if user.id == OWNER_ID:
-        buttons.append(("⚙️ إعدادات المالك", "owner_panel"))
-    text = prefix + "👋 مرحباً بك!\nاختر من القائمة أدناه:"
+    if is_admin(uid):
+        buttons.append((t(uid, "btn_admin"), "admin_panel"))
+    if uid == OWNER_ID:
+        buttons.append((t(uid, "btn_owner"), "owner_panel"))
+
+    text = prefix + welcome_text
     if update.callback_query:
         try:
-            await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=member_menu_keyboard(buttons))
+            await update.callback_query.edit_message_text(
+                text, parse_mode=ParseMode.HTML,
+                reply_markup=member_menu_keyboard(buttons))
         except Exception:
-            await update.callback_query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=member_menu_keyboard(buttons))
+            await update.callback_query.message.reply_text(
+                text, parse_mode=ParseMode.HTML,
+                reply_markup=member_menu_keyboard(buttons))
     else:
-        await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=member_menu_keyboard(buttons))
+        await update.message.reply_text(
+            text, parse_mode=ParseMode.HTML,
+            reply_markup=member_menu_keyboard(buttons))
+
+
+# ==================== LANGUAGE MENU ====================
+async def language_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = query.from_user.id
+    text = t(uid, "choose_language")
+    buttons = [
+        ("🇸🇦 العربية", "set_language:ar"),
+        ("🇬🇧 English", "set_language:en"),
+        ("🇷🇺 Русский", "set_language:ru"),
+        (t(uid, "main_menu"), "main_menu"),
+    ]
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML,
+                                  reply_markup=kb_vertical(buttons))
+
+
+async def set_language_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = query.from_user.id
+    parts = query.data.split(":", 1)
+    lang = parts[1] if len(parts) > 1 else "ar"
+    set_user_language(uid, lang)
+    await query.answer(t(uid, "language_set"), show_alert=True)
+    await main_menu(update, context)
 
 
 # ==================== TOP SELLERS VIEW ====================
