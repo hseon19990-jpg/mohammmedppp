@@ -391,6 +391,10 @@ def _build_email_record_report(match: dict, position: int, total: int) -> str:
     lines.append(f"<b>━━━ سجل {position}/{total} ━━━</b>")
     lines.append(f"<b>الحالة:</b> {_format_record_status(record_type, rec)}")
     lines.append(f"<b>نوع السجل:</b> <code>{record_type}</code>")
+    
+    acc_type = rec.get("account_type", "old")
+    type_text = "🆕 جديد" if acc_type == "new" else "📝 قديم"
+    lines.append(f"<b>نوع الإيميل:</b> {type_text}")
 
     display_name = rec.get("user_name") or user_data.get("user_name") or "غير معروف"
     display_username = rec.get("user_username") or user_data.get("user_username") or "لا يوجد"
@@ -411,12 +415,6 @@ def _build_email_record_report(match: dict, position: int, total: int) -> str:
     totp = rec.get("totp", "")
     if totp:
         lines.append(f"  • TOTP: <code>{tg_html_escape(totp)}</code>")
-        try:
-            current_code = pyotp.TOTP(totp).now()
-            seconds_left = 30 - (int(time.time()) % 30)
-            lines.append(f"  • الكود الحالي: <code>{current_code}</code> (⏰ {seconds_left}s)")
-        except Exception:
-            lines.append("  • الكود الحالي: ⚠️ تعذّر توليده")
     else:
         lines.append("  • TOTP: ❌ غير موجود")
     app_pass = rec.get("app_pass", "")
@@ -684,7 +682,6 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ("➕ إضافة قناة إجبارية", "forced_channel"),
         ("📨 كروبات إشعارات الشراء", "purchase_channels"),
         ("📊 جميع الحسابات المقبولة", "all_accounts_section"),
-        ("❌ رفض إيميل مقبول بالعنوان", "reject_approved_by_email"),
         ("📈 إحصائيات المستخدمين", "owner_stats"),
         ("🔎 فحص عضو", "check_member"),
         ("🔍 فحص إيميل", "check_email_by_address"),
@@ -1171,8 +1168,6 @@ async def admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         "⚙️ *إعدادات الأدمن*\n\nاختر الإجراء:",
         parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
-
-
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]
