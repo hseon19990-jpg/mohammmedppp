@@ -427,6 +427,25 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
             await update.message.reply_text("❌ إيميل غير صالح. أرسل إيميلاً صحيحاً:")
             return
+            
+        # التحقق من النطاق (لمنع الإيميلات الوهمية)
+        valid_domain = await asyncio.to_thread(is_valid_email_domain, email)
+        if not valid_domain:
+            await update.message.reply_text("❌ هذا الإيميل وهمي أو النطاق غير موجود. أرسل إيميلاً حقيقياً:")
+            return
+
+        # ═══ فحص التوفر (للإيميل القديم يجب أن يكون محجوزاً) ═══
+        avail_result = await check_email_availability(email)
+        if avail_result is True:
+            await update.message.reply_text(
+                "❌ <b>هذا الإيميل غير موجود!</b>\n\n"
+                "هذا الإيميل لا يزال <b>متاحاً للإنشاء</b>، مما يعني أنه لم يتم إنشاؤه مسبقاً على جوجل.\n\n"
+                "📌 الإيميل القديم يجب أن يكون حساباً موجوداً بالفعل.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+            SESSIONS.pop(uid, None); save_sessions()
+            return
+
         active_status = get_active_account_status(email)
         if active_status == "approved":
             await update.message.reply_text(
@@ -476,6 +495,19 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if has_active_account_password(text):
             await update.message.reply_text(
                 "⚠️ كلمة المرور مستخدمة مسبقاً في حساب مقبول أو قيد الانتظار.",
+                reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+            SESSIONS.pop(uid, None); save_sessions()
+            return
+
+        # ═══ الفحص المبكر (Early IMAP Check) ═══
+        await update.message.reply_text("⏳ جاري التحقق من وجود الحساب...")
+        ok, msg = await asyncio.to_thread(_imap_login_sync, session.email, text)
+        is_2fa_error = any(m in msg.lower() for m in TWO_FA_ERROR_MARKERS)
+        is_network_error = any(m in msg.lower() for m in NETWORK_ERROR_MARKERS)
+        
+        if not ok and not is_2fa_error and not is_network_error:
+            await update.message.reply_text(
+                "❌ الإيميل أو كلمة المرور غير صحيحة.\nتأكد أنك أنشأت الإيميل فعلياً وأن الباسورد صحيح.",
                 reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
             SESSIONS.pop(uid, None); save_sessions()
             return
@@ -639,7 +671,7 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== SELL NEW EMAIL FLOW ====================
 async def sell_new_email_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """زر «بيع إيميل جديد» — يولّد بيانات عشوائية ثم يطلب رمز المصادقة."""
+    """زر «بيع إيميل جديد» — يولّد بيانات عشوائية ويتحقق من التوفر."""
     if not await check_forced_channel(update, context):
         return
     query = update.callback_query
@@ -662,7 +694,29 @@ async def sell_new_email_start(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data.pop("step", None)
     context.user_data["account_type"] = "new"
 
-    creds = generate_sell_email_credentials()
+    await query.edit_message_text(
+        "⏳ <b>جاري توليد إيميل متاح...</b>\n\n"
+        "<i>يرجى الانتظار لحظات</i>",
+        parse_mode=ParseMode.HTML)
+
+    creds = None
+    for attempt in range(3):
+        candidate = generate_sell_email_credentials()
+        result = await check_email_availability(candidate["email"], use_cache=False)
+        
+        if result is True or result is None:
+            creds = candidate
+            break
+        logger.info(f"Email {candidate['email']} is taken, regenerating...")
+    
+    if creds is None:
+        await query.edit_message_text(
+            "⚠️ <b>تعذر العثور على إيميل متاح حالياً</b>\n\n"
+            "يرجى المحاولة لاحقاً.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        return
+
     context.user_data["sell_new_email"] = creds
     prices = get_tier_prices("new")
 
@@ -673,7 +727,12 @@ async def sell_new_email_start(update: Update, context: ContextTypes.DEFAULT_TYP
         f"🔑 <b>كلمة السر:</b>\n<code>{tg_html_escape(creds['password'])}</code>\n\n"
         "━━━━━━━━━━━━━━━\n"
         f"💰 <b>المكافأة الكاملة (4 خطوات):</b> ${prices['tier_3']:.2f}\n"
-        "━━━━━━━━━━━━━━━"
+        "━━━━━━━━━━━━━━━\n\n"
+        "📌 <b>الخطوات:</b>\n"
+        "1. قم بإنشاء هذا الإيميل على Gmail\n"
+        "2. فعّل التحقق بخطوتين (2FA)\n"
+        "3. أنشئ كلمة مرور التطبيق\n"
+        "4. اضغط «إكمال» هنا"
     )
     await query.edit_message_text(
         text, parse_mode=ParseMode.HTML,
@@ -684,7 +743,7 @@ async def sell_new_email_start(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def sell_new_email_complete(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """عند الضغط على «إكمال» — يطلب رمز المصادقة."""
+    """عند الضغط على «إكمال» — يتحقق من أن العضو أنشأ الإيميل فعلاً."""
     query = update.callback_query
     creds = context.user_data.get("sell_new_email")
     if not creds:
@@ -694,15 +753,47 @@ async def sell_new_email_complete(update: Update, context: ContextTypes.DEFAULT_
             reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
         return
 
+    await query.edit_message_text(
+        "⏳ <b>جاري التحقق من قيامك بإنشاء الإيميل...</b>\n\n"
+        f"📧 <code>{tg_html_escape(creds['email'])}</code>\n\n"
+        "<i>يرجى الانتظار لحظات</i>",
+        parse_mode=ParseMode.HTML)
+
+    result = await check_email_availability(creds["email"], use_cache=False)
+    
+    if result is True:
+        await query.edit_message_text(
+            "❌ <b>لم تقم بإنشاء الإيميل بعد!</b>\n\n"
+            f"📧 <code>{tg_html_escape(creds['email'])}</code>\n\n"
+            "هذا الإيميل لا يزال <b>متاحاً للإنشاء</b>، مما يعني أنك لم تقم بحجزه بعد.\n\n"
+            "📌 <b>الخطوات المطلوبة:</b>\n"
+            "1. اذهب إلى <a href=\"https://accounts.google.com/signup\">صفحة إنشاء حساب جوجل</a>\n"
+            "2. استخدم البريد والاسم والباسورد المعروضة أعلاه\n"
+            "3. أكمل عملية الإنشاء حتى النهاية\n"
+            "4. ارجع واضغط «لقد أنشأت الإيميل»",
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+            reply_markup=kb_vertical([
+                ("🔄 لقد أنشأته، أعد الفحص", "sell_new_email_complete"),
+                ("❌ إلغاء", "sell_new_email_cancel"),
+            ])
+        )
+        return
+    
+    if result is False:
+        logger.info(f"Email {creds['email']} verified as created by user")
+    
     context.user_data["step"] = "sell_new_email_totp"
     await query.edit_message_text(
-        "🔐 <b>يجب عليك إرسال رمز المصادقة</b>\n\n"
+        "✅ <b>تم التحقق من أنك أنشأت الإيميل!</b>\n\n"
+        "🔐 <b>الخطوة التالية: أرسل رمز المصادقة (2FA)</b>\n\n"
         f"📧 <code>{tg_html_escape(creds['email'])}</code>\n\n"
-        "📌 أرسل مفتاح المصادقة (32 حرفاً Base32):\n\n"
-        "<i>مثال: JBSW Y3DP EHPK 3PXP</i>",
+        "📌 <b>أرسل مفتاح المصادقة (32 حرفاً Base32):</b>\n\n"
+        "<i>مثال: JBSW Y3DP EHPK 3PXP</i>\n\n"
+        "⚠️ <i>إذا لم تكن قد فعّلت 2FA بعد، يمكنك الضغط على زر الفيديو أدناه.</i>",
         parse_mode=ParseMode.HTML,
         reply_markup=kb_vertical([
-            ("📹 عرض كيف الحصول على رمز مصادقة", "sell_show_video:totp"),
+            ("📹 كيف أحصل على رمز المصادقة؟", "sell_show_video:totp"),
             ("❌ إلغاء", "sell_new_email_cancel"),
         ]))
 
@@ -772,12 +863,22 @@ async def handle_sell_new_email_totp(update: Update, context: ContextTypes.DEFAU
         await update.message.reply_text("⚠️ مفتاح TOTP غير صالح.")
         return
 
+    await update.message.reply_text("⏳ جاري التحقق من وجود الحساب...")
+    ok, msg = await asyncio.to_thread(_imap_login_sync, creds["email"], creds["password"])
+    is_2fa_error = any(m in msg.lower() for m in TWO_FA_ERROR_MARKERS)
+    is_network_error = any(m in msg.lower() for m in NETWORK_ERROR_MARKERS)
+    
+    if not ok and not is_2fa_error and not is_network_error:
+        await update.message.reply_text(
+            "❌ فشل التحقق: الإيميل أو كلمة المرور غير صحيحة.\nهل قمت بإنشاء الإيميل فعلياً على جوجل؟",
+            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        return
+
     user = update.effective_user
     user_data = get_user(uid)
     prices = get_tier_prices("new")
     amount = prices["tier_2"]
 
-    # حفظ مبدئي في pending (بدون App Pass)
     pending_request = {
         "email": creds["email"],
         "password": creds["password"],
@@ -906,7 +1007,6 @@ async def handle_sell_new_email_app_pass(update: Update, context: ContextTypes.D
             reply_markup=kb_single("❌ إلغاء", "sell_new_email_cancel"))
         return
 
-    # نجاح التحقق
     prices = get_tier_prices("new")
     old_amount = float(pending[found_idx].get("amount", 0.0))
     new_amount = prices["tier_3"]
@@ -979,7 +1079,6 @@ async def handle_sell_new_email_app_pass(update: Update, context: ContextTypes.D
 
 
 async def sell_new_email_finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """عند الضغط على «انهاء» بعد رمز المصادقة — بدون App Password."""
     query = update.callback_query
     uid = update.effective_user.id
     creds = context.user_data.get("sell_new_email")
