@@ -100,13 +100,15 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("⚠️ السعر > 0!")
                 return
             tier = context.user_data.get("setting_tier")
-            if tier:
+            acc_type = context.user_data.get("setting_type", "old")
+            if tier and acc_type:
                 config = load_config()
-                config[f"tier_{tier}_price"] = price
+                config[f"{acc_type}_tier_{tier}_price"] = price
                 save_config(config)
-                await update.message.reply_text(f"✅ تم تحديث سعر المستوى {tier}: ${price:.2f}")
+                await update.message.reply_text(f"✅ تم تحديث سعر المستوى {tier} ({acc_type}): ${price:.2f}")
                 context.user_data.pop("mode", None)
                 context.user_data.pop("setting_tier", None)
+                context.user_data.pop("setting_type", None)
                 await set_tier_prices(update, context)
         except ValueError:
             await update.message.reply_text("⚠️ أرسل رقماً.")
@@ -414,15 +416,25 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "owner_stats":
         await owner_stats(update, context)
     elif data == "all_accounts":
-        await all_accounts(update, context)
+        await all_accounts(update, context, "all")
+    elif data == "all_old":
+        await all_accounts(update, context, "old")
+    elif data == "all_new":
+        await all_accounts(update, context, "new")
+    elif data == "all_general":
+        await all_accounts(update, context, "all")
+    elif data == "unextracted_old":
+        await unextracted_accounts(update, context, "old")
+    elif data == "unextracted_new":
+        await unextracted_accounts(update, context, "new")
+    elif data.startswith("export_all_"):
+        acc_type = data.replace("export_all_", "")
+        await export_all_accounts(update, context, acc_type)
+    elif data.startswith("export_unextracted_"):
+        acc_type = data.replace("export_unextracted_", "")
+        await export_unextracted(update, context, acc_type)
     elif data == "hold_accounts":
         await hold_accounts(update, context)
-    elif data == "unextracted_accounts":
-        await unextracted_accounts(update, context)
-    elif data == "export_all_accounts":
-        await export_all_accounts(update, context)
-    elif data == "export_unextracted":
-        await export_unextracted(update, context)
     elif data == "mark_extracted_menu":
         await mark_extracted_menu(update, context)
     elif data.startswith("mark_extracted:"):
