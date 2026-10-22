@@ -18,6 +18,7 @@ import socket
 import ssl
 import string
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from urllib.parse import urlsplit
@@ -329,10 +330,10 @@ _TAKEN_MARKERS = (
 
 def check_email_availability_sync(username: str) -> Optional[bool]:
     """
-    فحص توفر اسم المستخدم في جوجل.
+    فحص توفر اسم المستخدم في جوجل (InputValidator).
 
     يعيد:
-      True  -> متاح (غير محجوز) — لا توجد أخطاء
+      True  -> متاح (غير محجوز)
       False -> محجوز (الحساب موجود فعلاً) — Google أكدت صراحةً
       None  -> فشل الفحص (رسالة خطأ غير محددة، HTTP، شبكة، ...)
                لا نستنتج من None أن الإيميل موجود.
@@ -424,34 +425,43 @@ async def check_email_availability(email: str, use_cache: bool = True) -> Option
     return result
 
 
-# ==================== ABSTRACTAPI CHECKER (موثوق عبر HTTPS) ====================
+# ==================== ABSTRACTAPI CHECKER (Reputation) ====================
 def check_email_exists_via_abstractapi_sync(email: str) -> Optional[bool]:
     """
-    فحص وجود الحساب عبر AbstractAPI (لا يتأثر بحظر Google لعنوان IP).
+    فحص وجود الحساب عبر AbstractAPI (منتج Email Reputation).
     يعيد:
-      True  -> الحساب موجود (deliverability = DELIVERABLE)
-      False -> الحساب غير موجود (UNDELIVERABLE / INVALID)
+      True  -> الحساب موجود أو قابل للتسليم (is_valid or deliverable)
+      False -> الحساب غير موجود أو غير صالح
       None  -> فشل الفحص (مفتاح غير موجود، خطأ شبكة، أو حالة غير معروفة)
     """
     api_key = os.environ.get("ABSTRACT_API_KEY", "").strip()
     if not api_key:
+        logger.warning("⚠️ ABSTRACT_API_KEY is missing in environment variables!")
         return None
     try:
-        url = "https://emailvalidation.abstractapi.com/v1/"
+        url = "https://emailreputation.abstractapi.com/v1/"
         params = urllib.parse.urlencode({"api_key": api_key, "email": email})
         req = Request(f"{url}?{params}", headers={"Accept": "application/json"})
         with urlopen(req, timeout=10) as response:
-            data = json.loads(response.read().decode("utf-8", errors="ignore"))
+            body = response.read().decode("utf-8", errors="ignore")
+            logger.info(f"AbstractAPI Reputation response for {email}: {body[:300]}")
+            data = json.loads(body)
 
-        deliverability = str(data.get("deliverability", "")).upper()
-        is_valid_format = data.get("is_valid_format", {}).get("value", False)
+        is_valid = data.get("is_valid")
+        deliverability = str(data.get("email_deliverability", {}).get("status", "")).lower()
+        is_smtp_valid = data.get("is_smtp_valid", {}).get("value")
+        is_mx_found = data.get("is_mx_found", {}).get("value")
 
-        if not is_valid_format:
-            return False
-        if deliverability == "DELIVERABLE":
+        if is_valid is True or deliverability in ("deliverable", "risky"):
             return True
-        if deliverability in ("UNDELIVERABLE", "INVALID"):
+        if is_smtp_valid is True and is_mx_found is True:
+            return True
+        if is_valid is False or deliverability in ("undeliverable", "invalid"):
             return False
+        return None
+    except urllib.error.HTTPError as exc:
+        error_body = exc.read().decode("utf-8", errors="ignore")
+        logger.warning(f"AbstractAPI HTTP {exc.code} for {email}: {error_body[:300]}")
         return None
     except Exception as exc:
         logger.warning("AbstractAPI check failed: %s: %s", type(exc).__name__, exc)
@@ -464,7 +474,7 @@ async def verify_gmail_account_exists_strict(email: str) -> Tuple[str, Optional[
     التحقق الصارم من وجود حساب Gmail.
 
     يستخدم:
-      1) AbstractAPI (موثوق عبر HTTPS، لا يتأثر بحظر Google)
+      1) AbstractAPI Email Reputation (موثوق عبر HTTPS، لا يتأثر بحظر Google)
       2) InputValidator كاحتياط إذا لم يتوفر مفتاح API
 
     يعيد tuple (status, exists):
