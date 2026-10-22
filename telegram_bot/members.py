@@ -475,13 +475,27 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not valid_domain:
             await update.message.reply_text(t(uid, "add_fake_email"))
             return
-        avail_result = await check_email_availability(email)
-        if avail_result is True:
+
+        # ═══ التحقق الصارم من وجود الحساب (AbstractAPI + InputValidator) ═══
+        await update.message.reply_text(t(uid, "add_checking_account"))
+        status, _ = await verify_gmail_account_exists_strict(email)
+
+        if status == "unknown":
+            await update.message.reply_text(
+                t(uid, "sell_new_verify_unknown", email=tg_html_escape(email)),
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
+            SESSIONS.pop(uid, None); save_sessions()
+            return
+
+        if status == "available":
             await update.message.reply_text(
                 t(uid, "add_email_not_exist"), parse_mode=ParseMode.HTML,
                 reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
             SESSIONS.pop(uid, None); save_sessions()
             return
+
+        # status == "exists" → الإيميل موجود
         active_status = get_active_account_status(email)
         if active_status == "approved":
             await update.message.reply_text(
