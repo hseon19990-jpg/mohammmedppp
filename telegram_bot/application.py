@@ -9,6 +9,10 @@ from telegram_bot.locales import TRANSLATIONS
 
 # ==================== TEXT INPUT ROUTER ====================
 async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 🛡️ الحماية: التأكد من وجود الرسالة والنص
+    if not update.message or not update.message.text:
+        return
+
     text = update.message.text.strip()
     user_id = update.effective_user.id
 
