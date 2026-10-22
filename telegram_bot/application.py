@@ -7,9 +7,12 @@ from telegram_bot.approvals import *
 from telegram_bot.store import *
 from telegram_bot.locales import TRANSLATIONS
 
+# 🛡️ استيراد صريح للدالة التي تسبب الخطأ
+from telegram_bot.members import restore_leave_checks
+
 # ==================== TEXT INPUT ROUTER ====================
 async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # 🛡️ الحماية: التأكد من وجود الرسالة والنص
+    # 🛡️ الحماية: التأكد من وجود الرسالة والنص لتجنب انهيار البوت إذا تم حذف الرسالة
     if not update.message or not update.message.text:
         return
 
