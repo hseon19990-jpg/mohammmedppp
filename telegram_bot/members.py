@@ -742,7 +742,6 @@ async def sell_new_email_complete(update: Update, context: ContextTypes.DEFAULT_
     status, _ = await verify_gmail_account_exists_strict(creds["email"])
 
     if status == "unknown":
-        # تعذر التحقق: نرفض المرور احتراماً لقاعدة "لا نسمح للكاذب"
         await query.edit_message_text(
             t(uid, "sell_new_verify_unknown", email=tg_html_escape(creds['email'])),
             parse_mode=ParseMode.HTML, disable_web_page_preview=True,
@@ -753,7 +752,6 @@ async def sell_new_email_complete(update: Update, context: ContextTypes.DEFAULT_
         return
 
     if status == "available":
-        # الإيميل متاح للإنشاء = لم يُنشأ بعد
         await query.edit_message_text(
             t(uid, "sell_new_not_created", email=tg_html_escape(creds['email'])),
             parse_mode=ParseMode.HTML, disable_web_page_preview=True,
@@ -763,7 +761,7 @@ async def sell_new_email_complete(update: Update, context: ContextTypes.DEFAULT_
             ]))
         return
 
-    # status == "exists" → الإيميل موجود فعلاً، نمرر لخطوة TOTP
+    # status == "exists" → الإيميل موجود فعلاً
     context.user_data["step"] = "sell_new_email_totp"
     await query.edit_message_text(
         t(uid, "sell_new_verified_created", email=tg_html_escape(creds['email'])),
@@ -841,7 +839,6 @@ async def sell_new_email_finish_confirm(update: Update, context: ContextTypes.DE
     prices = get_tier_prices("new")
     amount = prices["tier_1"]
     
-    # حذف أي طلب سابق لنفس الإيميل
     user_data["pending_requests"] = [r for r in user_data.get("pending_requests", []) if normalize_email(r.get("email", "")) != normalize_email(creds["email"])]
     
     pending_request = {
