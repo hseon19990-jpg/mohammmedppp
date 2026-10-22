@@ -718,7 +718,12 @@ async def sell_new_email_start(update: Update, context: ContextTypes.DEFAULT_TYP
             (t(uid, "btn_cancel"), "sell_new_email_cancel"),
         ]))
 
+
 async def sell_new_email_complete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    يتم استدعاؤها بعد ضغط العضو على «✅ إكمال».
+    تتحقق (بشكل صارم) من أن العضو أنشأ الإيميل فعلاً قبل تمريره لخطوة TOTP.
+    """
     query = update.callback_query
     uid = query.from_user.id
     creds = context.user_data.get("sell_new_email")
@@ -728,11 +733,27 @@ async def sell_new_email_complete(update: Update, context: ContextTypes.DEFAULT_
             t(uid, "sell_new_session_expired"),
             reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
         return
+
     await query.edit_message_text(
         t(uid, "sell_new_checking_created", email=tg_html_escape(creds['email'])),
         parse_mode=ParseMode.HTML)
-    result = await check_email_availability(creds["email"], use_cache=False)
-    if result is True:
+
+    # ═══ التحقق الصارم ═══
+    status, _ = await verify_gmail_account_exists_strict(creds["email"])
+
+    if status == "unknown":
+        # تعذر التحقق: نرفض المرور احتراماً لقاعدة "لا نسمح للكاذب"
+        await query.edit_message_text(
+            t(uid, "sell_new_verify_unknown", email=tg_html_escape(creds['email'])),
+            parse_mode=ParseMode.HTML, disable_web_page_preview=True,
+            reply_markup=kb_vertical([
+                (t(uid, "sell_new_btn_recheck"), "sell_new_email_complete"),
+                (t(uid, "btn_cancel"), "sell_new_email_cancel"),
+            ]))
+        return
+
+    if status == "available":
+        # الإيميل متاح للإنشاء = لم يُنشأ بعد
         await query.edit_message_text(
             t(uid, "sell_new_not_created", email=tg_html_escape(creds['email'])),
             parse_mode=ParseMode.HTML, disable_web_page_preview=True,
@@ -741,13 +762,15 @@ async def sell_new_email_complete(update: Update, context: ContextTypes.DEFAULT_
                 (t(uid, "btn_cancel"), "sell_new_email_cancel"),
             ]))
         return
+
+    # status == "exists" → الإيميل موجود فعلاً، نمرر لخطوة TOTP
     context.user_data["step"] = "sell_new_email_totp"
     await query.edit_message_text(
         t(uid, "sell_new_verified_created", email=tg_html_escape(creds['email'])),
         parse_mode=ParseMode.HTML,
         reply_markup=kb_vertical([
             (t(uid, "add_btn_video_totp"), "sell_show_video:totp"),
-            (t(uid, "sell_new_btn_skip_2fa"), "sell_new_email_finish_prompt"), # ← الزر الجديد
+            (t(uid, "sell_new_btn_skip_2fa"), "sell_new_email_finish_prompt"),
             (t(uid, "btn_cancel"), "sell_new_email_cancel"),
         ]))
 
@@ -773,7 +796,9 @@ async def sell_new_email_finish_prompt(update: Update, context: ContextTypes.DEF
 
 
 async def sell_new_email_finish_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """إنهاء الطلب بدون 2FA وإرساله للطلبات"""
+    """
+    إنهاء الطلب بدون 2FA — مع إعادة التحقق الصارم قبل الحفظ.
+    """
     query = update.callback_query
     uid = update.effective_user.id
     creds = context.user_data.get("sell_new_email")
@@ -782,10 +807,25 @@ async def sell_new_email_finish_confirm(update: Update, context: ContextTypes.DE
         await query.edit_message_text(t(uid, "sell_new_session_expired"), reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
         return
     
-    await query.edit_message_text(t(uid, "sell_new_checking_created", email=tg_html_escape(creds['email'])), parse_mode=ParseMode.HTML)
-    
-    result = await check_email_availability(creds["email"], use_cache=False)
-    if result is True:
+    await query.edit_message_text(
+        t(uid, "sell_new_checking_created", email=tg_html_escape(creds['email'])),
+        parse_mode=ParseMode.HTML)
+
+    # ═══ التحقق الصارم ═══
+    status, _ = await verify_gmail_account_exists_strict(creds["email"])
+
+    if status == "unknown":
+        await query.edit_message_text(
+            t(uid, "sell_new_verify_unknown", email=tg_html_escape(creds['email'])),
+            parse_mode=ParseMode.HTML, disable_web_page_preview=True,
+            reply_markup=kb_vertical([
+                (t(uid, "sell_new_btn_recheck"), "sell_new_email_finish_confirm"),
+                (t(uid, "sell_new_btn_complete_2fa"), "sell_new_email_complete"),
+                (t(uid, "btn_cancel"), "sell_new_email_cancel"),
+            ]))
+        return
+
+    if status == "available":
         await query.edit_message_text(
             t(uid, "sell_new_not_created", email=tg_html_escape(creds['email'])),
             parse_mode=ParseMode.HTML, disable_web_page_preview=True,
