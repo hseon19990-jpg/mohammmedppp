@@ -715,10 +715,8 @@ async def sell_new_email_start(update: Update, context: ContextTypes.DEFAULT_TYP
         parse_mode=ParseMode.HTML,
         reply_markup=kb_vertical([
             (t(uid, "sell_new_btn_complete"), "sell_new_email_complete"),
-            (t(uid, "sell_new_btn_skip_2fa"), "sell_new_email_finish_prompt"), # ← الزر الجديد
             (t(uid, "btn_cancel"), "sell_new_email_cancel"),
         ]))
-
 
 async def sell_new_email_complete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
