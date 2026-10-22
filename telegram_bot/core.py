@@ -313,14 +313,29 @@ _EMAIL_AVAILABILITY_CACHE: Dict[str, Tuple[float, Optional[bool]]] = {}
 _LAST_CHECK_TIME = 0.0
 _CHECK_MIN_INTERVAL = 1.5
 
+# كلمات تشير صراحةً إلى أن الاسم محجوز
+_TAKEN_MARKERS = (
+    "username is taken",
+    "that username is taken",
+    "already taken",
+    "already in use",
+    "not available",
+    "someone already has",
+    "has already been taken",
+    "sorry, this username isn't available",
+    "this username isn't available",
+)
+
 
 def check_email_availability_sync(username: str) -> Optional[bool]:
     """
-    فحص توفر اسم المستخدم في جوجل بدون فتح متصفح (خفيف جداً على السيرفر).
+    فحص توفر اسم المستخدم في جوجل.
+
     يعيد:
-      True  -> متاح (غير محجوز)
-      False -> محجوز (مستخدم)
-      None  -> فشل الفحص (خطأ شبكة أو حظر مؤقت)
+      True  -> متاح (غير محجوز) — لا توجد أخطاء
+      False -> محجوز (الحساب موجود فعلاً) — Google أكدت صراحةً
+      None  -> فشل الفحص (رسالة خطأ غير محددة، HTTP، شبكة، ...)
+               لا نستنتج من None أن الإيميل موجود.
     """
     try:
         url = "https://accounts.google.com/InputValidator?resource=SignUp"
@@ -340,16 +355,54 @@ def check_email_availability_sync(username: str) -> Optional[bool]:
         }
         req = Request(url, data=payload, headers=headers, method="POST")
         with urlopen(req, timeout=10) as response:
+            if getattr(response, "status", 200) != 200:
+                logger.warning(
+                    "InputValidator HTTP %s for %s",
+                    getattr(response, "status", "?"), username,
+                )
+                return None
             body = response.read().decode("utf-8", errors="ignore")
+
         try:
             data = json.loads(body)
         except json.JSONDecodeError:
+            logger.warning("InputValidator non-JSON response for %s", username)
             return None
-        if isinstance(data, dict) and data.get("errors"):
-            return False
+
+        if not isinstance(data, dict):
+            logger.warning(
+                "InputValidator non-dict response for %s: %s",
+                username, type(data).__name__,
+            )
+            return None
+
+        errors = data.get("errors")
+        if errors:
+            # جمع رسائل الخطأ للتشخيص
+            error_messages: List[str] = []
+            for e in errors:
+                if isinstance(e, dict):
+                    error_messages.append(str(e.get("message", "")))
+                else:
+                    error_messages.append(str(e))
+            combined = " ".join(error_messages).lower()
+            logger.info("InputValidator errors for %s: %s", username, error_messages)
+
+            # فقط إذا كانت الرسالة تشير صراحةً إلى أن الاسم محجوز
+            if any(marker in combined for marker in _TAKEN_MARKERS):
+                return False
+
+            # أي رسالة أخرى = فشل غير محدد
+            # (مثل "Something went wrong" أو "Please try again")
+            return None
+
+        # لا توجد أخطاء = الاسم متاح للإنشاء
         return True
     except Exception as exc:
-        logger.warning(f"Availability check failed: {type(exc).__name__}")
+        logger.warning(
+            "Availability check failed for %s: %s: %s",
+            username, type(exc).__name__, exc,
+        )
         return None
 
 
@@ -386,8 +439,7 @@ async def verify_gmail_account_exists_strict(email: str) -> Tuple[str, Optional[
       - ("available", False)  → الحساب غير موجود (متاح للإنشاء) = لم يُنشأ
       - ("unknown", None)     → تعذر التحقق بعد كل المحاولات
 
-    يستخدم 3 محاولات مع تأخير بينها لتجنب الحظر المؤقت من Google
-    ولتقليل احتمال إرجاع None كاذب.
+    يستخدم 3 محاولات مع تأخير بينها لتقليل احتمال الفشل المؤقت.
     """
     last_result: Optional[bool] = None
     for attempt in range(3):
