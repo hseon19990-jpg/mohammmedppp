@@ -1769,6 +1769,9 @@ async def handle_points_by_id_input(update: Update, context: ContextTypes.DEFAUL
     context.user_data.pop("step", None)
 
 
+# ═══════════════════════════════════════════════════════════════════
+# ═══ قسم إدارة الحسابات المقبولة — الترتيب الجديد المطلوب ═══
+# ═══════════════════════════════════════════════════════════════════
 async def all_accounts_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     uid = query.from_user.id
@@ -1776,11 +1779,11 @@ async def all_accounts_section(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.answer("🚫", show_alert=True)
         return
     buttons = [
-        (t(uid, "accounts_btn_unextracted_old"), "unextracted_old"),
-        (t(uid, "accounts_btn_unextracted_new"), "unextracted_new"),
+        (t(uid, "accounts_btn_all_general"), "all_general"),
         (t(uid, "accounts_btn_all_old"), "all_old"),
         (t(uid, "accounts_btn_all_new"), "all_new"),
-        (t(uid, "accounts_btn_all_general"), "all_general"),
+        (t(uid, "accounts_btn_unextracted_new"), "unextracted_new"),
+        (t(uid, "accounts_btn_unextracted_old"), "unextracted_old"),
         (t(uid, "accounts_btn_hold"), "hold_accounts"),
         (t(uid, "owner_btn_back_panel"), "owner_panel")
     ]
