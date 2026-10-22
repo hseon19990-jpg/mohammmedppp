@@ -378,7 +378,6 @@ def check_email_availability_sync(username: str) -> Optional[bool]:
 
         errors = data.get("errors")
         if errors:
-            # جمع رسائل الخطأ للتشخيص
             error_messages: List[str] = []
             for e in errors:
                 if isinstance(e, dict):
@@ -388,15 +387,11 @@ def check_email_availability_sync(username: str) -> Optional[bool]:
             combined = " ".join(error_messages).lower()
             logger.info("InputValidator errors for %s: %s", username, error_messages)
 
-            # فقط إذا كانت الرسالة تشير صراحةً إلى أن الاسم محجوز
             if any(marker in combined for marker in _TAKEN_MARKERS):
                 return False
 
-            # أي رسالة أخرى = فشل غير محدد
-            # (مثل "Something went wrong" أو "Please try again")
             return None
 
-        # لا توجد أخطاء = الاسم متاح للإنشاء
         return True
     except Exception as exc:
         logger.warning(
@@ -429,18 +424,62 @@ async def check_email_availability(email: str, use_cache: bool = True) -> Option
     return result
 
 
+# ==================== ABSTRACTAPI CHECKER (موثوق عبر HTTPS) ====================
+def check_email_exists_via_abstractapi_sync(email: str) -> Optional[bool]:
+    """
+    فحص وجود الحساب عبر AbstractAPI (لا يتأثر بحظر Google لعنوان IP).
+    يعيد:
+      True  -> الحساب موجود (deliverability = DELIVERABLE)
+      False -> الحساب غير موجود (UNDELIVERABLE / INVALID)
+      None  -> فشل الفحص (مفتاح غير موجود، خطأ شبكة، أو حالة غير معروفة)
+    """
+    api_key = os.environ.get("ABSTRACT_API_KEY", "").strip()
+    if not api_key:
+        return None
+    try:
+        url = "https://emailvalidation.abstractapi.com/v1/"
+        params = urllib.parse.urlencode({"api_key": api_key, "email": email})
+        req = Request(f"{url}?{params}", headers={"Accept": "application/json"})
+        with urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode("utf-8", errors="ignore"))
+
+        deliverability = str(data.get("deliverability", "")).upper()
+        is_valid_format = data.get("is_valid_format", {}).get("value", False)
+
+        if not is_valid_format:
+            return False
+        if deliverability == "DELIVERABLE":
+            return True
+        if deliverability in ("UNDELIVERABLE", "INVALID"):
+            return False
+        return None
+    except Exception as exc:
+        logger.warning("AbstractAPI check failed: %s: %s", type(exc).__name__, exc)
+        return None
+
+
 # ==================== STRICT EMAIL EXISTENCE VERIFICATION ====================
 async def verify_gmail_account_exists_strict(email: str) -> Tuple[str, Optional[bool]]:
     """
     التحقق الصارم من وجود حساب Gmail.
 
-    يعيد tuple (status, exists):
-      - ("exists", True)      → الحساب موجود فعلاً (تم إنشاؤه)
-      - ("available", False)  → الحساب غير موجود (متاح للإنشاء) = لم يُنشأ
-      - ("unknown", None)     → تعذر التحقق بعد كل المحاولات
+    يستخدم:
+      1) AbstractAPI (موثوق عبر HTTPS، لا يتأثر بحظر Google)
+      2) InputValidator كاحتياط إذا لم يتوفر مفتاح API
 
-    يستخدم 3 محاولات مع تأخير بينها لتقليل احتمال الفشل المؤقت.
+    يعيد tuple (status, exists):
+      - ("exists", True)      → الحساب موجود فعلاً
+      - ("available", False)  → الحساب غير موجود (متاح للإنشاء)
+      - ("unknown", None)     → تعذر التحقق بعد كل المحاولات
     """
+    # ═══ 1) المحاولة عبر AbstractAPI أولاً ═══
+    result_api = await asyncio.to_thread(check_email_exists_via_abstractapi_sync, email)
+    if result_api is True:
+        return "exists", True
+    if result_api is False:
+        return "available", False
+
+    # ═══ 2) احتياط: InputValidator (قد يفشل بسبب 429) ═══
     last_result: Optional[bool] = None
     for attempt in range(3):
         try:
@@ -455,8 +494,9 @@ async def verify_gmail_account_exists_strict(email: str) -> Tuple[str, Optional[
             return "exists", True
         if attempt < 2:
             await asyncio.sleep(2 + attempt)
+
     logger.warning(
-        "Email existence verification returned unknown for %s after 3 attempts (last=%s)",
+        "Email existence verification returned unknown for %s after all attempts (last=%s)",
         email, last_result,
     )
     return "unknown", None
