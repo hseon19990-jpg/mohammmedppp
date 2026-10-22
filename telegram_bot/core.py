@@ -376,6 +376,40 @@ async def check_email_availability(email: str, use_cache: bool = True) -> Option
     return result
 
 
+# ==================== STRICT EMAIL EXISTENCE VERIFICATION ====================
+async def verify_gmail_account_exists_strict(email: str) -> Tuple[str, Optional[bool]]:
+    """
+    التحقق الصارم من وجود حساب Gmail.
+
+    يعيد tuple (status, exists):
+      - ("exists", True)      → الحساب موجود فعلاً (تم إنشاؤه)
+      - ("available", False)  → الحساب غير موجود (متاح للإنشاء) = لم يُنشأ
+      - ("unknown", None)     → تعذر التحقق بعد كل المحاولات
+
+    يستخدم 3 محاولات مع تأخير بينها لتجنب الحظر المؤقت من Google
+    ولتقليل احتمال إرجاع None كاذب.
+    """
+    last_result: Optional[bool] = None
+    for attempt in range(3):
+        try:
+            result = await check_email_availability(email, use_cache=False)
+        except Exception:
+            logger.exception("check_email_availability raised unexpectedly")
+            result = None
+        last_result = result
+        if result is True:
+            return "available", False
+        if result is False:
+            return "exists", True
+        if attempt < 2:
+            await asyncio.sleep(2 + attempt)
+    logger.warning(
+        "Email existence verification returned unknown for %s after 3 attempts (last=%s)",
+        email, last_result,
+    )
+    return "unknown", None
+
+
 # ==================== REJECT REASONS ====================
 REJECT_REASON_KEYS = ("email", "password", "totp", "app_pass", "phone", "other")
 
@@ -661,7 +695,6 @@ def register_rejection_and_maybe_ban(user_data: dict) -> Optional[Tuple[int, str
     duration_hours = _ban_duration_hours_for_level(ban_level)
     ban_until = datetime.now(timezone.utc) + timedelta(hours=duration_hours)
     user_data["ban_until"] = ban_until.isoformat()
-    # ═══ حذف جميع الإيميلات المعلقة عند تفعيل الحظر ═══
     pending = user_data.get("pending_requests", []) or []
     if pending:
         total_pending = 0.0
