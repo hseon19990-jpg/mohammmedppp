@@ -2,6 +2,7 @@
 
 from telegram_bot.core import *
 
+
 # ==================== MAIN MENU ====================
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await maintenance_access_allowed(update):
@@ -15,7 +16,12 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = user.id
     user_data = get_user(uid)
     ban_msg = get_active_ban_message(user_data)
-    prefix = (ban_msg + "\n\n") if ban_msg else ""
+    restriction_msg = get_active_restriction_message(user_data)
+    prefix = ""
+    if ban_msg:
+        prefix = ban_msg + "\n\n"
+    elif restriction_msg:
+        prefix = restriction_msg + "\n\n"
 
     prices_old = get_tier_prices("old")
     prices_new = get_tier_prices("new")
@@ -365,7 +371,36 @@ async def handle_edit_field_input(update: Update, context: ContextTypes.DEFAULT_
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=kb_single(t(uid, "edit_btn_back"), "edit_my_accounts"))
 
+
 # ==================== ADD ACCOUNT FLOW (OLD EMAIL) ====================
+async def _verify_and_handle_failure(update: Update, context: ContextTypes.DEFAULT_TYPE, email: str) -> Tuple[str, Optional[bool]]:
+    """Wrapper that checks strict existence and applies 3-strike restriction."""
+    uid = update.effective_user.id
+    status, exists = await verify_gmail_account_exists_strict(email, context=context)
+    if status == "unknown":
+        return status, exists
+    if status == "available":
+        # wrong email, apply failure counter
+        user_data = get_user(uid)
+        remaining, restricted_now = apply_verification_failure(user_data)
+        save_user(uid, user_data)
+        if restricted_now:
+            restriction_msg = get_active_restriction_message(user_data)
+            await update.effective_message.reply_text(
+                restriction_msg or "🚫 تم تقييدك لمدة ساعة.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
+        else:
+            await update.effective_message.reply_text(
+                f"❌ <b>هذا الإيميل غير موجود!</b>\n\n"
+                f"📧 <code>{tg_html_escape(email)}</code>\n\n"
+                f"⚠️ <b>الفرص المتبقية:</b> <code>{remaining}</code> من 3\n"
+                f"<i>بعد 3 محاولات فاشلة سيتم تقييدك لمدة ساعة من إضافة الإيميلات وسحب الأرباح.</i>",
+                parse_mode=ParseMode.HTML)
+        return status, exists
+    return status, exists
+
+
 async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
@@ -378,6 +413,15 @@ async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
         await _safe_edit(update.callback_query, ban_msg, parse_mode=ParseMode.HTML,
+                         reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
+        return
+    restriction_msg = get_active_restriction_message(user_data_check)
+    if restriction_msg:
+        try:
+            await update.callback_query.answer("🚫", show_alert=True)
+        except Exception:
+            pass
+        await _safe_edit(update.callback_query, restriction_msg, parse_mode=ParseMode.HTML,
                          reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
         return
 
@@ -466,6 +510,14 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prices = get_tier_prices("old")
 
     if session.step == "email":
+        # apply restriction check
+        user_data_check = get_user(uid)
+        restriction_msg = get_active_restriction_message(user_data_check)
+        if restriction_msg:
+            await update.message.reply_text(restriction_msg, parse_mode=ParseMode.HTML,
+                                            reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
+            SESSIONS.pop(uid, None); save_sessions()
+            return
         first_line = text.splitlines()[0].strip() if text else ""
         email = normalize_email(first_line)
         if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
@@ -477,7 +529,7 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         await update.message.reply_text(t(uid, "add_checking_account"))
-        status, _ = await verify_gmail_account_exists_strict(email)
+        status, _ = await _verify_and_handle_failure(update, context, email)
 
         if status == "unknown":
             await update.message.reply_text(
@@ -488,9 +540,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if status == "available":
-            await update.message.reply_text(
-                t(uid, "add_email_not_exist"), parse_mode=ParseMode.HTML,
-                reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
             SESSIONS.pop(uid, None); save_sessions()
             return
 
@@ -668,6 +717,7 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data.setdefault("approved_accounts", []).append(account_record)
         add_transaction(user_data, "hold", price, "auto-verified old account", str(session.email))
         register_approval_reset(user_data)
+        mark_user_sold(user_data)
         save_user(uid, user_data)
         SESSIONS.pop(uid, None)
         save_sessions()
@@ -697,6 +747,15 @@ async def sell_new_email_start(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception:
             pass
         await _safe_edit(query, ban_msg, parse_mode=ParseMode.HTML,
+                         reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
+        return
+    restriction_msg = get_active_restriction_message(user_data)
+    if restriction_msg:
+        try:
+            await query.answer("🚫", show_alert=True)
+        except Exception:
+            pass
+        await _safe_edit(query, restriction_msg, parse_mode=ParseMode.HTML,
                          reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
         return
     SESSIONS.pop(uid, None)
@@ -746,7 +805,7 @@ async def sell_new_email_complete(update: Update, context: ContextTypes.DEFAULT_
         t(uid, "sell_new_checking_created", email=tg_html_escape(creds['email'])),
         parse_mode=ParseMode.HTML)
 
-    status, _ = await verify_gmail_account_exists_strict(creds["email"])
+    status, _ = await _verify_and_handle_failure(update, context, creds["email"])
 
     if status == "unknown":
         await query.edit_message_text(
@@ -759,6 +818,14 @@ async def sell_new_email_complete(update: Update, context: ContextTypes.DEFAULT_
         return
 
     if status == "available":
+        # restriction may apply; hide further actions if restricted
+        fresh_user = get_user(uid)
+        if get_active_restriction_message(fresh_user):
+            await query.edit_message_text(
+                get_active_restriction_message(fresh_user),
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
+            return
         await query.edit_message_text(
             t(uid, "sell_new_not_created", email=tg_html_escape(creds['email'])),
             parse_mode=ParseMode.HTML, disable_web_page_preview=True,
@@ -787,7 +854,6 @@ async def sell_new_email_finish_prompt(update: Update, context: ContextTypes.DEF
         await query.answer("⚠️ انتهت الجلسة.", show_alert=True)
         await query.edit_message_text(t(uid, "sell_new_session_expired"), reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
         return
-    
     await query.edit_message_text(
         t(uid, "sell_new_finish_prompt"),
         parse_mode=ParseMode.HTML,
@@ -806,12 +872,12 @@ async def sell_new_email_finish_confirm(update: Update, context: ContextTypes.DE
         await query.answer("⚠️ انتهت الجلسة.", show_alert=True)
         await query.edit_message_text(t(uid, "sell_new_session_expired"), reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
         return
-    
+
     await query.edit_message_text(
         t(uid, "sell_new_checking_created", email=tg_html_escape(creds['email'])),
         parse_mode=ParseMode.HTML)
 
-    status, _ = await verify_gmail_account_exists_strict(creds["email"])
+    status, _ = await _verify_and_handle_failure(update, context, creds["email"])
 
     if status == "unknown":
         await query.edit_message_text(
@@ -825,6 +891,13 @@ async def sell_new_email_finish_confirm(update: Update, context: ContextTypes.DE
         return
 
     if status == "available":
+        fresh_user = get_user(uid)
+        if get_active_restriction_message(fresh_user):
+            await query.edit_message_text(
+                get_active_restriction_message(fresh_user),
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
+            return
         await query.edit_message_text(
             t(uid, "sell_new_not_created", email=tg_html_escape(creds['email'])),
             parse_mode=ParseMode.HTML, disable_web_page_preview=True,
@@ -834,14 +907,14 @@ async def sell_new_email_finish_confirm(update: Update, context: ContextTypes.DE
                 (t(uid, "btn_cancel"), "sell_new_email_cancel"),
             ]))
         return
-        
+
     user = update.effective_user
     user_data = get_user(uid)
     prices = get_tier_prices("new")
     amount = prices["tier_1"]
-    
+
     user_data["pending_requests"] = [r for r in user_data.get("pending_requests", []) if normalize_email(r.get("email", "")) != normalize_email(creds["email"])]
-    
+
     pending_request = {
         "email": creds["email"],
         "password": creds["password"],
@@ -861,11 +934,12 @@ async def sell_new_email_finish_confirm(update: Update, context: ContextTypes.DE
     user_data.setdefault("pending_requests", []).append(pending_request)
     user_data["pending_balance"] = clamp_money(float(user_data.get("pending_balance", 0.0)) + amount)
     add_transaction(user_data, "hold", amount, "طلب بيع إيميل جديد (بدون 2FA)", creds["email"])
+    mark_user_sold(user_data)
     save_user(uid, user_data)
-    
+
     context.user_data.pop("sell_new_email", None)
     context.user_data.pop("step", None)
-    
+
     await query.edit_message_text(
         t(uid, "sell_new_finished", email=tg_html_escape(creds["email"])),
         parse_mode=ParseMode.HTML,
@@ -962,6 +1036,7 @@ async def handle_sell_new_email_totp(update: Update, context: ContextTypes.DEFAU
     user_data.setdefault("pending_requests", []).append(pending_request)
     user_data["pending_balance"] = clamp_money(float(user_data.get("pending_balance", 0.0)) + amount)
     add_transaction(user_data, "hold", amount, "new email request (totp)", creds["email"])
+    mark_user_sold(user_data)
     save_user(uid, user_data)
     creds["totp"] = cleaned
     context.user_data["sell_new_email"] = creds
@@ -1073,6 +1148,7 @@ async def handle_sell_new_email_app_pass(update: Update, context: ContextTypes.D
     user_data.setdefault("approved_accounts", []).append(account_record)
     add_transaction(user_data, "hold", new_amount, "auto-verified new email", str(creds["email"]))
     register_approval_reset(user_data)
+    mark_user_sold(user_data)
     save_user(uid, user_data)
     context.user_data.pop("sell_new_email", None)
     context.user_data.pop("step", None)
@@ -1233,12 +1309,18 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Could not send auto-confirmation to {user_id}: {e}")
 
 
+# ==================== RESTORE JOBS ====================
 async def restore_leave_checks(application: Application):
     users = load_json(USERS_DB)
     changed = False
     now = datetime.now(timezone.utc)
+    # Ensure created_at is set for users without it (used by reminder job)
     for user_id, encrypted_data in users.items():
         user_data = decrypt_user_data(encrypted_data)
+        if not user_data.get("created_at"):
+            user_data["created_at"] = now.isoformat()
+            users[user_id] = encrypt_user_data(user_data)
+            changed = True
         for account in user_data.get("approved_accounts", []):
             if not account.get("approved_with_leave", False):
                 continue
@@ -1268,6 +1350,8 @@ async def restore_leave_checks(application: Application):
     load_pending_purchases_from_disk()
     application.job_queue.run_repeating(daily_backup_job, interval=24 * 3600,
                                         first=3600, name="daily_backup")
+    application.job_queue.run_repeating(inactive_member_reminder_job, interval=24 * 3600,
+                                        first=7200, name="inactive_reminder")
     logger.info("Restore complete.")
 
 
@@ -1288,5 +1372,6 @@ async def daily_backup_job(context: ContextTypes.DEFAULT_TYPE):
         logger.info("Daily backup completed.")
     except Exception:
         logger.exception("Backup failed.")
+
 
 __all__ = [name for name in globals() if not name.startswith("__")]
