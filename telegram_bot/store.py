@@ -422,10 +422,26 @@ async def tg_lion_confirm_order(update: Update, context: ContextTypes.DEFAULT_TY
             parse_mode=ParseMode.HTML)
 
 
-# ==================== WITHDRAW STORE (USER) ====================
-def _withdraw_limits_display() -> str:
-    """يُعيد نصاً مختصراً لعرض الحدود في رسائل الاختيار."""
-    limits = get_withdraw_limits()
+# ==================== WITHDRAW LIMITS HELPERS ====================
+def get_effective_withdraw_limits(cat_id: Optional[str] = None) -> dict:
+    """يرجع حدود الفئة إن وُجدت، وإلا الحدود العامة."""
+    if cat_id:
+        config = load_config()
+        category = next((c for c in config.get("store_categories", []) if c["id"] == cat_id), None)
+        if category:
+            mn = category.get("withdraw_min")
+            mx = category.get("withdraw_max")
+            if mn is not None or mx is not None:
+                return {
+                    "min": float(mn) if mn is not None else None,
+                    "max": float(mx) if mx is not None else None,
+                }
+    return get_withdraw_limits()
+
+
+def _withdraw_limits_display(cat_id: Optional[str] = None) -> str:
+    """يُعيد نصاً مختصراً لعرض الحدود (خاصة بالفئة إن وُجدت، وإلا العامة)."""
+    limits = get_effective_withdraw_limits(cat_id)
     parts = []
     if limits["min"] is not None:
         parts.append(f"⬇️ أدنى: ${limits['min']:.2f}")
@@ -436,9 +452,9 @@ def _withdraw_limits_display() -> str:
     return "\n📊 " + " | ".join(parts)
 
 
-def _validate_withdraw_amount(total: float) -> Optional[str]:
-    """يُرجع رسالة خطأ إذا المبلغ خارج الحدود، أو None إذا كان صحيحاً."""
-    limits = get_withdraw_limits()
+def _validate_withdraw_amount(total: float, cat_id: Optional[str] = None) -> Optional[str]:
+    """يتحقق من الحدود الخاصة بالفئة أولاً، وإلا العامة."""
+    limits = get_effective_withdraw_limits(cat_id)
     if limits["min"] is not None and total < limits["min"]:
         return (f"❌ <b>المبلغ الإجمالي أقل من الحد الأدنى</b>\n\n"
                 f"💰 الإجمالي المطلوب: <b>${total:.2f}</b>\n"
@@ -452,6 +468,7 @@ def _validate_withdraw_amount(total: float) -> Optional[str]:
     return None
 
 
+# ==================== WITHDRAW STORE (USER) ====================
 async def withdraw_store(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
@@ -504,7 +521,9 @@ async def user_category_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     buttons = [(f"🛒 {s['name']} - ${s['price']:.2f}", f"user_buy:{s['id']}:{cat_id}") for s in services]
     buttons.append(("🔙 قسم السحب", "withdraw_store"))
-    await query.edit_message_text(f"📂 *{category['name']}*", parse_mode=ParseMode.MARKDOWN,
+    limits_text = _withdraw_limits_display(cat_id)
+    await query.edit_message_text(f"📂 *{category['name']}*{limits_text}",
+                                  parse_mode=ParseMode.MARKDOWN,
                                   reply_markup=kb_vertical(buttons))
 
 
@@ -541,7 +560,7 @@ async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"❌ رصيدك غير كافٍ. الرصيد: ${cents_to_money(spendable_balance_cents(user_data)):.2f}, السعر: ${unit_price:.2f}")
         return
 
-    # ═══ [جديد] سؤال عن طبيعة الرسالة المطلوبة أولاً ═══
+    # ═══ سؤال عن طبيعة الرسالة المطلوبة أولاً ═══
     context.user_data["buy_flow"] = {
         "service_id": service_id,
         "service_name": service.get("name", ""),
@@ -555,7 +574,7 @@ async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# ═══ [جديد] طبيعة الرسالة — أزرار اختيار النوع ═══
+# ═══ طبيعة الرسالة — أزرار اختيار النوع ═══
 # ═══════════════════════════════════════════════════════════════════
 MESSAGE_TYPE_LABELS = {
     "email": ("📧 إيميل", "إيميل"),
@@ -581,7 +600,7 @@ async def _ask_message_type(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     query = update.callback_query
     flow = context.user_data.get("buy_flow") or {}
     unit_price = float(flow.get("service_price", service.get("price", 0)))
-    limits_text = _withdraw_limits_display()
+    limits_text = _withdraw_limits_display(flow.get("cat_id"))
     buttons = [
         ("📧 إيميل", "buy_type:email"),
         ("🆔 آيدي", "buy_type:id"),
@@ -620,7 +639,7 @@ async def buy_type_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["buy_flow"] = flow
     label = MESSAGE_TYPE_LABELS[msg_type][0]
     unit_price = float(flow.get("service_price", 0))
-    limits_text = _withdraw_limits_display()
+    limits_text = _withdraw_limits_display(flow.get("cat_id"))
     await query.edit_message_text(
         f"✅ <b>نوع المعلومات:</b> {label}\n\n"
         f"🛒 <b>{html.escape(flow.get('service_name', ''))}</b>\n"
@@ -677,7 +696,7 @@ async def handle_purchase_message(update: Update, context: ContextTypes.DEFAULT_
         unit_price = float(purchase.get("service_price", 0))
         total = round(quantity * unit_price, 2)
 
-        limit_error = _validate_withdraw_amount(total)
+        limit_error = _validate_withdraw_amount(total, purchase.get("cat_id"))
         if limit_error:
             await update.message.reply_text(
                 limit_error,
@@ -761,7 +780,7 @@ async def _handle_buy_flow_message(update: Update, context: ContextTypes.DEFAULT
         unit_price = float(flow.get("service_price", 0))
         total = round(quantity * unit_price, 2)
 
-        limit_error = _validate_withdraw_amount(total)
+        limit_error = _validate_withdraw_amount(total, flow.get("cat_id"))
         if limit_error:
             await update.message.reply_text(
                 limit_error,
@@ -862,7 +881,7 @@ async def _finalize_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE,
     total_cents = money_to_cents(total)
     quantity = int(purchase.get("quantity", 1))
 
-    limit_error = _validate_withdraw_amount(total)
+    limit_error = _validate_withdraw_amount(total, purchase.get("cat_id"))
     if limit_error:
         await update.message.reply_text(
             limit_error, parse_mode=ParseMode.HTML,
@@ -1352,10 +1371,9 @@ async def toggle_tg_lion_store(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 # ═══════════════════════════════════════════════════════════════════
-# ═══ [جديد] حذف فئة من قسم المبيعات ═══
+# ═══ حذف فئة ═══
 # ═══════════════════════════════════════════════════════════════════
 async def store_delete_category_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """يعرض الفئات للحذف."""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
@@ -1382,7 +1400,6 @@ async def store_delete_category_menu(update: Update, context: ContextTypes.DEFAU
 
 
 async def store_delete_category_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """يعرض تأكيد حذف الفئة."""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
@@ -1413,7 +1430,6 @@ async def store_delete_category_confirm(update: Update, context: ContextTypes.DE
 
 
 async def store_delete_category_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """ينفذ حذف الفئة."""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
@@ -1470,9 +1486,19 @@ async def store_category_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
             msg += f"{idx}. 🛒 {s['name']} - 💰 ${s['price']:.2f}\n"
     else:
         msg += "📭 لا توجد مبيعات.\n"
+    # حدود الفئة
+    mn = category.get("withdraw_min")
+    mx = category.get("withdraw_max")
+    if mn is not None or mx is not None:
+        msg += "\n📊 *حدود السحب الخاصة بالفئة:*\n"
+        if mn is not None:
+            msg += f"  ⬇️ أدنى: ${float(mn):.2f}\n"
+        if mx is not None:
+            msg += f"  ⬆️ أعلى: ${float(mx):.2f}\n"
     buttons = [("➕ إضافة", f"store_add_service:{cat_id}"),
                ("✏️ تعديل", f"store_edit_service:{cat_id}"),
-               ("🗑️ حذف", f"store_delete_service:{cat_id}"),
+               ("🗑️ حذف خدمة", f"store_delete_service:{cat_id}"),
+               ("🛒 حدود السحب", f"category_withdraw_settings:{cat_id}"),
                ("🔙 المبيعات", "store_section")]
     await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
 
@@ -1604,6 +1630,189 @@ async def delete_service_execute(update: Update, context: ContextTypes.DEFAULT_T
     save_config(config)
     await query.edit_message_text("✅ تم الحذف.",
                                   reply_markup=kb_single("🔙 الفئة", f"store_category:{cat_id}"))
+
+
+# ═══════════════════════════════════════════════════════════════════
+# ═══ حدود السحب لكل فئة ═══
+# ═══════════════════════════════════════════════════════════════════
+async def category_withdraw_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    try:
+        cat_id = query.data.split(":", 1)[1]
+    except (IndexError, ValueError):
+        await query.answer("⚠️", show_alert=True)
+        return
+    config = load_config()
+    category = next((c for c in config.get("store_categories", []) if c["id"] == cat_id), None)
+    if not category:
+        await query.answer("⚠️ الفئة غير موجودة.", show_alert=True)
+        return
+    mn = category.get("withdraw_min")
+    mx = category.get("withdraw_max")
+    min_str = f"${float(mn):.2f}" if mn is not None else "غير محدد"
+    max_str = f"${float(mx):.2f}" if mx is not None else "غير محدد"
+    # حدود عامة للمقارنة
+    global_limits = get_withdraw_limits()
+    global_min_str = f"${global_limits['min']:.2f}" if global_limits["min"] is not None else "غير محدد"
+    global_max_str = f"${global_limits['max']:.2f}" if global_limits["max"] is not None else "غير محدد"
+    buttons = [
+        ("⬇️ تعديل الحد الأدنى", f"cat_withdraw_set_min:{cat_id}"),
+        ("⬆️ تعديل الحد الأعلى", f"cat_withdraw_set_max:{cat_id}"),
+        ("🗑️ إلغاء كلا الحدين", f"cat_withdraw_clear:{cat_id}"),
+        ("🔙 الفئة", f"store_category:{cat_id}"),
+    ]
+    await query.edit_message_text(
+        f"🛒 *حدود السحب — {html.escape(category['name'])}*\n\n"
+        f"⬇️ <b>الحد الأدنى:</b> {min_str}\n"
+        f"⬆️ <b>الحد الأعلى:</b> {max_str}\n\n"
+        f"<i>📌 الحدود العامة الحالية (للرجوع):\n"
+        f"   أدنى: {global_min_str} | أعلى: {global_max_str}</i>\n\n"
+        f"<i>إذا لم تُحدَّد حدود خاصة بالفئة، ستُطبق الحدود العامة.</i>",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_vertical(buttons))
+
+
+async def cat_withdraw_set_min(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫", show_alert=True)
+        return
+    cat_id = query.data.split(":", 1)[1]
+    config = load_config()
+    category = next((c for c in config.get("store_categories", []) if c["id"] == cat_id), None)
+    if not category:
+        await query.answer("⚠️", show_alert=True)
+        return
+    context.user_data["mode"] = "cat_withdraw_set_min"
+    context.user_data["cat_withdraw_target"] = cat_id
+    current = category.get("withdraw_min")
+    current_str = f"${float(current):.2f}" if current is not None else "غير محدد"
+    await query.edit_message_text(
+        f"⬇️ *تعديل الحد الأدنى لهذه الفئة*\n\n"
+        f"📌 الحالي: {current_str}\n\n"
+        f"أرسل الحد الأدنى بالدولار (مثال: `1` أو `0.5`):\n\n"
+        f"<i>أو 'حذف' لإزالة الحد، أو 'إلغاء' للعودة.</i>",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_single("🔙 إلغاء", f"category_withdraw_settings:{cat_id}"))
+
+
+async def cat_withdraw_set_max(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫", show_alert=True)
+        return
+    cat_id = query.data.split(":", 1)[1]
+    config = load_config()
+    category = next((c for c in config.get("store_categories", []) if c["id"] == cat_id), None)
+    if not category:
+        await query.answer("⚠️", show_alert=True)
+        return
+    context.user_data["mode"] = "cat_withdraw_set_max"
+    context.user_data["cat_withdraw_target"] = cat_id
+    current = category.get("withdraw_max")
+    current_str = f"${float(current):.2f}" if current is not None else "غير محدد"
+    await query.edit_message_text(
+        f"⬆️ *تعديل الحد الأعلى لهذه الفئة*\n\n"
+        f"📌 الحالي: {current_str}\n\n"
+        f"أرسل الحد الأعلى بالدولار (مثال: `50` أو `100`):\n\n"
+        f"<i>أو 'حذف' لإزالة الحد، أو 'إلغاء' للعودة.</i>",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_single("🔙 إلغاء", f"category_withdraw_settings:{cat_id}"))
+
+
+async def cat_withdraw_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫", show_alert=True)
+        return
+    cat_id = query.data.split(":", 1)[1]
+    config = load_config()
+    for cat in config.get("store_categories", []):
+        if cat["id"] == cat_id:
+            cat.pop("withdraw_min", None)
+            cat.pop("withdraw_max", None)
+            break
+    save_config(config)
+    await query.answer("✅ تم إلغاء حدود الفئة (ستُطبق الحدود العامة).", show_alert=True)
+    await category_withdraw_settings(update, context)
+
+
+async def handle_cat_withdraw_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يُستدعى من text_input عند mode = cat_withdraw_set_min/max"""
+    if update.effective_user.id != OWNER_ID:
+        context.user_data.pop("mode", None)
+        context.user_data.pop("cat_withdraw_target", None)
+        return
+    text = update.message.text.strip()
+    mode = context.user_data.get("mode")
+    cat_id = context.user_data.get("cat_withdraw_target")
+
+    if text.casefold() in {"إلغاء", "الغاء", "cancel", "отмена"}:
+        context.user_data.pop("mode", None)
+        context.user_data.pop("cat_withdraw_target", None)
+        await update.message.reply_text(
+            "❌ تم الإلغاء.",
+            reply_markup=kb_single("🔙 رجوع", f"category_withdraw_settings:{cat_id}"))
+        return
+
+    if text.casefold() in {"حذف", "مسح", "delete", "remove"}:
+        config = load_config()
+        for cat in config.get("store_categories", []):
+            if cat["id"] != cat_id:
+                continue
+            if mode == "cat_withdraw_set_min":
+                cat.pop("withdraw_min", None)
+            elif mode == "cat_withdraw_set_max":
+                cat.pop("withdraw_max", None)
+            break
+        save_config(config)
+        context.user_data.pop("mode", None)
+        context.user_data.pop("cat_withdraw_target", None)
+        await update.message.reply_text(
+            "✅ تم إزالة الحد.",
+            reply_markup=kb_single("🔙 رجوع", f"category_withdraw_settings:{cat_id}"))
+        return
+
+    try:
+        value = float(text)
+        if value < 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("⚠️ أرسل رقماً صحيحاً.")
+        return
+
+    config = load_config()
+    updated_label = None
+    for cat in config.get("store_categories", []):
+        if cat["id"] != cat_id:
+            continue
+        # فحص التناسق قبل التعديل
+        mn = cat.get("withdraw_min")
+        mx = cat.get("withdraw_max")
+        if mode == "cat_withdraw_set_min":
+            if mx is not None and value > float(mx):
+                await update.message.reply_text(
+                    f"⚠️ الحد الأدنى يجب أن يكون أقل من أو يساوي الحد الأعلى الحالي (${float(mx):.2f}).")
+                return
+            cat["withdraw_min"] = round(value, 2)
+            updated_label = "الحد الأدنى"
+        else:
+            if mn is not None and value < float(mn):
+                await update.message.reply_text(
+                    f"⚠️ الحد الأعلى يجب أن يكون أكبر من أو يساوي الحد الأدنى الحالي (${float(mn):.2f}).")
+                return
+            cat["withdraw_max"] = round(value, 2)
+            updated_label = "الحد الأعلى"
+        break
+    save_config(config)
+    context.user_data.pop("mode", None)
+    context.user_data.pop("cat_withdraw_target", None)
+    await update.message.reply_text(
+        f"✅ تم تعيين {updated_label} لهذه الفئة: ${value:.2f}",
+        reply_markup=kb_single("🔙 رجوع", f"category_withdraw_settings:{cat_id}"))
 
 
 # ==================== REFERRAL HANDLER ====================
