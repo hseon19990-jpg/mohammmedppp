@@ -567,7 +567,6 @@ async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
     min_qty = service.get("min_qty")
     max_qty = service.get("max_qty")
     if min_qty is None and max_qty is None:
-        # كمية ثابتة = 1
         context.user_data["buy_flow"] = {
             "service_id": service_id,
             "service_name": service.get("name", ""),
