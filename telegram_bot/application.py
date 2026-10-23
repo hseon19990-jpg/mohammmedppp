@@ -28,28 +28,20 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if api_step == "key":
         await handle_api_key_input(update, context); return
 
-    # ═══ Withdraw limits input (owner — GLOBAL) ═══
+    # ═══ Withdraw limits (global) ═══
     mode = context.user_data.get("mode")
     if mode in ("withdraw_set_min", "withdraw_set_max"):
         await handle_withdraw_input(update, context); return
 
-    # ═══ Withdraw limits input (owner — PER CATEGORY) ═══
-    if mode in ("cat_withdraw_set_min", "cat_withdraw_set_max"):
-        await handle_cat_withdraw_input(update, context); return
-
-    # ═══ Daily gift settings input (owner) ═══
+    # ═══ Daily gift settings (owner) ═══
     if mode in ("daily_gift_set_emails", "daily_gift_set_reward"):
         await handle_daily_gift_input(update, context); return
 
-    # ═══ Store quantity / message (multi-step — NEW flow via buy_flow) ═══
+    # ═══ Store flow (buy_flow / legacy) ═══
     if context.user_data.get("buy_flow"):
-        await handle_purchase_message(update, context)
-        return
-
-    # ═══ Store quantity / message (multi-step — LEGACY flow) ═══
+        await handle_purchase_message(update, context); return
     if user_id in PENDING_PURCHASES:
-        await handle_purchase_message(update, context)
-        return
+        await handle_purchase_message(update, context); return
 
     # ═══ Service editing inputs (owner) ═══
     if str(context.user_data.get("store_action", "")).startswith("edit_service_"):
@@ -268,7 +260,6 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "ℹ️ لم يضبط المالك رابط الدعم بعد.",
             reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
-    # ═══ Withdraw limits (owner — GLOBAL) ═══
     elif data == "withdraw_settings":
         await withdraw_settings(update, context)
     elif data == "withdraw_set_min":
@@ -277,16 +268,6 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await withdraw_set_max(update, context)
     elif data == "withdraw_clear_limits":
         await withdraw_clear_limits(update, context)
-    # ═══ Withdraw limits (owner — PER CATEGORY) ═══
-    elif data.startswith("category_withdraw_settings:"):
-        await category_withdraw_settings(update, context)
-    elif data.startswith("cat_withdraw_set_min:"):
-        await cat_withdraw_set_min(update, context)
-    elif data.startswith("cat_withdraw_set_max:"):
-        await cat_withdraw_set_max(update, context)
-    elif data.startswith("cat_withdraw_clear:"):
-        await cat_withdraw_clear(update, context)
-    # ═══ Daily gift (owner) ═══
     elif data == "daily_gift_settings":
         await daily_gift_settings(update, context)
     elif data == "daily_gift_toggle":
@@ -295,7 +276,6 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await daily_gift_set_emails(update, context)
     elif data == "daily_gift_set_reward":
         await daily_gift_set_reward(update, context)
-    # ═══ Contest ═══
     elif data == "contest_menu":
         await contest_menu(update, context)
     elif data == "contest_create_start":
@@ -408,8 +388,26 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await store_category_menu(update, context)
     elif data.startswith("store_add_service:"):
         await store_add_service(update, context)
+    elif data == "service_types_done":
+        await service_types_done(update, context)
+    elif data.startswith("service_toggle_type:"):
+        await service_toggle_type(update, context)
+    elif data.startswith("service_qty_skip_min:"):
+        await service_qty_skip_min(update, context)
+    elif data.startswith("service_qty_skip_max:"):
+        await service_qty_skip_max(update, context)
+    elif data.startswith("service_detail:"):
+        await service_detail(update, context)
+    elif data.startswith("service_edit_types:"):
+        await service_edit_types(update, context)
+    elif data.startswith("service_edit_toggle:"):
+        await service_edit_toggle(update, context)
+    elif data == "service_edit_types_save":
+        await service_edit_types_save(update, context)
     elif data.startswith("store_delete_service:"):
         await store_delete_service(update, context)
+    elif data.startswith("store_delete_service_confirm:"):
+        await store_delete_service_confirm(update, context)
     elif data.startswith("delete_service:"):
         await delete_service_execute(update, context)
     elif data.startswith("store_edit_service:"):
@@ -483,8 +481,6 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await user_category_menu(update, context)
     elif data.startswith("user_buy:"):
         await user_buy_service(update, context)
-    elif data.startswith("buy_type:"):
-        await buy_type_selected(update, context)
     elif data.startswith("deliver_order:"):
         await deliver_order(update, context)
     elif data == "all_accounts_section":
@@ -535,7 +531,6 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await delete_pending_account(update, context)
     elif data.startswith("owner_show_code:"):
         await owner_show_code(update, context)
-    # ═══ APIs management ═══
     elif data == "apis_menu":
         await apis_menu(update, context)
     elif data == "apis_list_details":
@@ -555,7 +550,6 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await api_add_start(update, context)
     elif data.startswith("api_delete:"):
         await api_delete_execute(update, context)
-    # ═══ Bans / restrictions ═══
     elif data == "bans_menu":
         await bans_menu(update, context)
     elif data.startswith("unban_member:"):
