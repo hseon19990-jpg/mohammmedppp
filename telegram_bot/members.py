@@ -33,6 +33,11 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         (t(uid, "btn_sell_old"), "add_account"),
         (t(uid, "btn_sell_new"), "sell_new_email"),
         (t(uid, "btn_wallet"), "my_wallet"),
+    ]
+    gift_config = get_daily_gift_config()
+    if gift_config["enabled"]:
+        buttons.append(("🎁 الهدية اليومية", "daily_gift_view"))
+    buttons.extend([
         (t(uid, "btn_transactions"), "my_transactions"),
         (t(uid, "btn_my_accounts"), "my_accounts"),
         (t(uid, "btn_top_sellers"), "top_sellers"),
@@ -42,7 +47,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         (t(uid, "btn_referral"), "referral_menu"),
         (t(uid, "btn_edit_accounts"), "edit_my_accounts"),
         (t(uid, "btn_language"), "language_menu"),
-    ]
+    ])
     if is_admin(uid):
         buttons.append((t(uid, "btn_admin"), "admin_panel"))
     if uid == OWNER_ID:
@@ -62,6 +67,46 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             text, parse_mode=ParseMode.HTML,
             reply_markup=member_menu_keyboard(buttons))
+
+
+# ==================== DAILY GIFT VIEW ====================
+async def daily_gift_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_forced_channel(update, context):
+        return
+    query = update.callback_query
+    uid = query.from_user.id
+    gift = get_daily_gift_config()
+    if not gift["enabled"]:
+        await query.edit_message_text(
+            "🎁 الهدية اليومية غير مفعلة حالياً.",
+            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        return
+    user_data = get_user(uid)
+    progress = check_and_reset_daily_gift_progress(user_data)
+    save_user(uid, user_data)
+    count = int(progress.get("count", 0))
+    claimed = progress.get("claimed", False)
+    required = gift["emails_required"]
+    reward = gift["reward"]
+    remaining = max(0, required - count)
+
+    if claimed:
+        text = (f"🎁 <b>الهدية اليومية</b>\n\n"
+                f"✅ <b>حصلت على هدية اليوم!</b>\n"
+                f"💰 المكافأة: <b>${reward:.2f}</b>\n\n"
+                f"📌 تتجدد الهدية تلقائياً في اليوم التالي.")
+    else:
+        progress_pct = int(count * 100 / required) if required > 0 else 0
+        text = (f"🎁 <b>الهدية اليومية</b>\n\n"
+                f"📧 <b>الهدف:</b> أكمل <b>{required}</b> إيميل\n"
+                f"✅ <b>أكملت اليوم:</b> <b>{count}</b> إيميل\n"
+                f"⏳ <b>المتبقي:</b> <b>{remaining}</b> إيميل\n"
+                f"💰 <b>المكافأة:</b> <b>${reward:.2f}</b>\n\n"
+                f"📊 التقدم: {progress_pct}%\n\n"
+                f"<i>يُحتسب التقدم فقط بعد تحويل نقاط كل إيميل إلى رصيدك.</i>")
+
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML,
+                                  reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
 
 
 # ==================== LANGUAGE MENU ====================
@@ -372,35 +417,24 @@ async def handle_edit_field_input(update: Update, context: ContextTypes.DEFAULT_
         reply_markup=kb_single(t(uid, "edit_btn_back"), "edit_my_accounts"))
 
 
-# ==================== ADD ACCOUNT FLOW (OLD EMAIL) ====================
-async def _verify_and_handle_failure(update: Update, context: ContextTypes.DEFAULT_TYPE, email: str) -> Tuple[str, Optional[bool]]:
-    """Wrapper that checks strict existence and applies 3-strike restriction."""
+# ==================== VERIFICATION WRAPPER (NEW email flow only) ====================
+async def _verify_and_handle_failure(update: Update, context: ContextTypes.DEFAULT_TYPE, email: str) -> Tuple[str, Optional[bool], int, bool]:
+    """
+    Wrapper for strict existence check + 3-strike restriction.
+    Used ONLY in the NEW email flow (bot-generated).
+    Returns: (status, exists, remaining_attempts, restricted_now)
+    """
     uid = update.effective_user.id
     status, exists = await verify_gmail_account_exists_strict(email, context=context)
-    if status == "unknown":
-        return status, exists
     if status == "available":
-        # wrong email, apply failure counter
         user_data = get_user(uid)
         remaining, restricted_now = apply_verification_failure(user_data)
         save_user(uid, user_data)
-        if restricted_now:
-            restriction_msg = get_active_restriction_message(user_data)
-            await update.effective_message.reply_text(
-                restriction_msg or "🚫 تم تقييدك لمدة ساعة.",
-                parse_mode=ParseMode.HTML,
-                reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
-        else:
-            await update.effective_message.reply_text(
-                f"❌ <b>هذا الإيميل غير موجود!</b>\n\n"
-                f"📧 <code>{tg_html_escape(email)}</code>\n\n"
-                f"⚠️ <b>الفرص المتبقية:</b> <code>{remaining}</code> من 3\n"
-                f"<i>بعد 3 محاولات فاشلة سيتم تقييدك لمدة ساعة من إضافة الإيميلات وسحب الأرباح.</i>",
-                parse_mode=ParseMode.HTML)
-        return status, exists
-    return status, exists
+        return status, exists, remaining, restricted_now
+    return status, exists, VERIFICATION_FAILURES_THRESHOLD, False
 
 
+# ==================== ADD ACCOUNT FLOW (OLD EMAIL — NO API CHECK) ====================
 async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
@@ -510,7 +544,7 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prices = get_tier_prices("old")
 
     if session.step == "email":
-        # apply restriction check
+        # ═══ Only restriction check + format + domain — NO API check ═══
         user_data_check = get_user(uid)
         restriction_msg = get_active_restriction_message(user_data_check)
         if restriction_msg:
@@ -528,21 +562,7 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(t(uid, "add_fake_email"))
             return
 
-        await update.message.reply_text(t(uid, "add_checking_account"))
-        status, _ = await _verify_and_handle_failure(update, context, email)
-
-        if status == "unknown":
-            await update.message.reply_text(
-                t(uid, "sell_new_verify_unknown", email=tg_html_escape(email)),
-                parse_mode=ParseMode.HTML,
-                reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
-            SESSIONS.pop(uid, None); save_sessions()
-            return
-
-        if status == "available":
-            SESSIONS.pop(uid, None); save_sessions()
-            return
-
+        # ═══ No API check here — verification only at step 4 (app_pass) via IMAP ═══
         active_status = get_active_account_status(email)
         if active_status == "approved":
             await update.message.reply_text(
@@ -599,19 +619,10 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
 
     elif session.step == "password":
+        # ═══ No IMAP check here — accept any password, verify only at step 4 ═══
         if has_active_account_password(text):
             await update.message.reply_text(
                 t(uid, "add_password_used"),
-                reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
-            SESSIONS.pop(uid, None); save_sessions()
-            return
-        await update.message.reply_text(t(uid, "add_checking_account"))
-        ok, msg = await asyncio.to_thread(_imap_login_sync, session.email, text)
-        is_2fa_error = any(m in msg.lower() for m in TWO_FA_ERROR_MARKERS)
-        is_network_error = any(m in msg.lower() for m in NETWORK_ERROR_MARKERS)
-        if not ok and not is_2fa_error and not is_network_error:
-            await update.message.reply_text(
-                t(uid, "add_wrong_credentials"),
                 reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
             SESSIONS.pop(uid, None); save_sessions()
             return
@@ -648,6 +659,7 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]))
 
     elif session.step == "app_pass":
+        # ═══ IMAP check ONLY here — this is the real verification ═══
         cleaned = text.replace(" ", "")
         if len(cleaned) != 16 or not re.match(r'^[A-Za-z0-9]{16}$', cleaned):
             await update.message.reply_text(t(uid, "add_app_pass_invalid"))
@@ -733,7 +745,7 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
 
 
-# ==================== SELL NEW EMAIL FLOW ====================
+# ==================== SELL NEW EMAIL FLOW (API check preserved) ====================
 async def sell_new_email_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
@@ -805,7 +817,16 @@ async def sell_new_email_complete(update: Update, context: ContextTypes.DEFAULT_
         t(uid, "sell_new_checking_created", email=tg_html_escape(creds['email'])),
         parse_mode=ParseMode.HTML)
 
-    status, _ = await _verify_and_handle_failure(update, context, creds["email"])
+    status, _, remaining, restricted_now = await _verify_and_handle_failure(update, context, creds["email"])
+
+    if restricted_now:
+        fresh_user = get_user(uid)
+        restriction_msg = get_active_restriction_message(fresh_user)
+        await query.edit_message_text(
+            restriction_msg or "🚫 تم تقييدك لمدة ساعة.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
+        return
 
     if status == "unknown":
         await query.edit_message_text(
@@ -818,16 +839,15 @@ async def sell_new_email_complete(update: Update, context: ContextTypes.DEFAULT_
         return
 
     if status == "available":
-        # restriction may apply; hide further actions if restricted
-        fresh_user = get_user(uid)
-        if get_active_restriction_message(fresh_user):
-            await query.edit_message_text(
-                get_active_restriction_message(fresh_user),
-                parse_mode=ParseMode.HTML,
-                reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
-            return
         await query.edit_message_text(
-            t(uid, "sell_new_not_created", email=tg_html_escape(creds['email'])),
+            f"❌ <b>لم تُنشئ الإيميل بعد!</b>\n\n"
+            f"📧 <code>{tg_html_escape(creds['email'])}</code>\n\n"
+            f"⚠️ <b>الفرص المتبقية:</b> <code>{remaining}</code> من 3\n\n"
+            f"📌 <b>الخطوات:</b>\n"
+            f"1. اذهب إلى <a href=\"https://accounts.google.com/signup\">صفحة إنشاء حساب جوجل</a>\n"
+            f"2. استخدم البريد والباسورد المعروضة\n"
+            f"3. أكمل الإنشاء\n"
+            f"4. ارجع واضغط «أعد الفحص»",
             parse_mode=ParseMode.HTML, disable_web_page_preview=True,
             reply_markup=kb_vertical([
                 (t(uid, "sell_new_btn_recheck"), "sell_new_email_complete"),
@@ -877,7 +897,16 @@ async def sell_new_email_finish_confirm(update: Update, context: ContextTypes.DE
         t(uid, "sell_new_checking_created", email=tg_html_escape(creds['email'])),
         parse_mode=ParseMode.HTML)
 
-    status, _ = await _verify_and_handle_failure(update, context, creds["email"])
+    status, _, remaining, restricted_now = await _verify_and_handle_failure(update, context, creds["email"])
+
+    if restricted_now:
+        fresh_user = get_user(uid)
+        restriction_msg = get_active_restriction_message(fresh_user)
+        await query.edit_message_text(
+            restriction_msg or "🚫 تم تقييدك لمدة ساعة.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
+        return
 
     if status == "unknown":
         await query.edit_message_text(
@@ -891,15 +920,11 @@ async def sell_new_email_finish_confirm(update: Update, context: ContextTypes.DE
         return
 
     if status == "available":
-        fresh_user = get_user(uid)
-        if get_active_restriction_message(fresh_user):
-            await query.edit_message_text(
-                get_active_restriction_message(fresh_user),
-                parse_mode=ParseMode.HTML,
-                reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
-            return
         await query.edit_message_text(
-            t(uid, "sell_new_not_created", email=tg_html_escape(creds['email'])),
+            f"❌ <b>لم تُنشئ الإيميل بعد!</b>\n\n"
+            f"📧 <code>{tg_html_escape(creds['email'])}</code>\n\n"
+            f"⚠️ <b>الفرص المتبقية:</b> <code>{remaining}</code> من 3\n\n"
+            f"📌 أكمل إنشاء الإيميل أولاً",
             parse_mode=ParseMode.HTML, disable_web_page_preview=True,
             reply_markup=kb_vertical([
                 (t(uid, "sell_new_btn_recheck"), "sell_new_email_finish_confirm"),
@@ -1284,6 +1309,8 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
         return
+
+    # ═══ Success — release points and trigger daily gift ═══
     user_data["hold_balance"] = clamp_money(float(user_data.get("hold_balance", 0.0)) - price)
     user_data["balance"] = clamp_money(float(user_data.get("balance", 0.0)) + price)
     account["leave_confirmed"] = True
@@ -1301,6 +1328,13 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
     user_data["approved_accounts"] = accounts
     add_transaction(user_data, "release", price, f"auto transfer after {hold_hours}h", email)
     save_user(user_id, user_data)
+
+    # ═══ Daily gift check (after points reach user) ═══
+    try:
+        await process_daily_gift_after_approval(context, user_id)
+    except Exception:
+        logger.exception("Daily gift processing failed")
+
     try:
         await context.bot.send_message(chat_id=user_id,
             text=f"✅ Confirmed!\n📧 {email}\n💰 +${price:.2f}",
@@ -1314,7 +1348,6 @@ async def restore_leave_checks(application: Application):
     users = load_json(USERS_DB)
     changed = False
     now = datetime.now(timezone.utc)
-    # Ensure created_at is set for users without it (used by reminder job)
     for user_id, encrypted_data in users.items():
         user_data = decrypt_user_data(encrypted_data)
         if not user_data.get("created_at"):
