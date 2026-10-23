@@ -1,5 +1,5 @@
 """
-Advanced Telegram Account Manager Bot - v6.5
+Advanced Telegram Account Manager Bot - v6.6
 """
 
 import asyncio
@@ -293,6 +293,9 @@ API_WARNING_THRESHOLD = 50
 VERIFICATION_FAILURES_THRESHOLD = 3
 RESTRICTION_DURATION_HOURS = 1
 
+# Daily gift
+IRAQ_TZ_OFFSET_HOURS = 3
+
 # ==================== SELL NEW EMAIL GENERATOR ====================
 FIRST_NAMES_EN = [
     "James", "John", "Robert", "Michael", "William", "David", "Richard", "Joseph",
@@ -415,19 +418,13 @@ async def check_email_availability(email: str, use_cache: bool = True) -> Option
     return result
 
 
-# ==================== ABSTRACTAPI CHECKER (single key) ====================
+# ==================== ABSTRACTAPI CHECKER ====================
 def _call_abstractapi_key(api_key: str, email: str) -> Optional[bool]:
-    """Single abstract API call. Returns True/False/None."""
     meta = _call_abstractapi_with_meta(api_key, email)
     return meta.get("result")
 
 
 def _call_abstractapi_with_meta(api_key: str, email: str) -> dict:
-    """
-    يستدعي AbstractAPI ويُرجع بيانات الحصة من headers/body.
-    Returns dict: {result, limit_header, remaining_header,
-                   quota_exceeded, invalid_key, error}
-    """
     meta = {
         "result": None,
         "limit_header": None,
@@ -456,7 +453,6 @@ def _call_abstractapi_with_meta(api_key: str, email: str) -> dict:
                 meta["invalid_key"] = True
             return meta
 
-        # قراءة rate limit headers (بأي casing)
         for name, value in headers.items():
             lower = name.lower()
             if "ratelimit-limit" in lower or "rate-limit-limit" in lower:
@@ -470,7 +466,6 @@ def _call_abstractapi_with_meta(api_key: str, email: str) -> dict:
                 except (ValueError, TypeError):
                     pass
 
-        # محاولة قراءة quota من body إذا لم تكن في headers
         if meta["limit_header"] is None:
             quota = data.get("quota") or data.get("rate_limit") or {}
             if isinstance(quota, dict):
@@ -481,7 +476,6 @@ def _call_abstractapi_with_meta(api_key: str, email: str) -> dict:
                     except (ValueError, TypeError):
                         pass
 
-        # نتيجة الفحص
         is_valid = data.get("is_valid")
         deliverability = str((data.get("email_deliverability") or {}).get("status", "")).lower()
         is_smtp_valid = (data.get("is_smtp_valid") or {}).get("value")
@@ -511,7 +505,6 @@ def _call_abstractapi_with_meta(api_key: str, email: str) -> dict:
 
 
 def check_email_exists_via_abstractapi_sync(email: str) -> Optional[bool]:
-    """Single-key check via ENV (legacy/fallback)."""
     api_key = os.environ.get("ABSTRACT_API_KEY", "").strip()
     if not api_key:
         logger.warning("⚠️ ABSTRACT_API_KEY is missing in environment variables!")
@@ -550,7 +543,6 @@ def mark_api_invalid(api_id: str):
 
 
 def mark_api_exhausted(api_id: str):
-    """يحوّل API إلى مستنفد فوراً (عند 429 أو استهلاك كامل)."""
     apis = get_api_list()
     for api in apis:
         if api.get("id") == api_id:
@@ -579,10 +571,6 @@ def record_admin_api_addition(admin_id: int):
 
 
 def test_api_key_sync(api_key: str) -> dict:
-    """
-    يختبر المفتاح ويكتشف الحصة تلقائياً.
-    Returns: {ok: bool, message: str, limit: int, used: int, status: str}
-    """
     meta = _call_abstractapi_with_meta(api_key, "test@gmail.com")
 
     if meta.get("invalid_key"):
@@ -618,7 +606,6 @@ def test_api_key_sync(api_key: str) -> dict:
 
 
 def _compute_api_warning() -> Optional[dict]:
-    """يُرجع dict تحذير إذا كان هناك API واحد فقط بمتبقي ≤ 50، أو لا توجد APIs نشطة."""
     active = [a for a in get_api_list() if a.get("status") == "active"]
     if len(active) == 0:
         return {"warning": True, "remaining": 0, "api": None}
@@ -630,7 +617,6 @@ def _compute_api_warning() -> Optional[dict]:
 
 
 def _update_api_from_meta(api_id: str, meta: dict) -> Optional[dict]:
-    """يُحدّث الاستهلاك من بيانات الاستجابة. يُرجع تحذيراً إن وُجد."""
     apis = get_api_list()
     now_iso = datetime.now(timezone.utc).isoformat()
     for api in apis:
@@ -676,7 +662,6 @@ async def notify_api_warning(context, warning: dict):
 
 
 async def check_email_via_rotation_api(email: str, context=None) -> Optional[bool]:
-    """يجرب APIs بالترتيب مع تتبع تلقائي للحصة."""
     tried_ids = set()
     for _ in range(5):
         api = None
@@ -697,12 +682,10 @@ async def check_email_via_rotation_api(email: str, context=None) -> Optional[boo
             _call_abstractapi_with_meta, api.get("api_key", ""), email
         )
 
-        # مفتاح معطّل → علّمه وتجاوزه
         if meta.get("invalid_key"):
             mark_api_invalid(api.get("id"))
             continue
 
-        # الحصة منتهية → علّمه وتجاوزه
         if meta.get("quota_exceeded"):
             mark_api_exhausted(api.get("id"))
             warning = _compute_api_warning()
@@ -713,7 +696,6 @@ async def check_email_via_rotation_api(email: str, context=None) -> Optional[boo
                     logger.exception("Failed to notify API warning")
             continue
 
-        # حدّث الاستهلاك من headers
         warning = _update_api_from_meta(api.get("id"), meta)
         if warning and context:
             try:
@@ -730,18 +712,8 @@ async def check_email_via_rotation_api(email: str, context=None) -> Optional[boo
 async def verify_gmail_account_exists_strict(email: str, context=None) -> Tuple[str, Optional[bool]]:
     """
     التحقق الصارم من وجود حساب Gmail.
-
-    الترتيب:
-      1) APIs المُضافة من المالك/الأدمن (rotation)
-      2) ABSTRACT_API_KEY من البيئة (احتياط)
-      3) InputValidator من Google (احتياط أخير)
-
-    يعيد:
-      - ("exists", True)      → الحساب موجود
-      - ("available", False)  → الحساب غير موجود
-      - ("unknown", None)     → تعذر التحقق
+    يُستخدم فقط في تدفق 'بيع إيميل جديد'.
     """
-    # 1) Rotation APIs
     try:
         result_api = await check_email_via_rotation_api(email, context=context)
     except Exception:
@@ -752,7 +724,6 @@ async def verify_gmail_account_exists_strict(email: str, context=None) -> Tuple[
     if result_api is False:
         return "available", False
 
-    # 2) ENV fallback
     env_key = os.environ.get("ABSTRACT_API_KEY", "").strip()
     if env_key:
         result_env = await asyncio.to_thread(_call_abstractapi_key, env_key, email)
@@ -761,7 +732,6 @@ async def verify_gmail_account_exists_strict(email: str, context=None) -> Tuple[
         if result_env is False:
             return "available", False
 
-    # 3) InputValidator fallback
     last_result: Optional[bool] = None
     for attempt in range(3):
         try:
@@ -782,6 +752,96 @@ async def verify_gmail_account_exists_strict(email: str, context=None) -> Tuple[
         email, last_result,
     )
     return "unknown", None
+
+
+# ==================== WITHDRAW LIMITS ====================
+def get_withdraw_limits() -> dict:
+    config = load_config()
+    min_val = config.get("withdraw_min")
+    max_val = config.get("withdraw_max")
+    return {
+        "min": float(min_val) if min_val is not None else None,
+        "max": float(max_val) if max_val is not None else None,
+    }
+
+
+# ==================== DAILY GIFT ====================
+DAILY_GIFT_LOCK = asyncio.Lock()
+
+
+def get_iraq_date_str() -> str:
+    iraq_now = datetime.now(timezone.utc) + timedelta(hours=IRAQ_TZ_OFFSET_HOURS)
+    return iraq_now.strftime("%Y-%m-%d")
+
+
+def get_daily_gift_config() -> dict:
+    config = load_config()
+    gift = config.get("daily_gift", {})
+    if not isinstance(gift, dict):
+        return {"enabled": False, "emails_required": 0, "reward": 0.0}
+    return {
+        "enabled": bool(gift.get("enabled", False)),
+        "emails_required": int(gift.get("emails_required", 0) or 0),
+        "reward": float(gift.get("reward", 0) or 0),
+    }
+
+
+def check_and_reset_daily_gift_progress(user_data: dict) -> dict:
+    today = get_iraq_date_str()
+    progress = user_data.get("daily_gift_progress") or {}
+    if not isinstance(progress, dict):
+        progress = {}
+    if progress.get("date") != today:
+        progress = {"date": today, "count": 0, "claimed": False}
+        user_data["daily_gift_progress"] = progress
+    return progress
+
+
+async def process_daily_gift_after_approval(context: ContextTypes.DEFAULT_TYPE, user_id: int):
+    """يُستدعى عند تحرير نقاط إيميل للعضو. يحسب التقدم ويصرف الهدية عند الوصول للهدف."""
+    gift = get_daily_gift_config()
+    if not gift["enabled"] or gift["emails_required"] <= 0 or gift["reward"] <= 0:
+        return
+    async with DAILY_GIFT_LOCK:
+        user_data = get_user(user_id)
+        progress = check_and_reset_daily_gift_progress(user_data)
+        if progress.get("claimed"):
+            save_user(user_id, user_data)
+            return
+        progress["count"] = int(progress.get("count", 0)) + 1
+        awarded = False
+        if progress["count"] >= gift["emails_required"]:
+            user_data["balance"] = clamp_money(float(user_data.get("balance", 0.0)) + gift["reward"])
+            user_data["total_credited_balance"] = clamp_money(
+                float(user_data.get("total_credited_balance", 0.0)) + gift["reward"])
+            add_transaction(user_data, "credit", gift["reward"],
+                            f"هدية يومية ({gift['emails_required']} إيميلات)")
+            progress["claimed"] = True
+            awarded = True
+        user_data["daily_gift_progress"] = progress
+        save_user(user_id, user_data)
+
+    if awarded:
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=(f"🎁 <b>مبروك! حصلت على الهدية اليومية</b>\n\n"
+                      f"📧 أكملت <b>{gift['emails_required']}</b> إيميلات اليوم\n"
+                      f"💰 مكافأة: <b>${gift['reward']:.2f}</b>\n\n"
+                      f"🔄 العداد يتجدد تلقائياً عند منتصف الليل بتوقيت العراق."),
+                parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
+        try:
+            await context.bot.send_message(
+                chat_id=OWNER_ID,
+                text=(f"🎁 <b>هدية يومية صُرفت</b>\n\n"
+                      f"👤 المستخدم: <code>{user_id}</code>\n"
+                      f"📧 الإيميلات: <code>{gift['emails_required']}</code>\n"
+                      f"💰 المكافأة: <code>${gift['reward']:.2f}</code>"),
+                parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
 
 
 # ==================== REJECT REASONS ====================
@@ -962,6 +1022,7 @@ DEFAULT_USER_FIELDS = {
     "last_reminder_at": "",
     "verification_failures": 0,
     "restricted_until": "",
+    "daily_gift_progress": {},
 }
 
 
@@ -1095,7 +1156,7 @@ def register_approval_reset(user_data: dict):
     user_data["verification_failures"] = 0
 
 
-# ==================== RESTRICTION SYSTEM (3-strike verification) ====================
+# ==================== RESTRICTION SYSTEM ====================
 ARABIC_PATTERN = re.compile(
     r'[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]'
 )
@@ -1135,7 +1196,6 @@ def get_any_restriction_message(user_data: dict) -> Optional[str]:
 
 
 def apply_verification_failure(user_data: dict) -> Tuple[int, bool]:
-    """Increments failure counter. Returns (remaining_attempts, restricted_now)."""
     failures = int(user_data.get("verification_failures", 0) or 0) + 1
     if failures >= VERIFICATION_FAILURES_THRESHOLD:
         user_data["restricted_until"] = (
@@ -2223,7 +2283,6 @@ async def cleanup_fake_requests_job(context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== INACTIVE MEMBER REMINDER ====================
 async def inactive_member_reminder_job(context: ContextTypes.DEFAULT_TYPE):
-    """يرسل تذكيراً للأعضاء الذين لم يبيعوا منذ أسبوع."""
     users = load_json(USERS_DB)
     now = datetime.now(timezone.utc)
     week_ago = now - timedelta(days=7)
