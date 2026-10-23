@@ -761,38 +761,42 @@ async def cancel_support_link(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 # ==================== APIS MANAGEMENT ====================
+def _api_status_icon(status):
+    return {"active": "🟢", "exhausted": "🟡", "invalid": "🔴"}.get(status, "⚪")
+
+
+def _format_api_key(api_key):
+    if not api_key:
+        return "---"
+    if len(api_key) <= 12:
+        return api_key
+    return f"{api_key[:6]}...{api_key[-6:]}"
+
+
 def _apis_menu_text() -> str:
     apis = get_api_list()
     active = [a for a in apis if a.get("status") == "active"]
     exhausted = [a for a in apis if a.get("status") == "exhausted"]
     invalid = [a for a in apis if a.get("status") == "invalid"]
+    total_remaining = sum(max(0, int(a.get("limit", 0)) - int(a.get("used", 0))) for a in active)
     lines = ["🔑 *إدارة APIs*", ""]
     lines.append(f"📊 *الإجمالي:* `{len(apis)}` / `{MAX_APIS_TOTAL}`")
     lines.append(f"🟢 *نشطة:* `{len(active)}`")
     lines.append(f"🟡 *مستنفدة:* `{len(exhausted)}`")
     lines.append(f"🔴 *معطلة:* `{len(invalid)}`")
-    lines.append("")
-    if active:
-        lines.append("*APIs النشطة:*")
-        for idx, api in enumerate(active, 1):
-            used = int(api.get("used", 0))
-            limit = int(api.get("limit", 0))
-            remaining = max(0, limit - used)
-            created = api.get("created_at", "")[:10]
-            lines.append(f"  {idx}. `...{api.get('api_key','')[-8:]}` — متبقي: `{remaining}`/{limit} — أُضيف: {created}")
-    else:
-        lines.append("⚠️ _لا توجد APIs نشطة حالياً._")
-    if exhausted or invalid:
-        lines.append("")
-        lines.append("*سجل APIs المنتهية/المعطلة (آخر 5):*")
-        combined = exhausted + invalid
-        for api in combined[-5:]:
-            status_icon = "🟡" if api.get("status") == "exhausted" else "🔴"
-            lines.append(f"  {status_icon} `...{api.get('api_key','')[-8:]}` — {api.get('status')}")
+    lines.append(f"🔢 *إجمالي المتبقي في النشطة:* `{total_remaining}` استعمال")
     lines.append("")
     lines.append(f"💰 *مكافأة إضافة API صالح:* `${API_ADD_BONUS:.2f}`")
     lines.append(f"📅 *الحد اليومي لكل أدمن:* `{MAX_APIS_PER_DAY_PER_ADMIN}`")
     lines.append(f"📊 *حد التحذير:* `{API_WARNING_THRESHOLD}` استعمال متبقٍ")
+    if active:
+        lines.append("")
+        lines.append("*APIs النشطة (مختصر):*")
+        for idx, api in enumerate(active, 1):
+            used = int(api.get("used", 0))
+            limit = int(api.get("limit", 0))
+            remaining = max(0, limit - used)
+            lines.append(f"  {idx}. `{_format_api_key(api.get('api_key',''))}` — متبقي: `{remaining}`/{limit}")
     return "\n".join(lines)
 
 
@@ -808,16 +812,130 @@ async def apis_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buttons.append(("➕ إضافة API جديد", "api_add_start"))
     else:
         buttons.append(("⚠️ العدد وصل للحد الأقصى (30)", "noop"))
+    if apis:
+        buttons.append((f"📋 عرض تفاصيل {len(apis)} API", "apis_list_details"))
     if actor.id == OWNER_ID:
-        for api in apis[-10:]:
-            key_tail = api.get("api_key", "")[-6:]
-            label = f"🗑️ ...{key_tail} ({api.get('status')})"
-            buttons.append((label, f"api_delete:{api.get('id')}"))
         buttons.append(("🔙 إعدادات المالك", "owner_panel"))
     else:
         buttons.append(("🔙 الإدارية", "admin_panel"))
     await query.edit_message_text(_apis_menu_text(), parse_mode=ParseMode.MARKDOWN,
                                   reply_markup=kb_vertical(buttons))
+
+
+async def show_api_details(update: Update, context: ContextTypes.DEFAULT_TYPE, api_id=None):
+    query = update.callback_query
+    apis = get_api_list()
+    if not apis:
+        await query.edit_message_text(
+            "📭 لا توجد APIs مضافة بعد.",
+            reply_markup=kb_single("🔙 APIs", "apis_menu"))
+        return
+
+    # ═══ تفاصيل API واحد ═══
+    if api_id:
+        api = next((a for a in apis if a.get("id") == api_id), None)
+        if not api:
+            await query.answer("⚠️ API غير موجود.", show_alert=True)
+            return
+        used = int(api.get("used", 0))
+        limit = int(api.get("limit", 0))
+        remaining = max(0, limit - used)
+        status = api.get("status", "unknown")
+        status_text = {"active": "🟢 نشط", "exhausted": "🟡 مستنفد", "invalid": "🔴 معطل"}.get(status, status)
+        created_at = _format_iso_time(api.get("created_at")) or "—"
+        last_used = _format_iso_time(api.get("last_used_at")) or "لم يُستخدم بعد"
+        created_by = api.get("created_by", "—")
+        created_by_username = api.get("created_by_username", "")
+        created_by_name = api.get("created_by_name", "")
+
+        if str(created_by) == str(OWNER_ID):
+            creator = "👑 المالك"
+        else:
+            creator = f"🛠 أدمن <code>{created_by}</code>"
+            if created_by_name:
+                creator += f"\n     • الاسم: {tg_html_escape(created_by_name)}"
+            if created_by_username:
+                creator += f"\n     • اليوزر: @{tg_html_escape(created_by_username)}"
+
+        percent = (used / limit * 100) if limit else 0
+        text = (
+            f"🔑 <b>تفاصيل API</b>\n\n"
+            f"🔐 <b>المفتاح:</b> <code>{_format_api_key(api.get('api_key', ''))}</code>\n"
+            f"📊 <b>الحالة:</b> {status_text}\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"📈 <b>الاستعمال:</b>\n"
+            f"  • مستخدم: <code>{used}</code>\n"
+            f"  • الحد: <code>{limit}</code>\n"
+            f"  • <b>متبقي: <code>{remaining}</code></b>\n"
+            f"  • النسبة: <code>{percent:.1f}%</code>\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"🕐 <b>التواريخ:</b>\n"
+            f"  • أُضيف: <code>{created_at}</code>\n"
+            f"  • آخر استعمال: <code>{last_used}</code>\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"👤 <b>أضيف بواسطة:</b>\n  {creator}"
+        )
+
+        current_page = context.user_data.get("apis_page", 0)
+        buttons = []
+        if update.effective_user.id == OWNER_ID:
+            buttons.append(("🗑️ حذف هذا API", f"api_delete:{api_id}"))
+        buttons.append(("🔙 قائمة APIs", f"apis_details_page:{current_page}"))
+        buttons.append(("🔙 APIs", "apis_menu"))
+        await query.edit_message_text(
+            text, parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
+        return
+
+    # ═══ القائمة الكاملة (مع Pagination) ═══
+    page = context.user_data.get("apis_page", 0)
+    page_size = 5
+    total = len(apis)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+    context.user_data["apis_page"] = page
+    start = page * page_size
+    page_apis = apis[start:start + page_size]
+
+    lines = [f"📋 <b>تفاصيل جميع APIs</b> — صفحة {page+1}/{total_pages}\n"]
+    for idx, api in enumerate(page_apis, start + 1):
+        used = int(api.get("used", 0))
+        limit = int(api.get("limit", 0))
+        remaining = max(0, limit - used)
+        status_icon = _api_status_icon(api.get("status", ""))
+        created = _format_iso_time(api.get("created_at")) or "—"
+        created_by = api.get("created_by", "—")
+        if str(created_by) == str(OWNER_ID):
+            creator_short = "👑 المالك"
+        else:
+            uname = api.get("created_by_username", "")
+            creator_short = f"🛠 {created_by}" + (f" (@{uname})" if uname else "")
+        lines.append(
+            f"{start+idx}. {status_icon} <code>{_format_api_key(api.get('api_key', ''))}</code>\n"
+            f"    • متبقي: <code>{remaining}</code>/<code>{limit}</code>\n"
+            f"    • أُضيف: <code>{created}</code>\n"
+            f"    • بواسطة: {creator_short}\n"
+        )
+
+    buttons = []
+    for api in page_apis:
+        short = _format_api_key(api.get("api_key", ""))
+        status_icon = _api_status_icon(api.get("status", ""))
+        buttons.append((f"{status_icon} {short}", f"api_view:{api.get('id')}"))
+
+    nav = []
+    if page > 0:
+        nav.append(("⬅️ السابق", f"apis_details_page:{page-1}"))
+    if page < total_pages - 1:
+        nav.append(("التالي ➡️", f"apis_details_page:{page+1}"))
+    if len(nav) > 1:
+        buttons.append(nav)
+    elif nav:
+        buttons.append(nav[0])
+
+    buttons.append(("🔙 APIs", "apis_menu"))
+    await query.edit_message_text(
+        "\n".join(lines), parse_mode=ParseMode.HTML,
+        reply_markup=kb_vertical(buttons))
 
 
 async def api_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -939,6 +1057,8 @@ async def handle_api_limit_input(update: Update, context: ContextTypes.DEFAULT_T
         "status": "active",
         "created_at": now_iso,
         "created_by": actor.id,
+        "created_by_username": actor.username or "",
+        "created_by_name": actor.full_name or "",
     }
     apis.append(new_api)
     save_api_list(apis)
