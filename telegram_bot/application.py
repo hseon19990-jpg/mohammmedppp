@@ -37,7 +37,12 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if mode in ("daily_gift_set_emails", "daily_gift_set_reward"):
         await handle_daily_gift_input(update, context); return
 
-    # ═══ Store quantity / message (multi-step) ═══
+    # ═══ Store quantity / message (multi-step — NEW flow via buy_flow) ═══
+    if context.user_data.get("buy_flow"):
+        await handle_purchase_message(update, context)
+        return
+
+    # ═══ Store quantity / message (multi-step — LEGACY flow) ═══
     if user_id in PENDING_PURCHASES:
         await handle_purchase_message(update, context)
         return
@@ -380,6 +385,12 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await owner_store_section(update, context)
     elif data == "store_add_category":
         await store_add_category(update, context)
+    elif data == "store_delete_category_menu":
+        await store_delete_category_menu(update, context)
+    elif data.startswith("store_delete_category_confirm:"):
+        await store_delete_category_confirm(update, context)
+    elif data.startswith("store_delete_category_execute:"):
+        await store_delete_category_execute(update, context)
     elif data.startswith("store_category:"):
         await store_category_menu(update, context)
     elif data.startswith("store_add_service:"):
@@ -459,6 +470,8 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await user_category_menu(update, context)
     elif data.startswith("user_buy:"):
         await user_buy_service(update, context)
+    elif data.startswith("buy_type:"):
+        await buy_type_selected(update, context)
     elif data.startswith("deliver_order:"):
         await deliver_order(update, context)
     elif data == "all_accounts_section":
