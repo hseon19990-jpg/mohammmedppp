@@ -2,6 +2,7 @@
 
 from telegram_bot.core import *
 
+
 # ==================== OWNER STATS CHART ====================
 def create_owner_stats_chart(path: Path, password_only: int, extra_sections: int) -> bool:
     try:
@@ -391,7 +392,7 @@ def _build_email_record_report(match: dict, position: int, total: int) -> str:
     lines.append(f"<b>━━━ سجل {position}/{total} ━━━</b>")
     lines.append(f"<b>الحالة:</b> {_format_record_status(record_type, rec)}")
     lines.append(f"<b>نوع السجل:</b> <code>{record_type}</code>")
-    
+
     acc_type = rec.get("account_type", "old")
     type_text = "🆕 جديد" if acc_type == "new" else "📝 قديم"
     lines.append(f"<b>نوع الإيميل:</b> {type_text}")
@@ -669,10 +670,13 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("store_action", None)
     context.user_data.pop("contest_build", None)
     context.user_data.pop("contest_build_step", None)
+    context.user_data.pop("api_add_step", None)
     buttons = [
         maintenance_toggle_button(),
         ("🔗 رابط الدعم", "support_link_settings"),
         ("👥 الإدارية", "admin_management"),
+        ("🔑 إدارة APIs", "apis_menu"),
+        ("🚫 إدارة الحظر", "bans_menu"),
         ("💰 أسعار المستويات", "set_tier_prices"),
         ("📋 الطلبات", "approval_requests"),
         ("🎯 إدارة المسابقة", "contest_menu"),
@@ -754,6 +758,299 @@ async def cancel_support_link(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     context.user_data.pop("step", None)
     await owner_panel(update, context)
+
+
+# ==================== APIS MANAGEMENT ====================
+def _apis_menu_text() -> str:
+    apis = get_api_list()
+    active = [a for a in apis if a.get("status") == "active"]
+    exhausted = [a for a in apis if a.get("status") == "exhausted"]
+    invalid = [a for a in apis if a.get("status") == "invalid"]
+    lines = ["🔑 *إدارة APIs*", ""]
+    lines.append(f"📊 *الإجمالي:* `{len(apis)}` / `{MAX_APIS_TOTAL}`")
+    lines.append(f"🟢 *نشطة:* `{len(active)}`")
+    lines.append(f"🟡 *مستنفدة:* `{len(exhausted)}`")
+    lines.append(f"🔴 *معطلة:* `{len(invalid)}`")
+    lines.append("")
+    if active:
+        lines.append("*APIs النشطة:*")
+        for idx, api in enumerate(active, 1):
+            used = int(api.get("used", 0))
+            limit = int(api.get("limit", 0))
+            remaining = max(0, limit - used)
+            created = api.get("created_at", "")[:10]
+            lines.append(f"  {idx}. `...{api.get('api_key','')[-8:]}` — متبقي: `{remaining}`/{limit} — أُضيف: {created}")
+    else:
+        lines.append("⚠️ _لا توجد APIs نشطة حالياً._")
+    if exhausted or invalid:
+        lines.append("")
+        lines.append("*سجل APIs المنتهية/المعطلة (آخر 5):*")
+        combined = exhausted + invalid
+        for api in combined[-5:]:
+            status_icon = "🟡" if api.get("status") == "exhausted" else "🔴"
+            lines.append(f"  {status_icon} `...{api.get('api_key','')[-8:]}` — {api.get('status')}")
+    lines.append("")
+    lines.append(f"💰 *مكافأة إضافة API صالح:* `${API_ADD_BONUS:.2f}`")
+    lines.append(f"📅 *الحد اليومي لكل أدمن:* `{MAX_APIS_PER_DAY_PER_ADMIN}`")
+    lines.append(f"📊 *حد التحذير:* `{API_WARNING_THRESHOLD}` استعمال متبقٍ")
+    return "\n".join(lines)
+
+
+async def apis_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    actor = update.effective_user
+    if actor.id != OWNER_ID and not is_admin(actor.id):
+        await query.answer("🚫", show_alert=True)
+        return
+    apis = get_api_list()
+    buttons = []
+    if len(apis) < MAX_APIS_TOTAL:
+        buttons.append(("➕ إضافة API جديد", "api_add_start"))
+    else:
+        buttons.append(("⚠️ العدد وصل للحد الأقصى (30)", "noop"))
+    if actor.id == OWNER_ID:
+        for api in apis[-10:]:
+            key_tail = api.get("api_key", "")[-6:]
+            label = f"🗑️ ...{key_tail} ({api.get('status')})"
+            buttons.append((label, f"api_delete:{api.get('id')}"))
+        buttons.append(("🔙 إعدادات المالك", "owner_panel"))
+    else:
+        buttons.append(("🔙 الإدارية", "admin_panel"))
+    await query.edit_message_text(_apis_menu_text(), parse_mode=ParseMode.MARKDOWN,
+                                  reply_markup=kb_vertical(buttons))
+
+
+async def api_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    actor = update.effective_user
+    if actor.id != OWNER_ID and not is_admin(actor.id):
+        await query.answer("🚫", show_alert=True)
+        return
+    apis = get_api_list()
+    if len(apis) >= MAX_APIS_TOTAL:
+        await query.answer("⚠️ العدد وصل للحد الأقصى.", show_alert=True)
+        return
+    if actor.id != OWNER_ID:
+        today_count = count_admin_api_additions_today(actor.id)
+        if today_count >= MAX_APIS_PER_DAY_PER_ADMIN:
+            await query.answer(
+                f"⚠️ وصلت للحد اليومي ({MAX_APIS_PER_DAY_PER_ADMIN} APIs/يوم).",
+                show_alert=True)
+            return
+    context.user_data["api_add_step"] = "key"
+    context.user_data["api_add_actor"] = actor.id
+    back_cb = "apis_menu"
+    await query.edit_message_text(
+        "🔑 *إضافة API جديد*\n\n"
+        "📌 *الخطوة 1/2:* أرسل مفتاح API الخاص بـ AbstractAPI\n"
+        "(يُستخدم لفحص الإيميلات).\n\n"
+        "💡 سيتم التحقق من صحة المفتاح قبل قبوله.\n\n"
+        f"<i>أو 'إلغاء' للعودة</i>",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_single("🔙 إلغاء", back_cb))
+
+
+async def handle_api_key_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    actor = update.effective_user
+    actor_id = context.user_data.get("api_add_actor")
+    if actor.id != actor_id:
+        return
+    if actor.id != OWNER_ID and not is_admin(actor.id):
+        return
+    text = update.message.text.strip()
+    if text.casefold() in {"إلغاء", "الغاء", "cancel", "отмена"}:
+        context.user_data.pop("api_add_step", None)
+        context.user_data.pop("api_add_actor", None)
+        await update.message.reply_text("❌ تم الإلغاء.",
+                                        reply_markup=kb_single("🔙 APIs", "apis_menu"))
+        return
+
+    existing = {a.get("api_key") for a in get_api_list()}
+    if text in existing:
+        await update.message.reply_text(
+            "⚠️ هذا المفتاح مُضاف مسبقاً. أرسل مفتاحاً جديداً.",
+            reply_markup=kb_single("🔙 إلغاء", "apis_menu"))
+        return
+
+    status_msg = await update.message.reply_text("🔍 جاري التحقق من صحة المفتاح...")
+    ok, message = await asyncio.to_thread(test_api_key_sync, text)
+    if not ok:
+        try:
+            await status_msg.edit_text(
+                f"❌ *فشل التحقق*\n\n`{message}`\n\n"
+                "📌 تأكد من صحة المفتاح وأنه فعّال ثم أعد الإرسال.",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=kb_single("🔙 إلغاء", "apis_menu"))
+        except Exception:
+            pass
+        return
+
+    try:
+        await status_msg.edit_text("✅ تم التحقق من المفتاح بنجاح!")
+    except Exception:
+        pass
+
+    context.user_data["api_add_key"] = text
+    context.user_data["api_add_step"] = "limit"
+    await update.message.reply_text(
+        "✅ *تم التحقق من المفتاح بنجاح*\n\n"
+        "📌 *الخطوة 2/2:* أرسل عدد الاستعمالات (Limit) المسموح لهذا المفتاح.\n\n"
+        "📊 أمثلة:\n"
+        "• مفتاح مجاني من AbstractAPI: `100` استعمال/شهر\n"
+        "• مفتاح مدفوع: حسب خطتك\n\n"
+        f"<i>أو 'إلغاء' للعودة</i>",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_single("🔙 إلغاء", "apis_menu"))
+
+
+async def handle_api_limit_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    actor = update.effective_user
+    actor_id = context.user_data.get("api_add_actor")
+    if actor.id != actor_id:
+        return
+    text = update.message.text.strip()
+    if text.casefold() in {"إلغاء", "الغاء", "cancel", "отмена"}:
+        for k in ("api_add_step", "api_add_actor", "api_add_key"):
+            context.user_data.pop(k, None)
+        await update.message.reply_text("❌ تم الإلغاء.",
+                                        reply_markup=kb_single("🔙 APIs", "apis_menu"))
+        return
+    try:
+        limit = int(text)
+        if limit <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("⚠️ أرسل رقماً صحيحاً أكبر من صفر.")
+        return
+
+    api_key = context.user_data.get("api_add_key")
+    if not api_key:
+        await update.message.reply_text("⚠️ حدث خطأ. أعد المحاولة.",
+                                        reply_markup=kb_single("🔙 APIs", "apis_menu"))
+        return
+
+    apis = get_api_list()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    new_api = {
+        "id": secrets.token_hex(8),
+        "api_key": api_key,
+        "limit": limit,
+        "used": 0,
+        "status": "active",
+        "created_at": now_iso,
+        "created_by": actor.id,
+    }
+    apis.append(new_api)
+    save_api_list(apis)
+
+    # bonus
+    bonus_msg = ""
+    if actor.id != OWNER_ID:
+        record_admin_api_addition(actor.id)
+        actor_data = get_user(actor.id)
+        actor_data["balance"] = clamp_money(float(actor_data.get("balance", 0.0)) + API_ADD_BONUS)
+        actor_data["total_credited_balance"] = clamp_money(
+            float(actor_data.get("total_credited_balance", 0.0)) + API_ADD_BONUS)
+        add_transaction(actor_data, "credit", API_ADD_BONUS, "مكافأة إضافة API صالح")
+        save_user(actor.id, actor_data)
+        bonus_msg = f"\n\n💰 *تم إضافة `${API_ADD_BONUS:.2f}` إلى رصيدك.*"
+
+    for k in ("api_add_step", "api_add_actor", "api_add_key"):
+        context.user_data.pop(k, None)
+
+    await update.message.reply_text(
+        f"✅ *تمت إضافة API بنجاح!*\n\n"
+        f"🔑 المفتاح: `...{api_key[-8:]}`\n"
+        f"📊 الحد: `{limit}` استعمال\n"
+        f"🟢 الحالة: نشط{bonus_msg}",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_single("🔙 APIs", "apis_menu"))
+
+    # notify owner if added by admin
+    if actor.id != OWNER_ID:
+        try:
+            await context.bot.send_message(
+                chat_id=OWNER_ID,
+                text=(f"🔑 *API جديد أُضيف من الأدمن*\n\n"
+                      f"👤 `{actor.id}` (@{actor.username or 'لا يوجد'})\n"
+                      f"📊 الحد: `{limit}`\n"
+                      f"💰 مكافأة الأدمن: `${API_ADD_BONUS:.2f}`"),
+                parse_mode=ParseMode.MARKDOWN)
+        except Exception:
+            pass
+
+
+async def api_delete_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    try:
+        api_id = query.data.split(":", 1)[1]
+    except (ValueError, IndexError):
+        await query.answer("⚠️", show_alert=True)
+        return
+    apis = [a for a in get_api_list() if a.get("id") != api_id]
+    save_api_list(apis)
+    await query.answer("✅ تم حذف API.")
+    await apis_menu(update, context)
+
+
+# ==================== BANS & RESTRICTIONS MANAGEMENT ====================
+async def bans_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    banned = get_banned_users()
+    if not banned:
+        await query.edit_message_text(
+            "✅ *لا يوجد أعضاء محظورون أو مقيدون حالياً.*",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=kb_single("🔙 إعدادات المالك", "owner_panel"))
+        return
+    lines = [f"🚫 *الأعضاء المحظورون/المقيدون:* {len(banned)}", ""]
+    buttons = []
+    for idx, b in enumerate(banned[:15], 1):
+        kind_icon = "🔴" if b["kind"] == "ban" else "🟠"
+        kind_label = "حظر" if b["kind"] == "ban" else "تقييد"
+        until_display = _format_iso_time(b["until"]) or "—"
+        name = b.get("name") or "غير معروف"
+        username = b.get("username") or "لا يوجد"
+        lines.append(
+            f"{idx}. {kind_icon} `{b['user_id']}` — {tg_html_escape(name)} (@{tg_html_escape(username)})\n"
+            f"   ⏳ {kind_label} حتى: {until_display}\n")
+        buttons.append((f"✅ إزالة القيد عن {b['user_id']}",
+                        f"unban_member:{b['user_id']}"))
+    buttons.append(("🔙 إعدادات المالك", "owner_panel"))
+    await query.edit_message_text(
+        "\n".join(lines), parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_vertical(buttons))
+
+
+async def unban_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    try:
+        user_id = int(query.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        await query.answer("⚠️", show_alert=True)
+        return
+    changed = clear_user_restriction(user_id)
+    if changed:
+        await query.answer(f"✅ تم إزالة القيد عن {user_id}")
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text="✅ *تم إزالة القيد/الحظر عن حسابك.*\n\nيمكنك الآن إرسال الإيميلات والسحب مجدداً.",
+                parse_mode=ParseMode.MARKDOWN)
+        except Exception:
+            pass
+    else:
+        await query.answer("ℹ️ لم يكن هناك قيد أصلاً.", show_alert=True)
+    await bans_menu(update, context)
 
 
 # ==================== CONTEST MENU ====================
@@ -1149,6 +1446,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("step", None)
     buttons = [
         ("⚙️ إعدادات الأدمن", "admin_settings"),
+        ("🔑 إدارة APIs", "apis_menu"),
         ("🔙 القائمة الرئيسية", "main_menu"),
     ]
     await query.edit_message_text(
@@ -1163,6 +1461,7 @@ async def admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     buttons = [
         ("📋 طلبات", "admin_requests:0"),
+        ("🔑 إدارة APIs", "apis_menu"),
         ("🔙 الإدارية", "admin_panel"),
     ]
     await query.edit_message_text(
