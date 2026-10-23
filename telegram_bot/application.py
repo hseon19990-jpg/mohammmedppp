@@ -23,31 +23,25 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
 
-    # ═══ API management input ═══
     api_step = context.user_data.get("api_add_step")
     if api_step == "key":
         await handle_api_key_input(update, context); return
 
-    # ═══ Withdraw limits (global) ═══
     mode = context.user_data.get("mode")
     if mode in ("withdraw_set_min", "withdraw_set_max"):
         await handle_withdraw_input(update, context); return
 
-    # ═══ Daily gift settings (owner) ═══
     if mode in ("daily_gift_set_emails", "daily_gift_set_reward"):
         await handle_daily_gift_input(update, context); return
 
-    # ═══ Store flow (buy_flow / legacy) ═══
     if context.user_data.get("buy_flow"):
         await handle_purchase_message(update, context); return
     if user_id in PENDING_PURCHASES:
         await handle_purchase_message(update, context); return
 
-    # ═══ Service editing inputs (owner) ═══
     if str(context.user_data.get("store_action", "")).startswith("edit_service_"):
         await handle_store_input(update, context); return
 
-    # ═══ Sell new email flow ═══
     sell_step = context.user_data.get("step")
     if sell_step == "sell_new_email_totp":
         await handle_sell_new_email_totp(update, context); return
@@ -151,6 +145,7 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ أرسل رقماً.")
         return
 
+    # ═══ Store action (add_category, add_service_*, set_channel, إلخ) ═══
     if context.user_data.get("store_action"):
         await handle_store_input(update, context); return
 
