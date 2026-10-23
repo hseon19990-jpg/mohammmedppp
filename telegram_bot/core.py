@@ -1,5 +1,5 @@
 """
-Advanced Telegram Account Manager Bot - v6.3
+Advanced Telegram Account Manager Bot - v6.4
 """
 
 import asyncio
@@ -285,6 +285,14 @@ BAN_THRESHOLD = 3
 BAN_FIRST_DURATION_HOURS = 24
 BAN_WEEKLY_DURATION_HOURS = 24 * 7
 
+# API rotation system limits
+MAX_APIS_TOTAL = 30
+MAX_APIS_PER_DAY_PER_ADMIN = 3
+API_ADD_BONUS = 0.05
+API_WARNING_THRESHOLD = 50
+VERIFICATION_FAILURES_THRESHOLD = 3
+RESTRICTION_DURATION_HOURS = 1
+
 # ==================== SELL NEW EMAIL GENERATOR ====================
 FIRST_NAMES_EN = [
     "James", "John", "Robert", "Michael", "William", "David", "Richard", "Joseph",
@@ -300,7 +308,6 @@ FIRST_NAMES_EN = [
 
 
 def generate_sell_email_credentials() -> dict:
-    """توليد اسم + إيميل + باسورد عشوائي لعملية (بيع إيميل جديد)."""
     first_name = random.choice(FIRST_NAMES_EN)
     letters = "".join(secrets.choice(string.ascii_lowercase) for _ in range(18))
     digits = "".join(secrets.choice(string.digits) for _ in range(5))
@@ -314,7 +321,6 @@ _EMAIL_AVAILABILITY_CACHE: Dict[str, Tuple[float, Optional[bool]]] = {}
 _LAST_CHECK_TIME = 0.0
 _CHECK_MIN_INTERVAL = 1.5
 
-# كلمات تشير صراحةً إلى أن الاسم محجوز
 _TAKEN_MARKERS = (
     "username is taken",
     "that username is taken",
@@ -329,15 +335,6 @@ _TAKEN_MARKERS = (
 
 
 def check_email_availability_sync(username: str) -> Optional[bool]:
-    """
-    فحص توفر اسم المستخدم في جوجل (InputValidator).
-
-    يعيد:
-      True  -> متاح (غير محجوز)
-      False -> محجوز (الحساب موجود فعلاً) — Google أكدت صراحةً
-      None  -> فشل الفحص (رسالة خطأ غير محددة، HTTP، شبكة، ...)
-               لا نستنتج من None أن الإيميل موجود.
-    """
     try:
         url = "https://accounts.google.com/InputValidator?resource=SignUp"
         payload = json.dumps({
@@ -390,7 +387,6 @@ def check_email_availability_sync(username: str) -> Optional[bool]:
 
             if any(marker in combined for marker in _TAKEN_MARKERS):
                 return False
-
             return None
 
         return True
@@ -403,55 +399,39 @@ def check_email_availability_sync(username: str) -> Optional[bool]:
 
 
 async def check_email_availability(email: str, use_cache: bool = True) -> Optional[bool]:
-    """نسخة Async مع كاش + Rate Limit."""
     global _LAST_CHECK_TIME
-
     if use_cache:
         cached = _EMAIL_AVAILABILITY_CACHE.get(email)
         if cached and (time.time() - cached[0]) < 180:
             return cached[1]
-
     elapsed = time.time() - _LAST_CHECK_TIME
     if elapsed < _CHECK_MIN_INTERVAL:
         await asyncio.sleep(_CHECK_MIN_INTERVAL - elapsed)
     _LAST_CHECK_TIME = time.time()
-
     username = email.split("@")[0]
     result = await asyncio.to_thread(check_email_availability_sync, username)
-
     if result is not None:
         _EMAIL_AVAILABILITY_CACHE[email] = (time.time(), result)
-
     return result
 
 
-# ==================== ABSTRACTAPI CHECKER (Reputation) ====================
-def check_email_exists_via_abstractapi_sync(email: str) -> Optional[bool]:
-    """
-    فحص وجود الحساب عبر AbstractAPI (منتج Email Reputation).
-    يعيد:
-      True  -> الحساب موجود أو قابل للتسليم (is_valid or deliverable)
-      False -> الحساب غير موجود أو غير صالح
-      None  -> فشل الفحص (مفتاح غير موجود، خطأ شبكة، أو حالة غير معروفة)
-    """
-    api_key = os.environ.get("ABSTRACT_API_KEY", "").strip()
-    if not api_key:
-        logger.warning("⚠️ ABSTRACT_API_KEY is missing in environment variables!")
-        return None
+# ==================== ABSTRACTAPI CHECKER (single key) ====================
+def _call_abstractapi_key(api_key: str, email: str) -> Optional[bool]:
+    """Single abstract API call. Returns True/False/None."""
     try:
         url = "https://emailreputation.abstractapi.com/v1/"
         params = urllib.parse.urlencode({"api_key": api_key, "email": email})
         req = Request(f"{url}?{params}", headers={"Accept": "application/json"})
         with urlopen(req, timeout=10) as response:
             body = response.read().decode("utf-8", errors="ignore")
-            logger.info(f"AbstractAPI Reputation response for {email}: {body[:300]}")
-            data = json.loads(body)
-
+        data = json.loads(body)
+        if "error" in data and data.get("error"):
+            logger.warning("AbstractAPI returned error for %s", email)
+            return None
         is_valid = data.get("is_valid")
-        deliverability = str(data.get("email_deliverability", {}).get("status", "")).lower()
-        is_smtp_valid = data.get("is_smtp_valid", {}).get("value")
-        is_mx_found = data.get("is_mx_found", {}).get("value")
-
+        deliverability = str((data.get("email_deliverability") or {}).get("status", "")).lower()
+        is_smtp_valid = (data.get("is_smtp_valid") or {}).get("value")
+        is_mx_found = (data.get("is_mx_found") or {}).get("value")
         if is_valid is True or deliverability in ("deliverable", "risky"):
             return True
         if is_smtp_valid is True and is_mx_found is True:
@@ -459,37 +439,203 @@ def check_email_exists_via_abstractapi_sync(email: str) -> Optional[bool]:
         if is_valid is False or deliverability in ("undeliverable", "invalid"):
             return False
         return None
+    except Exception:
+        logger.exception("AbstractAPI call failed")
+        return None
+
+
+def check_email_exists_via_abstractapi_sync(email: str) -> Optional[bool]:
+    """Single-key check via ENV (legacy/fallback)."""
+    api_key = os.environ.get("ABSTRACT_API_KEY", "").strip()
+    if not api_key:
+        logger.warning("⚠️ ABSTRACT_API_KEY is missing in environment variables!")
+        return None
+    return _call_abstractapi_key(api_key, email)
+
+
+# ==================== API ROTATION SYSTEM ====================
+def get_api_list() -> list:
+    config = load_config()
+    apis = config.get("email_verification_apis", [])
+    return apis if isinstance(apis, list) else []
+
+
+def save_api_list(apis: list):
+    config = load_config()
+    config["email_verification_apis"] = apis
+    save_config(config)
+
+
+def get_active_api() -> Optional[dict]:
+    for api in get_api_list():
+        if api.get("status") == "active":
+            if int(api.get("used", 0)) < int(api.get("limit", 0)):
+                return api
+    return None
+
+
+def mark_api_used(api_id: str) -> Optional[dict]:
+    """Increments counter. Returns warning dict if near exhaustion."""
+    apis = get_api_list()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for api in apis:
+        if api.get("id") == api_id:
+            api["used"] = int(api.get("used", 0)) + 1
+            api["last_used_at"] = now_iso
+            if api["used"] >= int(api.get("limit", 0)):
+                api["status"] = "exhausted"
+            break
+    save_api_list(apis)
+    active = [a for a in apis if a.get("status") == "active"]
+    if len(active) == 1:
+        remaining = int(active[0].get("limit", 0)) - int(active[0].get("used", 0))
+        if remaining <= API_WARNING_THRESHOLD:
+            return {"warning": True, "remaining": max(0, remaining), "api": active[0]}
+    if len(active) == 0:
+        return {"warning": True, "remaining": 0, "api": None}
+    return None
+
+
+def mark_api_invalid(api_id: str):
+    apis = get_api_list()
+    for api in apis:
+        if api.get("id") == api_id:
+            api["status"] = "invalid"
+            break
+    save_api_list(apis)
+
+
+def count_admin_api_additions_today(admin_id: int) -> int:
+    config = load_config()
+    log = config.get("api_additions_log", {}) or {}
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return sum(1 for d in log.get(str(admin_id), []) if d == today)
+
+
+def record_admin_api_addition(admin_id: int):
+    config = load_config()
+    log = config.setdefault("api_additions_log", {})
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    log.setdefault(str(admin_id), []).append(today)
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
+    for uid in list(log.keys()):
+        log[uid] = [d for d in log[uid] if d >= cutoff]
+    save_config(config)
+
+
+def test_api_key_sync(api_key: str) -> Tuple[bool, str]:
+    """Tests an API key by making a sample call. Returns (ok, message)."""
+    try:
+        url = "https://emailreputation.abstractapi.com/v1/"
+        params = urllib.parse.urlencode({"api_key": api_key, "email": "test@gmail.com"})
+        req = Request(f"{url}?{params}", headers={"Accept": "application/json"})
+        with urlopen(req, timeout=12) as response:
+            body = response.read().decode("utf-8", errors="ignore")
+        data = json.loads(body)
+        err = data.get("error")
+        if err:
+            msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
+            return False, f"API error: {msg[:150]}"
+        if "is_valid" in data or "email_deliverability" in data:
+            return True, "OK"
+        return False, "Unexpected response from API"
     except urllib.error.HTTPError as exc:
-        error_body = exc.read().decode("utf-8", errors="ignore")
-        logger.warning(f"AbstractAPI HTTP {exc.code} for {email}: {error_body[:300]}")
-        return None
+        body = exc.read().decode("utf-8", errors="ignore")
+        return False, f"HTTP {exc.code}: {body[:150]}"
     except Exception as exc:
-        logger.warning("AbstractAPI check failed: %s: %s", type(exc).__name__, exc)
-        return None
+        return False, f"Error: {type(exc).__name__}"
+
+
+async def notify_api_warning(context, warning: dict):
+    """Sends a warning to owner + all admins."""
+    if not warning or not warning.get("warning"):
+        return
+    remaining = int(warning.get("remaining", 0))
+    if warning.get("api"):
+        text = (f"⚠️ *تنبيه: APIs على وشك الانتهاء*\n\n"
+                f"📊 متبقي في آخر API: *{remaining}* استعمال\n\n"
+                f"📌 يرجى إضافة API جديد من لوحة المالك/الأدمن.")
+    else:
+        text = ("🚨 *تنبيه عاجل: لا توجد APIs فعّالة!*\n\n"
+                "تم استهلاك جميع APIs. الفحص التلقائي للإيميلات معطّل حالياً.\n\n"
+                "📌 يرجى إضافة API جديد فوراً من لوحة المالك/الأدمن.")
+    targets = {OWNER_ID}
+    try:
+        targets.update(load_admins())
+    except Exception:
+        pass
+    for target in targets:
+        try:
+            await context.bot.send_message(chat_id=target, text=text, parse_mode=ParseMode.MARKDOWN)
+        except Exception:
+            pass
+
+
+async def check_email_via_rotation_api(email: str, context=None) -> Optional[bool]:
+    """Tries APIs in order; returns True/False/None."""
+    tried_ids = set()
+    for _ in range(5):
+        api = None
+        for candidate in get_api_list():
+            if candidate.get("status") != "active":
+                continue
+            if int(candidate.get("used", 0)) >= int(candidate.get("limit", 0)):
+                continue
+            if candidate.get("id") in tried_ids:
+                continue
+            api = candidate
+            break
+        if api is None:
+            return None
+        tried_ids.add(api.get("id"))
+        result = await asyncio.to_thread(_call_abstractapi_key, api.get("api_key", ""), email)
+        warning = mark_api_used(api.get("id"))
+        if warning and context:
+            try:
+                await notify_api_warning(context, warning)
+            except Exception:
+                logger.exception("Failed to notify API warning")
+        if result is not None:
+            return result
+    return None
 
 
 # ==================== STRICT EMAIL EXISTENCE VERIFICATION ====================
-async def verify_gmail_account_exists_strict(email: str) -> Tuple[str, Optional[bool]]:
+async def verify_gmail_account_exists_strict(email: str, context=None) -> Tuple[str, Optional[bool]]:
     """
     التحقق الصارم من وجود حساب Gmail.
 
-    يستخدم:
-      1) AbstractAPI Email Reputation (موثوق عبر HTTPS، لا يتأثر بحظر Google)
-      2) InputValidator كاحتياط إذا لم يتوفر مفتاح API
+    الترتيب:
+      1) APIs المُضافة من المالك/الأدمن (rotation)
+      2) ABSTRACT_API_KEY من البيئة (احتياط)
+      3) InputValidator من Google (احتياط أخير)
 
-    يعيد tuple (status, exists):
-      - ("exists", True)      → الحساب موجود فعلاً
-      - ("available", False)  → الحساب غير موجود (متاح للإنشاء)
-      - ("unknown", None)     → تعذر التحقق بعد كل المحاولات
+    يعيد:
+      - ("exists", True)      → الحساب موجود
+      - ("available", False)  → الحساب غير موجود
+      - ("unknown", None)     → تعذر التحقق
     """
-    # ═══ 1) المحاولة عبر AbstractAPI أولاً ═══
-    result_api = await asyncio.to_thread(check_email_exists_via_abstractapi_sync, email)
+    # 1) Rotation APIs
+    try:
+        result_api = await check_email_via_rotation_api(email, context=context)
+    except Exception:
+        logger.exception("Rotation API check failed")
+        result_api = None
     if result_api is True:
         return "exists", True
     if result_api is False:
         return "available", False
 
-    # ═══ 2) احتياط: InputValidator (قد يفشل بسبب 429) ═══
+    # 2) ENV fallback
+    env_key = os.environ.get("ABSTRACT_API_KEY", "").strip()
+    if env_key:
+        result_env = await asyncio.to_thread(_call_abstractapi_key, env_key, email)
+        if result_env is True:
+            return "exists", True
+        if result_env is False:
+            return "available", False
+
+    # 3) InputValidator fallback
     last_result: Optional[bool] = None
     for attempt in range(3):
         try:
@@ -506,7 +652,7 @@ async def verify_gmail_account_exists_strict(email: str) -> Tuple[str, Optional[
             await asyncio.sleep(2 + attempt)
 
     logger.warning(
-        "Email existence verification returned unknown for %s after all attempts (last=%s)",
+        "Email existence verification unknown for %s after all attempts (last=%s)",
         email, last_result,
     )
     return "unknown", None
@@ -685,6 +831,11 @@ DEFAULT_USER_FIELDS = {
     "contest_wins": [], "consecutive_rejections": 0, "ban_until": "",
     "ban_level": 0, "total_rejections": 0,
     "language": "ar",
+    "created_at": "",
+    "last_sold_at": "",
+    "last_reminder_at": "",
+    "verification_failures": 0,
+    "restricted_until": "",
 }
 
 
@@ -700,6 +851,8 @@ def get_user(user_id: int) -> dict:
     merged["total_credited_balance"] = clamp_money(merged.get("total_credited_balance"))
     merged["spent_balance"] = clamp_money(merged.get("spent_balance"))
     merged["referral_earnings"] = clamp_money(merged.get("referral_earnings"))
+    if not merged.get("created_at"):
+        merged["created_at"] = datetime.now(timezone.utc).isoformat()
     return decrypt_user_data(merged)
 
 
@@ -745,7 +898,6 @@ def set_user_language(user_id: int, lang: str):
 
 
 def t(user_id: int, key: str, **kwargs) -> str:
-    """ترجمة مفتاح حسب لغة المستخدم."""
     from telegram_bot.locales import TRANSLATIONS
     lang = get_user_language(user_id)
     text = (
@@ -814,6 +966,131 @@ def register_rejection_and_maybe_ban(user_data: dict) -> Optional[Tuple[int, str
 
 def register_approval_reset(user_data: dict):
     user_data["consecutive_rejections"] = 0
+    user_data["verification_failures"] = 0
+
+
+# ==================== RESTRICTION SYSTEM (3-strike verification) ====================
+ARABIC_PATTERN = re.compile(
+    r'[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]'
+)
+
+
+def contains_arabic(text: str) -> bool:
+    return bool(ARABIC_PATTERN.search(text or ""))
+
+
+def get_active_restriction_message(user_data: dict) -> Optional[str]:
+    until_str = str(user_data.get("restricted_until", "") or "").strip()
+    if not until_str:
+        return None
+    try:
+        until = datetime.fromisoformat(until_str)
+    except ValueError:
+        return None
+    if until.tzinfo is None:
+        until = until.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    if now >= until:
+        return None
+    remaining_seconds = int((until - now).total_seconds())
+    minutes = remaining_seconds // 60
+    seconds = remaining_seconds % 60
+    return (f"🚫 <b>أنت مقيد مؤقتاً</b>\n"
+            f"⏳ الوقت المتبقي: <b>{minutes} دقيقة و {seconds} ثانية</b>\n"
+            f"<i>السبب: 3 محاولات فاشلة لإرسال إيميل غير صحيح.</i>\n"
+            f"<i>لا يمكنك إضافة إيميلات أو سحب الأرباح خلال هذه الفترة.</i>")
+
+
+def get_any_restriction_message(user_data: dict) -> Optional[str]:
+    ban_msg = get_active_ban_message(user_data)
+    if ban_msg:
+        return ban_msg
+    return get_active_restriction_message(user_data)
+
+
+def apply_verification_failure(user_data: dict) -> Tuple[int, bool]:
+    """Increments failure counter. Returns (remaining_attempts, restricted_now)."""
+    failures = int(user_data.get("verification_failures", 0) or 0) + 1
+    if failures >= VERIFICATION_FAILURES_THRESHOLD:
+        user_data["restricted_until"] = (
+            datetime.now(timezone.utc) + timedelta(hours=RESTRICTION_DURATION_HOURS)
+        ).isoformat()
+        user_data["verification_failures"] = 0
+        return 0, True
+    user_data["verification_failures"] = failures
+    return VERIFICATION_FAILURES_THRESHOLD - failures, False
+
+
+def mark_user_sold(user_data: dict):
+    user_data["last_sold_at"] = datetime.now(timezone.utc).isoformat()
+
+
+# ==================== BAN / RESTRICTION MANAGEMENT ====================
+def get_banned_users() -> list:
+    users = load_json(USERS_DB)
+    rows = []
+    now = datetime.now(timezone.utc)
+    for raw_uid, enc in users.items():
+        try:
+            uid = int(raw_uid)
+        except (TypeError, ValueError):
+            continue
+        ud = decrypt_user_data(enc)
+        info = {"user_id": uid, "kind": None, "until": None, "name": "", "username": ""}
+        ban_str = str(ud.get("ban_until", "") or "").strip()
+        if ban_str:
+            try:
+                dt = datetime.fromisoformat(ban_str)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                if dt > now:
+                    info["kind"] = "ban"
+                    info["until"] = dt.isoformat()
+            except ValueError:
+                pass
+        if info["kind"] is None:
+            rest_str = str(ud.get("restricted_until", "") or "").strip()
+            if rest_str:
+                try:
+                    dt = datetime.fromisoformat(rest_str)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    if dt > now:
+                        info["kind"] = "restriction"
+                        info["until"] = dt.isoformat()
+                except ValueError:
+                    pass
+        if info["kind"] is None:
+            continue
+        for coll in ("approved_accounts", "pending_requests", "rejected_requests"):
+            for rec in ud.get(coll, []) or []:
+                if rec.get("user_name") and not info["name"]:
+                    info["name"] = rec.get("user_name")
+                if rec.get("user_username") and not info["username"]:
+                    info["username"] = rec.get("user_username")
+                if info["name"] and info["username"]:
+                    break
+            if info["name"] and info["username"]:
+                break
+        rows.append(info)
+    return rows
+
+
+def clear_user_restriction(user_id: int) -> bool:
+    user_data = get_user(user_id)
+    changed = False
+    if user_data.get("ban_until"):
+        user_data["ban_until"] = ""
+        user_data["ban_level"] = 0
+        user_data["consecutive_rejections"] = 0
+        changed = True
+    if user_data.get("restricted_until"):
+        user_data["restricted_until"] = ""
+        user_data["verification_failures"] = 0
+        changed = True
+    if changed:
+        save_user(user_id, user_data)
+    return changed
 
 
 # ==================== SESSION PERSISTENCE ====================
@@ -1184,6 +1461,7 @@ def has_active_account_password(password: str) -> bool:
                     return True
     return False
 
+
 # ==================== IMAP VERIFICATION ====================
 IMAP_PROVIDERS = {
     "gmail.com": ("imap.gmail.com", 993), "googlemail.com": ("imap.gmail.com", 993),
@@ -1209,7 +1487,6 @@ def get_imap_host(email: str) -> Tuple[str, int]:
 
 
 def is_valid_email_domain(email: str) -> bool:
-    """التحقق من أن نطاق الإيميل موجود فعلاً وليس وهمياً (DNS Check)"""
     if not email or "@" not in email:
         return False
     domain = email.rsplit("@", 1)[-1].strip().lower()
@@ -1781,7 +2058,6 @@ async def check_contest_award(context: ContextTypes.DEFAULT_TYPE, uid: int):
 
 # ==================== AUTO CLEANUP JOB ====================
 async def cleanup_fake_requests_job(context: ContextTypes.DEFAULT_TYPE):
-    """مهمة تلقائية لرفض الطلبات الوهمية أو المعلقة لفترة طويلة"""
     users = load_json(USERS_DB)
     changed = False
     for uid, encrypted_data in users.items():
@@ -1793,7 +2069,6 @@ async def cleanup_fake_requests_job(context: ContextTypes.DEFAULT_TYPE):
             if req.get("has_app_pass"):
                 new_pending.append(req)
                 continue
-            
             timestamp = req.get("timestamp")
             is_old = False
             if timestamp:
@@ -1805,26 +2080,79 @@ async def cleanup_fake_requests_job(context: ContextTypes.DEFAULT_TYPE):
                         is_old = True
                 except Exception:
                     pass
-            
             email = req.get("email", "")
             valid_domain = await asyncio.to_thread(is_valid_email_domain, email)
-            
             if not valid_domain or is_old:
                 move_request_to_rejected(ud, req, "other", "رفض تلقائي: إيميل وهمي أو لم يكتمل خلال 12 ساعة")
                 rejected_any = True
                 changed = True
             else:
                 new_pending.append(req)
-                
         if rejected_any:
             ud["pending_requests"] = new_pending
             save_user(int(uid), ud)
-            
     if changed:
         logger.info("Auto-rejected fake or abandoned pending requests.")
 
 
-# Shared date and time helpers
+# ==================== INACTIVE MEMBER REMINDER ====================
+async def inactive_member_reminder_job(context: ContextTypes.DEFAULT_TYPE):
+    """يرسل تذكيراً للأعضاء الذين لم يبيعوا منذ أسبوع."""
+    users = load_json(USERS_DB)
+    now = datetime.now(timezone.utc)
+    week_ago = now - timedelta(days=7)
+    for raw_uid, enc in users.items():
+        try:
+            uid = int(raw_uid)
+        except (TypeError, ValueError):
+            continue
+        ud = decrypt_user_data(enc)
+        last_sold_str = ud.get("last_sold_at", "") or ""
+        if last_sold_str:
+            try:
+                dt = datetime.fromisoformat(last_sold_str)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                if dt > week_ago:
+                    continue
+            except ValueError:
+                pass
+        else:
+            created = ud.get("created_at", "") or ""
+            if not created:
+                continue
+            try:
+                dt = datetime.fromisoformat(created)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                if dt > week_ago:
+                    continue
+            except ValueError:
+                continue
+        last_rem = ud.get("last_reminder_at", "") or ""
+        if last_rem:
+            try:
+                dt = datetime.fromisoformat(last_rem)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                if dt > week_ago:
+                    continue
+            except ValueError:
+                pass
+        try:
+            await context.bot.send_message(
+                chat_id=uid,
+                text=(f"👋 <b>مرحباً!</b>\n\n"
+                      f"لاحظنا أنك لم تقم ببيع أي إيميل منذ أسبوع.\n"
+                      f"📌 أضف إيميلاً الآن واربح من خلال /start"),
+                parse_mode=ParseMode.HTML)
+            ud["last_reminder_at"] = now.isoformat()
+            save_user(uid, ud)
+        except Exception:
+            pass
+
+
+# ==================== DATE / TIME HELPERS ====================
 def parse_iso_datetime(value: Any) -> Optional[datetime]:
     if not isinstance(value, str) or not value.strip():
         return None
@@ -1845,5 +2173,6 @@ def _format_iso_time(value: Any) -> str:
         return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
     except Exception:
         return value[:19]
+
 
 __all__ = [name for name in globals() if not name.startswith("__")]
