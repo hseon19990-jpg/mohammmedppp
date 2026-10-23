@@ -672,6 +672,7 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("contest_build_step", None)
     context.user_data.pop("api_add_step", None)
     context.user_data.pop("api_add_actor", None)
+    context.user_data.pop("mode", None)
     buttons = [
         maintenance_toggle_button(),
         ("🔗 رابط الدعم", "support_link_settings"),
@@ -679,6 +680,8 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ("🔑 إدارة APIs", "apis_menu"),
         ("🚫 إدارة الحظر", "bans_menu"),
         ("💰 أسعار المستويات", "set_tier_prices"),
+        ("🛒 حدود السحب", "withdraw_settings"),
+        ("🎁 إعدادات الهدية اليومية", "daily_gift_settings"),
         ("📋 الطلبات", "approval_requests"),
         ("🎯 إدارة المسابقة", "contest_menu"),
         ("🏆 الأكثر بيعاً", "top_sellers_owner"),
@@ -711,6 +714,280 @@ async def toggle_maintenance(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await owner_panel(update, context)
 
 
+# ==================== WITHDRAW LIMITS ====================
+def _withdraw_settings_text() -> str:
+    limits = get_withdraw_limits()
+    min_str = f"${limits['min']:.2f}" if limits["min"] is not None else "غير محدد"
+    max_str = f"${limits['max']:.2f}" if limits["max"] is not None else "غير محدد"
+    lines = ["🛒 *حدود السحب*", ""]
+    lines.append(f"⬇️ *الحد الأدنى:* {min_str}")
+    lines.append(f"⬆️ *الحد الأعلى:* {max_str}")
+    lines.append("")
+    lines.append("_إذا لم تُحدَّد حدود، سيُسمح بأي كمية._")
+    lines.append("_إذا حُدِّد أحدهما فقط، سيُطبق هو فقط._")
+    return "\n".join(lines)
+
+
+async def withdraw_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    limits = get_withdraw_limits()
+    buttons = [
+        ("⬇️ تعديل الحد الأدنى", "withdraw_set_min"),
+        ("⬆️ تعديل الحد الأعلى", "withdraw_set_max"),
+        ("🗑️ إلغاء كلا الحدين", "withdraw_clear_limits"),
+        ("🔙 إعدادات المالك", "owner_panel"),
+    ]
+    await query.edit_message_text(_withdraw_settings_text(), parse_mode=ParseMode.MARKDOWN,
+                                  reply_markup=kb_vertical(buttons))
+
+
+async def withdraw_set_min(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫", show_alert=True)
+        return
+    context.user_data["mode"] = "withdraw_set_min"
+    limits = get_withdraw_limits()
+    current = f"${limits['min']:.2f}" if limits["min"] is not None else "غير محدد"
+    await query.edit_message_text(
+        f"⬇️ *تعديل الحد الأدنى*\n\n"
+        f"📌 الحالي: {current}\n\n"
+        f"أرسل الحد الأدنى بالدولار (مثال: `1` أو `0.5`):\n\n"
+        f"<i>أو 'حذف' لإزالة الحد، أو 'إلغاء' للعودة.</i>",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_single("🔙 إلغاء", "withdraw_settings"))
+
+
+async def withdraw_set_max(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫", show_alert=True)
+        return
+    context.user_data["mode"] = "withdraw_set_max"
+    limits = get_withdraw_limits()
+    current = f"${limits['max']:.2f}" if limits["max"] is not None else "غير محدد"
+    await query.edit_message_text(
+        f"⬆️ *تعديل الحد الأعلى*\n\n"
+        f"📌 الحالي: {current}\n\n"
+        f"أرسل الحد الأعلى بالدولار (مثال: `50` أو `100`):\n\n"
+        f"<i>أو 'حذف' لإزالة الحد، أو 'إلغاء' للعودة.</i>",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_single("🔙 إلغاء", "withdraw_settings"))
+
+
+async def withdraw_clear_limits(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫", show_alert=True)
+        return
+    config = load_config()
+    config.pop("withdraw_min", None)
+    config.pop("withdraw_max", None)
+    save_config(config)
+    await query.answer("✅ تم إلغاء كلا الحدين.", show_alert=True)
+    await withdraw_settings(update, context)
+
+
+async def handle_withdraw_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يُستدعى من text_input عند mode = withdraw_set_min/max"""
+    if update.effective_user.id != OWNER_ID:
+        context.user_data.pop("mode", None)
+        return
+    text = update.message.text.strip()
+    mode = context.user_data.get("mode")
+
+    if text.casefold() in {"إلغاء", "الغاء", "cancel", "отмена"}:
+        context.user_data.pop("mode", None)
+        await update.message.reply_text("❌ تم الإلغاء.",
+                                        reply_markup=kb_single("🔙 حدود السحب", "withdraw_settings"))
+        return
+
+    if text.casefold() in {"حذف", "مسح", "delete", "remove"}:
+        config = load_config()
+        if mode == "withdraw_set_min":
+            config.pop("withdraw_min", None)
+        elif mode == "withdraw_set_max":
+            config.pop("withdraw_max", None)
+        save_config(config)
+        context.user_data.pop("mode", None)
+        await update.message.reply_text(
+            "✅ تم إزالة الحد.",
+            reply_markup=kb_single("🔙 حدود السحب", "withdraw_settings"))
+        return
+
+    try:
+        value = float(text)
+        if value < 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("⚠️ أرسل رقماً صحيحاً (مثال: `5` أو `2.5`).")
+        return
+
+    limits = get_withdraw_limits()
+    if mode == "withdraw_set_min":
+        if limits["max"] is not None and value > limits["max"]:
+            await update.message.reply_text(
+                f"⚠️ الحد الأدنى يجب أن يكون أقل من أو يساوي الحد الأعلى الحالي (${limits['max']:.2f}).")
+            return
+    elif mode == "withdraw_set_max":
+        if limits["min"] is not None and value < limits["min"]:
+            await update.message.reply_text(
+                f"⚠️ الحد الأعلى يجب أن يكون أكبر من أو يساوي الحد الأدنى الحالي (${limits['min']:.2f}).")
+            return
+
+    config = load_config()
+    if mode == "withdraw_set_min":
+        config["withdraw_min"] = round(value, 2)
+        label = "الحد الأدنى"
+    else:
+        config["withdraw_max"] = round(value, 2)
+        label = "الحد الأعلى"
+    save_config(config)
+    context.user_data.pop("mode", None)
+    await update.message.reply_text(
+        f"✅ تم تعيين {label}: ${value:.2f}",
+        reply_markup=kb_single("🔙 حدود السحب", "withdraw_settings"))
+
+
+# ==================== DAILY GIFT SETTINGS ====================
+def _daily_gift_settings_text() -> str:
+    gift = get_daily_gift_config()
+    status = "🟢 مفعلة" if gift["enabled"] else "🔴 معطلة"
+    lines = ["🎁 *إعدادات الهدية اليومية*", ""]
+    lines.append(f"📌 *الحالة:* {status}")
+    lines.append(f"📧 *عدد الإيميلات المطلوبة:* `{gift['emails_required']}`")
+    lines.append(f"💰 *المكافأة:* `${gift['reward']:.2f}`")
+    lines.append("")
+    lines.append("_يُحتسب التقدم عند تحرير نقاط الإيميل للعضو_")
+    lines.append("_ويتجدد العداد تلقائياً عند منتصف ليل العراق (UTC+3)._")
+    if gift["enabled"]:
+        progress_ok = gift["emails_required"] > 0 and gift["reward"] > 0
+        if not progress_ok:
+            lines.append("")
+            lines.append("⚠️ *تنبيه: الهدية مفعلة لكن الإعدادات غير مكتملة. لن تعمل حتى تضبط العدد والمكافأة.*")
+    return "\n".join(lines)
+
+
+async def daily_gift_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    gift = get_daily_gift_config()
+    toggle_label = "🛑 تعطيل الهدية" if gift["enabled"] else "✅ تفعيل الهدية"
+    buttons = [
+        (toggle_label, "daily_gift_toggle"),
+        ("📧 تعديل عدد الإيميلات المطلوبة", "daily_gift_set_emails"),
+        ("💰 تعديل المكافأة", "daily_gift_set_reward"),
+        ("🔙 إعدادات المالك", "owner_panel"),
+    ]
+    await query.edit_message_text(_daily_gift_settings_text(), parse_mode=ParseMode.MARKDOWN,
+                                  reply_markup=kb_vertical(buttons))
+
+
+async def daily_gift_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫", show_alert=True)
+        return
+    config = load_config()
+    gift = config.get("daily_gift", {})
+    if not isinstance(gift, dict):
+        gift = {}
+    gift["enabled"] = not bool(gift.get("enabled", False))
+    gift.setdefault("emails_required", 0)
+    gift.setdefault("reward", 0.0)
+    config["daily_gift"] = gift
+    save_config(config)
+    await query.answer(
+        "✅ تم تفعيل الهدية." if gift["enabled"] else "🛑 تم تعطيل الهدية.",
+        show_alert=True)
+    await daily_gift_settings(update, context)
+
+
+async def daily_gift_set_emails(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫", show_alert=True)
+        return
+    context.user_data["mode"] = "daily_gift_set_emails"
+    gift = get_daily_gift_config()
+    await query.edit_message_text(
+        f"📧 *عدد الإيميلات المطلوبة*\n\n"
+        f"📌 الحالي: `{gift['emails_required']}`\n\n"
+        f"أرسل العدد (مثال: `3`):\n\n"
+        f"<i>أو 'إلغاء' للعودة.</i>",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_single("🔙 إلغاء", "daily_gift_settings"))
+
+
+async def daily_gift_set_reward(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫", show_alert=True)
+        return
+    context.user_data["mode"] = "daily_gift_set_reward"
+    gift = get_daily_gift_config()
+    await query.edit_message_text(
+        f"💰 *مكافأة الهدية*\n\n"
+        f"📌 الحالية: `${gift['reward']:.2f}`\n\n"
+        f"أرسل المكافأة بالدولار (مثال: `4` أو `2.5`):\n\n"
+        f"<i>أو 'إلغاء' للعودة.</i>",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_single("🔙 إلغاء", "daily_gift_settings"))
+
+
+async def handle_daily_gift_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يُستدعى من text_input عند mode = daily_gift_set_emails/reward"""
+    if update.effective_user.id != OWNER_ID:
+        context.user_data.pop("mode", None)
+        return
+    text = update.message.text.strip()
+    mode = context.user_data.get("mode")
+
+    if text.casefold() in {"إلغاء", "الغاء", "cancel", "отмена"}:
+        context.user_data.pop("mode", None)
+        await update.message.reply_text("❌ تم الإلغاء.",
+                                        reply_markup=kb_single("🔙 إعدادات الهدية", "daily_gift_settings"))
+        return
+
+    try:
+        value = int(text) if mode == "daily_gift_set_emails" else float(text)
+        if value <= 0:
+            raise ValueError
+    except ValueError:
+        label = "عدداً صحيحاً" if mode == "daily_gift_set_emails" else "رقماً"
+        await update.message.reply_text(f"⚠️ أرسل {label} أكبر من صفر.")
+        return
+
+    config = load_config()
+    gift = config.get("daily_gift", {})
+    if not isinstance(gift, dict):
+        gift = {}
+    if mode == "daily_gift_set_emails":
+        gift["emails_required"] = int(value)
+        gift.setdefault("reward", 0.0)
+        gift.setdefault("enabled", False)
+        label = "عدد الإيميلات المطلوبة"
+        display = f"{int(value)}"
+    else:
+        gift["reward"] = round(value, 2)
+        gift.setdefault("emails_required", 0)
+        gift.setdefault("enabled", False)
+        label = "المكافأة"
+        display = f"${value:.2f}"
+    config["daily_gift"] = gift
+    save_config(config)
+    context.user_data.pop("mode", None)
+    await update.message.reply_text(
+        f"✅ تم تعيين {label}: {display}",
+        reply_markup=kb_single("🔙 إعدادات الهدية", "daily_gift_settings"))
+
+
+# ==================== SUPPORT LINK ====================
 async def support_link_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
