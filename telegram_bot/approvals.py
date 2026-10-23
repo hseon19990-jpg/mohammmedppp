@@ -1126,13 +1126,24 @@ async def handle_approval_totp(update: Update, context: ContextTypes.DEFAULT_TYP
         user_data["pending_requests"] = pending
         save_user(target_uid, user_data)
         context.user_data["approval_data"] = approved_request
+
+        # ✅ حذف رسالة المفتاح (32 حرف) من المحادثة لأسباب أمنية
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+
         if not approved_request.get("has_app_pass", False):
             context.user_data["approval_step"] = "waiting_app_pass"
-            await update.message.reply_text(
-                t(uid, "appr_totp_valid_wait_app", code=code),
+            await context.bot.send_message(
+                chat_id=uid,
+                text=t(uid, "appr_totp_valid_wait_app", code=code),
                 parse_mode=ParseMode.MARKDOWN)
         else:
-            await update.message.reply_text(t(uid, "appr_ready_for_accept"))
+            await context.bot.send_message(
+                chat_id=uid,
+                text=t(uid, "appr_totp_valid_wait_app", code=code),
+                parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
         await update.message.reply_text(t(uid, "add_totp_bad"))
 
@@ -1170,9 +1181,17 @@ async def handle_approval_app_pass(update: Update, context: ContextTypes.DEFAULT
     user_data["pending_requests"] = pending
     save_user(target_uid, user_data)
     context.user_data["approval_data"] = approved_request
+
+    # ✅ حذف رسالة كلمة مرور التطبيق (16 حرف) من المحادثة
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
     formatted = format_app_password(cleaned)
-    await update.message.reply_text(
-        t(uid, "appr_app_pass_received", formatted=formatted),
+    await context.bot.send_message(
+        chat_id=uid,
+        text=t(uid, "appr_app_pass_received", formatted=formatted),
         parse_mode=ParseMode.MARKDOWN)
 
 
