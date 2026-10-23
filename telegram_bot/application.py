@@ -7,12 +7,11 @@ from telegram_bot.approvals import *
 from telegram_bot.store import *
 from telegram_bot.locales import TRANSLATIONS
 
-# 🛡️ استيراد صريح للدالة التي تسبب الخطأ
 from telegram_bot.members import restore_leave_checks
+
 
 # ==================== TEXT INPUT ROUTER ====================
 async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # 🛡️ الحماية: التأكد من وجود الرسالة والنص لتجنب انهيار البوت إذا تم حذف الرسالة
     if not update.message or not update.message.text:
         return
 
@@ -24,28 +23,39 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
 
-    # ═══ تدفق بيع إيميل جديد ═══
+    # ═══ API management inputs ═══
+    api_step = context.user_data.get("api_add_step")
+    if api_step == "key":
+        await handle_api_key_input(update, context); return
+    if api_step == "limit":
+        await handle_api_limit_input(update, context); return
+
+    # ═══ Store quantity / message (multi-step) ═══
+    if user_id in PENDING_PURCHASES:
+        await handle_purchase_message(update, context)
+        return
+
+    # ═══ Service editing inputs (owner) ═══
+    if str(context.user_data.get("store_action", "")).startswith("edit_service_"):
+        await handle_store_input(update, context); return
+
+    # ═══ Sell new email flow ═══
     sell_step = context.user_data.get("step")
     if sell_step == "sell_new_email_totp":
-        await handle_sell_new_email_totp(update, context)
-        return
+        await handle_sell_new_email_totp(update, context); return
     if sell_step == "sell_new_email_app_pass":
-        await handle_sell_new_email_app_pass(update, context)
-        return
+        await handle_sell_new_email_app_pass(update, context); return
 
     if context.user_data.get("step") == "support_link_input":
-        await handle_support_link_input(update, context)
-        return
+        await handle_support_link_input(update, context); return
 
     if "tg_lion_search_page" in context.user_data:
-        await tg_lion_search_country_input(update, context)
-        return
+        await tg_lion_search_country_input(update, context); return
 
     if context.user_data.get("contest_build_step"):
         if user_id != OWNER_ID:
             return
-        await handle_contest_build_input(update, context)
-        return
+        await handle_contest_build_input(update, context); return
 
     session = SESSIONS.get(user_id)
     if session and session.step:
@@ -53,12 +63,7 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                        "contest_build_step")
         has_admin_step = any(context.user_data.get(k) for k in admin_steps)
         if not has_admin_step:
-            await add_account_step(update, context)
-            return
-
-    if user_id in PENDING_PURCHASES:
-        await handle_purchase_message(update, context)
-        return
+            await add_account_step(update, context); return
 
     admin_approval_step = context.user_data.get("admin_approval_step")
     if admin_approval_step == "waiting_totp":
@@ -196,7 +201,6 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await set_language_handler(update, context)
     elif data == "add_account":
         await add_account_start(update, context)
-    # ═══ بيع إيميل جديد ═══
     elif data == "sell_new_email":
         await sell_new_email_start(update, context)
     elif data == "sell_new_email_complete":
@@ -211,7 +215,6 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await sell_new_email_finish(update, context)
     elif data.startswith("sell_show_video:"):
         await sell_show_video(update, context)
-    # ═══ استمرار التدفق القديم ═══
     elif data == "cancel":
         await add_account_cancel(update, context)
     elif data.startswith("complete_more:"):
@@ -358,6 +361,10 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await store_delete_service(update, context)
     elif data.startswith("delete_service:"):
         await delete_service_execute(update, context)
+    elif data.startswith("store_edit_service:"):
+        await store_edit_service(update, context)
+    elif data.startswith("store_edit_field:"):
+        await store_edit_field(update, context)
     elif data == "forced_channel":
         await forced_channel(update, context)
     elif data == "check_forced_channel":
@@ -475,6 +482,18 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await delete_pending_account(update, context)
     elif data.startswith("owner_show_code:"):
         await owner_show_code(update, context)
+    # ═══ APIs management ═══
+    elif data == "apis_menu":
+        await apis_menu(update, context)
+    elif data == "api_add_start":
+        await api_add_start(update, context)
+    elif data.startswith("api_delete:"):
+        await api_delete_execute(update, context)
+    # ═══ Bans / restrictions ═══
+    elif data == "bans_menu":
+        await bans_menu(update, context)
+    elif data.startswith("unban_member:"):
+        await unban_member(update, context)
     else:
         await placeholder(update, context)
 
@@ -496,12 +515,15 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     user_id = update.effective_user.id
     admins = load_admins()
+    apis = get_api_list()
+    active_apis = [a for a in apis if a.get("status") == "active"]
     await update.message.reply_text(
         f"🔎 *تشخيص*\n\n🆔 رقمك: `{user_id}`\n👑 المالك: `{OWNER_ID}`\n"
         f"✅ أنت المالك: {'نعم' if user_id == OWNER_ID else 'لا'}\n"
         f"🛠 أدمن: {'نعم' if user_id in admins else 'لا'}\n"
         f"👥 عدد الأدمن: `{len(admins)}`\n"
         f"🔐 التشفير: {'مفعّل ✅' if CRYPTO_AVAILABLE else 'معطّل ❌'}\n"
+        f"🔑 APIs: `{len(apis)}` (نشطة: `{len(active_apis)}`)\n"
         f"💾 عدد المستخدمين: `{len(load_json(USERS_DB))}`",
         parse_mode=ParseMode.MARKDOWN)
 
@@ -513,6 +535,8 @@ async def owner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = [maintenance_toggle_button(),
                ("🔗 رابط الدعم", "support_link_settings"),
                ("👥 الإدارية", "admin_management"),
+               ("🔑 إدارة APIs", "apis_menu"),
+               ("🚫 إدارة الحظر", "bans_menu"),
                ("💰 أسعار المستويات", "set_tier_prices"),
                ("📋 الطلبات", "approval_requests"),
                ("🎯 إدارة المسابقة", "contest_menu"),
@@ -540,6 +564,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🚫 هذا الأمر للأدمن فقط.")
         return
     buttons = [("⚙️ إعدادات الأدمن", "admin_settings"),
+               ("🔑 إدارة APIs", "apis_menu"),
                ("🔙 القائمة الرئيسية", "main_menu")]
     await update.message.reply_text("🛠 *الإدارية*", parse_mode=ParseMode.MARKDOWN,
                                     reply_markup=kb_vertical(buttons))
