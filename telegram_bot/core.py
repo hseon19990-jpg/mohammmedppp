@@ -1,5 +1,5 @@
 """
-Advanced Telegram Account Manager Bot - v6.4
+Advanced Telegram Account Manager Bot - v6.5
 """
 
 import asyncio
@@ -418,30 +418,96 @@ async def check_email_availability(email: str, use_cache: bool = True) -> Option
 # ==================== ABSTRACTAPI CHECKER (single key) ====================
 def _call_abstractapi_key(api_key: str, email: str) -> Optional[bool]:
     """Single abstract API call. Returns True/False/None."""
+    meta = _call_abstractapi_with_meta(api_key, email)
+    return meta.get("result")
+
+
+def _call_abstractapi_with_meta(api_key: str, email: str) -> dict:
+    """
+    يستدعي AbstractAPI ويُرجع بيانات الحصة من headers/body.
+    Returns dict: {result, limit_header, remaining_header,
+                   quota_exceeded, invalid_key, error}
+    """
+    meta = {
+        "result": None,
+        "limit_header": None,
+        "remaining_header": None,
+        "quota_exceeded": False,
+        "invalid_key": False,
+        "error": None,
+    }
     try:
         url = "https://emailreputation.abstractapi.com/v1/"
         params = urllib.parse.urlencode({"api_key": api_key, "email": email})
         req = Request(f"{url}?{params}", headers={"Accept": "application/json"})
         with urlopen(req, timeout=10) as response:
+            headers = dict(response.headers)
             body = response.read().decode("utf-8", errors="ignore")
         data = json.loads(body)
-        if "error" in data and data.get("error"):
-            logger.warning("AbstractAPI returned error for %s", email)
-            return None
+
+        err = data.get("error")
+        if err:
+            msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
+            meta["error"] = msg[:150]
+            low = msg.lower()
+            if "quota" in low or "exceeded" in low or "limit reached" in low or "rate limit" in low:
+                meta["quota_exceeded"] = True
+            if "invalid api key" in low or "unauthorized" in low or "authentication" in low:
+                meta["invalid_key"] = True
+            return meta
+
+        # قراءة rate limit headers (بأي casing)
+        for name, value in headers.items():
+            lower = name.lower()
+            if "ratelimit-limit" in lower or "rate-limit-limit" in lower:
+                try:
+                    meta["limit_header"] = int(value)
+                except (ValueError, TypeError):
+                    pass
+            elif "ratelimit-remaining" in lower or "rate-limit-remaining" in lower:
+                try:
+                    meta["remaining_header"] = int(value)
+                except (ValueError, TypeError):
+                    pass
+
+        # محاولة قراءة quota من body إذا لم تكن في headers
+        if meta["limit_header"] is None:
+            quota = data.get("quota") or data.get("rate_limit") or {}
+            if isinstance(quota, dict):
+                if quota.get("limit") and quota.get("remaining") is not None:
+                    try:
+                        meta["limit_header"] = int(quota["limit"])
+                        meta["remaining_header"] = int(quota["remaining"])
+                    except (ValueError, TypeError):
+                        pass
+
+        # نتيجة الفحص
         is_valid = data.get("is_valid")
         deliverability = str((data.get("email_deliverability") or {}).get("status", "")).lower()
         is_smtp_valid = (data.get("is_smtp_valid") or {}).get("value")
         is_mx_found = (data.get("is_mx_found") or {}).get("value")
         if is_valid is True or deliverability in ("deliverable", "risky"):
-            return True
-        if is_smtp_valid is True and is_mx_found is True:
-            return True
-        if is_valid is False or deliverability in ("undeliverable", "invalid"):
-            return False
-        return None
-    except Exception:
-        logger.exception("AbstractAPI call failed")
-        return None
+            meta["result"] = True
+        elif is_smtp_valid is True and is_mx_found is True:
+            meta["result"] = True
+        elif is_valid is False or deliverability in ("undeliverable", "invalid"):
+            meta["result"] = False
+
+        return meta
+    except urllib.error.HTTPError as exc:
+        if exc.code == 429:
+            meta["quota_exceeded"] = True
+        if exc.code in (401, 403):
+            meta["invalid_key"] = True
+        try:
+            body = exc.read().decode("utf-8", errors="ignore")
+            meta["error"] = f"HTTP {exc.code}: {body[:100]}"
+        except Exception:
+            meta["error"] = f"HTTP {exc.code}"
+        return meta
+    except Exception as exc:
+        meta["error"] = f"{type(exc).__name__}"
+        return meta
 
 
 def check_email_exists_via_abstractapi_sync(email: str) -> Optional[bool]:
@@ -474,33 +540,22 @@ def get_active_api() -> Optional[dict]:
     return None
 
 
-def mark_api_used(api_id: str) -> Optional[dict]:
-    """Increments counter. Returns warning dict if near exhaustion."""
-    apis = get_api_list()
-    now_iso = datetime.now(timezone.utc).isoformat()
-    for api in apis:
-        if api.get("id") == api_id:
-            api["used"] = int(api.get("used", 0)) + 1
-            api["last_used_at"] = now_iso
-            if api["used"] >= int(api.get("limit", 0)):
-                api["status"] = "exhausted"
-            break
-    save_api_list(apis)
-    active = [a for a in apis if a.get("status") == "active"]
-    if len(active) == 1:
-        remaining = int(active[0].get("limit", 0)) - int(active[0].get("used", 0))
-        if remaining <= API_WARNING_THRESHOLD:
-            return {"warning": True, "remaining": max(0, remaining), "api": active[0]}
-    if len(active) == 0:
-        return {"warning": True, "remaining": 0, "api": None}
-    return None
-
-
 def mark_api_invalid(api_id: str):
     apis = get_api_list()
     for api in apis:
         if api.get("id") == api_id:
             api["status"] = "invalid"
+            break
+    save_api_list(apis)
+
+
+def mark_api_exhausted(api_id: str):
+    """يحوّل API إلى مستنفد فوراً (عند 429 أو استهلاك كامل)."""
+    apis = get_api_list()
+    for api in apis:
+        if api.get("id") == api_id:
+            api["status"] = "exhausted"
+            api["used"] = int(api.get("limit", 0))
             break
     save_api_list(apis)
 
@@ -523,31 +578,80 @@ def record_admin_api_addition(admin_id: int):
     save_config(config)
 
 
-def test_api_key_sync(api_key: str) -> Tuple[bool, str]:
-    """Tests an API key by making a sample call. Returns (ok, message)."""
-    try:
-        url = "https://emailreputation.abstractapi.com/v1/"
-        params = urllib.parse.urlencode({"api_key": api_key, "email": "test@gmail.com"})
-        req = Request(f"{url}?{params}", headers={"Accept": "application/json"})
-        with urlopen(req, timeout=12) as response:
-            body = response.read().decode("utf-8", errors="ignore")
-        data = json.loads(body)
-        err = data.get("error")
-        if err:
-            msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
-            return False, f"API error: {msg[:150]}"
-        if "is_valid" in data or "email_deliverability" in data:
-            return True, "OK"
-        return False, "Unexpected response from API"
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="ignore")
-        return False, f"HTTP {exc.code}: {body[:150]}"
-    except Exception as exc:
-        return False, f"Error: {type(exc).__name__}"
+def test_api_key_sync(api_key: str) -> dict:
+    """
+    يختبر المفتاح ويكتشف الحصة تلقائياً.
+    Returns: {ok: bool, message: str, limit: int, used: int, status: str}
+    """
+    meta = _call_abstractapi_with_meta(api_key, "test@gmail.com")
+
+    if meta.get("invalid_key"):
+        return {"ok": False, "message": "مفتاح غير صالح أو منتهي الصلاحية",
+                "limit": 0, "used": 0, "status": "invalid"}
+
+    if meta.get("quota_exceeded"):
+        return {"ok": True,
+                "message": "⚠️ المفتاح صحيح لكن الحصة منتهية (429) — سيُضاف بحالة مستنفد",
+                "limit": 100, "used": 100, "status": "exhausted"}
+
+    if meta.get("error"):
+        return {"ok": False, "message": f"خطأ: {meta['error'][:150]}",
+                "limit": 0, "used": 0, "status": "invalid"}
+
+    if meta["result"] is None:
+        return {"ok": False,
+                "message": "رد غير متوقع من المزوّد (لا يحتوي على بيانات صالحة)",
+                "limit": 0, "used": 0, "status": "invalid"}
+
+    if meta.get("limit_header") and meta["limit_header"] > 0:
+        limit = int(meta["limit_header"])
+        used = 1
+        if meta.get("remaining_header") is not None:
+            used = max(0, limit - int(meta["remaining_header"]))
+        return {"ok": True,
+                "message": f"✅ تم اكتشاف الحد تلقائياً من المزوّد: {limit}",
+                "limit": limit, "used": used, "status": "active"}
+
+    return {"ok": True,
+            "message": "✅ تم التحقق (الحد الافتراضي: 100 — سيُصحّح عند أول استعمال)",
+            "limit": 100, "used": 1, "status": "active"}
+
+
+def _compute_api_warning() -> Optional[dict]:
+    """يُرجع dict تحذير إذا كان هناك API واحد فقط بمتبقي ≤ 50، أو لا توجد APIs نشطة."""
+    active = [a for a in get_api_list() if a.get("status") == "active"]
+    if len(active) == 0:
+        return {"warning": True, "remaining": 0, "api": None}
+    if len(active) == 1:
+        remaining = int(active[0].get("limit", 0)) - int(active[0].get("used", 0))
+        if remaining <= API_WARNING_THRESHOLD:
+            return {"warning": True, "remaining": max(0, remaining), "api": active[0]}
+    return None
+
+
+def _update_api_from_meta(api_id: str, meta: dict) -> Optional[dict]:
+    """يُحدّث الاستهلاك من بيانات الاستجابة. يُرجع تحذيراً إن وُجد."""
+    apis = get_api_list()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for api in apis:
+        if api.get("id") == api_id:
+            if meta.get("limit_header") and meta["limit_header"] > 0:
+                api["limit"] = int(meta["limit_header"])
+            if meta.get("remaining_header") is not None and api.get("limit"):
+                limit = int(api["limit"])
+                remaining = int(meta["remaining_header"])
+                api["used"] = max(0, limit - remaining)
+            else:
+                api["used"] = int(api.get("used", 0)) + 1
+            api["last_used_at"] = now_iso
+            if int(api.get("used", 0)) >= int(api.get("limit", 0)):
+                api["status"] = "exhausted"
+            break
+    save_api_list(apis)
+    return _compute_api_warning()
 
 
 async def notify_api_warning(context, warning: dict):
-    """Sends a warning to owner + all admins."""
     if not warning or not warning.get("warning"):
         return
     remaining = int(warning.get("remaining", 0))
@@ -572,7 +676,7 @@ async def notify_api_warning(context, warning: dict):
 
 
 async def check_email_via_rotation_api(email: str, context=None) -> Optional[bool]:
-    """Tries APIs in order; returns True/False/None."""
+    """يجرب APIs بالترتيب مع تتبع تلقائي للحصة."""
     tried_ids = set()
     for _ in range(5):
         api = None
@@ -588,15 +692,37 @@ async def check_email_via_rotation_api(email: str, context=None) -> Optional[boo
         if api is None:
             return None
         tried_ids.add(api.get("id"))
-        result = await asyncio.to_thread(_call_abstractapi_key, api.get("api_key", ""), email)
-        warning = mark_api_used(api.get("id"))
+
+        meta = await asyncio.to_thread(
+            _call_abstractapi_with_meta, api.get("api_key", ""), email
+        )
+
+        # مفتاح معطّل → علّمه وتجاوزه
+        if meta.get("invalid_key"):
+            mark_api_invalid(api.get("id"))
+            continue
+
+        # الحصة منتهية → علّمه وتجاوزه
+        if meta.get("quota_exceeded"):
+            mark_api_exhausted(api.get("id"))
+            warning = _compute_api_warning()
+            if warning and context:
+                try:
+                    await notify_api_warning(context, warning)
+                except Exception:
+                    logger.exception("Failed to notify API warning")
+            continue
+
+        # حدّث الاستهلاك من headers
+        warning = _update_api_from_meta(api.get("id"), meta)
         if warning and context:
             try:
                 await notify_api_warning(context, warning)
             except Exception:
                 logger.exception("Failed to notify API warning")
-        if result is not None:
-            return result
+
+        if meta["result"] is not None:
+            return meta["result"]
     return None
 
 
