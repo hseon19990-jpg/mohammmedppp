@@ -423,12 +423,45 @@ async def tg_lion_confirm_order(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 # ==================== WITHDRAW STORE (USER) ====================
+def _withdraw_limits_display() -> str:
+    """يُعيد نصاً مختصراً لعرض الحدود في رسائل الاختيار."""
+    limits = get_withdraw_limits()
+    parts = []
+    if limits["min"] is not None:
+        parts.append(f"⬇️ أدنى: ${limits['min']:.2f}")
+    if limits["max"] is not None:
+        parts.append(f"⬆️ أعلى: ${limits['max']:.2f}")
+    if not parts:
+        return ""
+    return "\n📊 " + " | ".join(parts)
+
+
+def _validate_withdraw_amount(total: float) -> Optional[str]:
+    """يُرجع رسالة خطأ إذا المبلغ خارج الحدود، أو None إذا كان صحيحاً."""
+    limits = get_withdraw_limits()
+    if limits["min"] is not None and total < limits["min"]:
+        return (f"❌ <b>المبلغ الإجمالي أقل من الحد الأدنى</b>\n\n"
+                f"💰 الإجمالي المطلوب: <b>${total:.2f}</b>\n"
+                f"⬇️ الحد الأدنى: <b>${limits['min']:.2f}</b>\n\n"
+                f"📌 يرجى اختيار كمية أكبر.")
+    if limits["max"] is not None and total > limits["max"]:
+        return (f"❌ <b>المبلغ الإجمالي يتجاوز الحد الأعلى</b>\n\n"
+                f"💰 الإجمالي المطلوب: <b>${total:.2f}</b>\n"
+                f"⬆️ الحد الأعلى: <b>${limits['max']:.2f}</b>\n\n"
+                f"📌 يرجى اختيار كمية أقل.")
+    return None
+
+
 async def withdraw_store(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
     query = update.callback_query
     send_message = (query.edit_message_text if query else update.effective_message.reply_text)
     uid = update.effective_user.id
+    # clear any abandoned purchase when returning to store
+    if query and query.data == "withdraw_store":
+        PENDING_PURCHASES.pop(uid, None)
+        save_pending_purchases()
     user_data = get_user(uid)
     restriction = get_any_restriction_message(user_data)
     if restriction:
@@ -446,7 +479,9 @@ async def withdraw_store(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if lion_visible:
         buttons.append(("🌍 حسابات لكل الدول", "tg_lion_catalog"))
     buttons.append(("🔙 القائمة الرئيسية", "main_menu"))
-    await send_message("🛒 *قسم السحب*\nاختر الفئة:", parse_mode=ParseMode.MARKDOWN,
+    limits_text = _withdraw_limits_display()
+    await send_message(f"🛒 *قسم السحب*\nاختر الفئة:{limits_text}",
+                       parse_mode=ParseMode.MARKDOWN,
                        reply_markup=kb_vertical(buttons))
 
 
@@ -514,9 +549,10 @@ async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "purchased_at": datetime.now().isoformat(),
     }
     save_pending_purchases()
+    limits_text = _withdraw_limits_display()
     await query.edit_message_text(
         f"🛒 <b>{html.escape(service.get('name', ''))}</b>\n\n"
-        f"💰 سعر الوحدة: <b>${unit_price:.2f}</b>\n\n"
+        f"💰 سعر الوحدة: <b>${unit_price:.2f}</b>{limits_text}\n\n"
         f"📌 أرسل <b>العدد</b> الذي تريده (مثال: <code>3</code>):\n\n"
         f"<i>أو 'إلغاء' للعودة</i>",
         parse_mode=ParseMode.HTML,
@@ -540,7 +576,6 @@ async def handle_purchase_message(update: Update, context: ContextTypes.DEFAULT_
             reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
         return
 
-    # enforce restriction
     user_data = get_user(user_id)
     restriction = get_any_restriction_message(user_data)
     if restriction:
@@ -560,6 +595,16 @@ async def handle_purchase_message(update: Update, context: ContextTypes.DEFAULT_
             return
         unit_price = float(purchase.get("service_price", 0))
         total = round(quantity * unit_price, 2)
+
+        # ═══ تطبيق حدود السحب ═══
+        limit_error = _validate_withdraw_amount(total)
+        if limit_error:
+            await update.message.reply_text(
+                limit_error,
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb_single("🔙 إلغاء", "withdraw_store"))
+            return
+
         if spendable_balance_cents(user_data) < money_to_cents(total):
             await update.message.reply_text(
                 f"❌ رصيدك غير كافٍ.\n"
@@ -605,6 +650,17 @@ async def handle_purchase_message(update: Update, context: ContextTypes.DEFAULT_
     total = float(purchase.get("total", 0))
     total_cents = money_to_cents(total)
     quantity = int(purchase.get("quantity", 1))
+
+    # ═══ تحقق نهائي من الحدود (في حال تغيّرت أثناء العملية) ═══
+    limit_error = _validate_withdraw_amount(total)
+    if limit_error:
+        await update.message.reply_text(
+            limit_error, parse_mode=ParseMode.HTML,
+            reply_markup=kb_single("🔙 إلغاء", "withdraw_store"))
+        PENDING_PURCHASES.pop(user_id, None)
+        save_pending_purchases()
+        return
+
     user_data = get_user(user_id)
     if spendable_balance_cents(user_data) < total_cents:
         await update.message.reply_text(
@@ -1143,7 +1199,6 @@ async def store_edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
     parts = query.data.split(":")
-    # format: store_edit_field:pick:<cat_id>:<service_id> OR store_edit_field:<field>:<cat_id>:<service_id>
     if len(parts) < 4:
         await query.answer("⚠️", show_alert=True)
         return
@@ -1180,7 +1235,6 @@ async def store_edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
         return
 
-    # field in name/price/message
     field_labels = {"name": "الاسم الجديد", "price": "السعر الجديد", "message": "رسالة الطلب الجديدة"}
     context.user_data["store_action"] = f"edit_service_{field}"
     context.user_data["edit_service_cat"] = cat_id
