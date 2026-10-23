@@ -28,10 +28,14 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if api_step == "key":
         await handle_api_key_input(update, context); return
 
-    # ═══ Withdraw limits input (owner) ═══
+    # ═══ Withdraw limits input (owner — GLOBAL) ═══
     mode = context.user_data.get("mode")
     if mode in ("withdraw_set_min", "withdraw_set_max"):
         await handle_withdraw_input(update, context); return
+
+    # ═══ Withdraw limits input (owner — PER CATEGORY) ═══
+    if mode in ("cat_withdraw_set_min", "cat_withdraw_set_max"):
+        await handle_cat_withdraw_input(update, context); return
 
     # ═══ Daily gift settings input (owner) ═══
     if mode in ("daily_gift_set_emails", "daily_gift_set_reward"):
@@ -264,7 +268,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "ℹ️ لم يضبط المالك رابط الدعم بعد.",
             reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
-    # ═══ Withdraw limits (owner) ═══
+    # ═══ Withdraw limits (owner — GLOBAL) ═══
     elif data == "withdraw_settings":
         await withdraw_settings(update, context)
     elif data == "withdraw_set_min":
@@ -273,6 +277,15 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await withdraw_set_max(update, context)
     elif data == "withdraw_clear_limits":
         await withdraw_clear_limits(update, context)
+    # ═══ Withdraw limits (owner — PER CATEGORY) ═══
+    elif data.startswith("category_withdraw_settings:"):
+        await category_withdraw_settings(update, context)
+    elif data.startswith("cat_withdraw_set_min:"):
+        await cat_withdraw_set_min(update, context)
+    elif data.startswith("cat_withdraw_set_max:"):
+        await cat_withdraw_set_max(update, context)
+    elif data.startswith("cat_withdraw_clear:"):
+        await cat_withdraw_clear(update, context)
     # ═══ Daily gift (owner) ═══
     elif data == "daily_gift_settings":
         await daily_gift_settings(update, context)
@@ -579,7 +592,7 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👥 عدد الأدمن: `{len(admins)}`\n"
         f"🔐 التشفير: {'مفعّل ✅' if CRYPTO_AVAILABLE else 'معطّل ❌'}\n"
         f"🔑 APIs: `{len(apis)}` (نشطة: `{len(active_apis)}`)\n"
-        f"🛒 حدود السحب: min={limits['min']}, max={limits['max']}\n"
+        f"🛒 حدود السحب العامة: min={limits['min']}, max={limits['max']}\n"
         f"🎁 الهدية: {'مفعلة' if gift['enabled'] else 'معطلة'} ({gift['emails_required']} إيميل → ${gift['reward']:.2f})\n"
         f"💾 عدد المستخدمين: `{len(load_json(USERS_DB))}`",
         parse_mode=ParseMode.MARKDOWN)
