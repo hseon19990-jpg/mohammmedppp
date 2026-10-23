@@ -1396,8 +1396,8 @@ def _service_types_keyboard(selected: list) -> InlineKeyboardMarkup:
         mark = "✅ " if key in selected else "☐ "
         rows.append([InlineKeyboardButton(f"{mark}{label}", callback_data=f"service_toggle_type:{key}")])
     if selected:
-        rows.append([InlineKeyboardButton("✅ متابعة", "service_types_done")])
-    rows.append([InlineKeyboardButton("❌ إلغاء", "store_section")])
+        rows.append([InlineKeyboardButton("✅ متابعة", callback_data="service_types_done")])
+    rows.append([InlineKeyboardButton("❌ إلغاء", callback_data="store_section")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -1900,8 +1900,8 @@ def _service_edit_types_keyboard(selected: list) -> InlineKeyboardMarkup:
     for key, (label, _) in MESSAGE_TYPE_LABELS.items():
         mark = "✅ " if key in selected else "☐ "
         rows.append([InlineKeyboardButton(f"{mark}{label}", callback_data=f"service_edit_toggle:{key}")])
-    rows.append([InlineKeyboardButton("💾 حفظ", "service_edit_types_save")])
-    rows.append([InlineKeyboardButton("❌ إلغاء", "store_section")])
+    rows.append([InlineKeyboardButton("💾 حفظ", callback_data="service_edit_types_save")])
+    rows.append([InlineKeyboardButton("❌ إلغاء", callback_data="store_section")])
     return InlineKeyboardMarkup(rows)
 
 
