@@ -2,6 +2,7 @@
 
 from telegram_bot.core import *
 
+
 # ==================== PURCHASE CHANNELS ====================
 def purchase_channels_keyboard():
     return kb_vertical([("1️⃣ ضبط الأول", "set_purchase_channel_1"),
@@ -62,18 +63,14 @@ async def remove_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                   reply_markup=kb_single("🔙 إعدادات المالك", "owner_panel"))
 
 
-# ==================== WITHDRAW STORE ====================
-
+# ==================== TG-LION CATALOG ====================
 def _tg_lion_fetch_countries_sync() -> Tuple[Optional[List[dict]], str]:
     api_key = os.environ.get("TG_LION_API_KEY", "").strip()
     your_id = os.environ.get("TG_LION_USER_ID", "").strip()
     if not api_key or not your_id:
         return None, "not_configured"
-
     params = urllib.parse.urlencode({
-        "action": "available_countries",
-        "apiKey": api_key,
-        "YourID": your_id,
+        "action": "available_countries", "apiKey": api_key, "YourID": your_id,
     })
     request = urllib.request.Request(
         f"{TG_LION_API_URL}?{params}",
@@ -86,10 +83,8 @@ def _tg_lion_fetch_countries_sync() -> Tuple[Optional[List[dict]], str]:
             return None, "invalid_response"
         payload = json.loads(raw_body.decode("utf-8"))
     except Exception as exc:
-        # Do not log the request URL: the provider requires the API key in its query string.
         logger.warning("TG-Lion country-list request failed (%s)", type(exc).__name__)
         return None, "provider_error"
-
     if not isinstance(payload, dict) or str(payload.get("status", "")).lower() != "ok":
         return None, "provider_error"
     raw_countries = payload.get("countries")
@@ -99,7 +94,6 @@ def _tg_lion_fetch_countries_sync() -> Tuple[Optional[List[dict]], str]:
         entries = [(item.get("code", ""), item) for item in raw_countries if isinstance(item, dict)]
     else:
         return None, "invalid_response"
-
     countries = []
     seen_codes = set()
     for fallback_code, item in entries:
@@ -127,12 +121,10 @@ def _tg_lion_fetch_countries_sync() -> Tuple[Optional[List[dict]], str]:
             _TG_LION_CALLING_CODES.get(code, ""),
         )
         countries.append({
-            "code": code,
-            "name": name,
+            "code": code, "name": name,
             "flag": str(item.get("flag") or tg_lion_country_flag(code)),
             "calling_code": normalize_tg_lion_calling_code(raw_calling_code),
-            "qty": quantity,
-            "base_price_cents": base_price_cents,
+            "qty": quantity, "base_price_cents": base_price_cents,
             "price_cents": base_price_cents + 5,
         })
         seen_codes.add(code)
@@ -173,9 +165,7 @@ def tg_lion_country_keyboard(countries: List[dict], page: int) -> Tuple[InlineKe
             )
             for page_num in range(start_page, min(start_page + 7, total_pages))
         ])
-    rows.append([
-        InlineKeyboardButton("🔎 بحث عن الدولة", callback_data=f"tg_lion_search_start:{page}")
-    ])
+    rows.append([InlineKeyboardButton("🔎 بحث عن الدولة", callback_data=f"tg_lion_search_start:{page}")])
     return InlineKeyboardMarkup(rows), total_pages
 
 
@@ -201,8 +191,6 @@ async def tg_lion_catalog(update: Update, context: ContextTypes.DEFAULT_TYPE, pa
     keyboard, total_pages = tg_lion_country_keyboard(countries, page)
     page = max(0, min(int(page), total_pages - 1))
     if query:
-        # Telegram does not allow an empty message text; this invisible separator
-        # leaves the country keyboard visible without the old heading/pricing text.
         await query.edit_message_text("\u2063", reply_markup=keyboard)
 
 
@@ -256,37 +244,24 @@ async def tg_lion_search_country_input(update: Update, context: ContextTypes.DEF
             reply_markup=keyboard,
         )
         return
-
     countries, status = await get_tg_lion_countries()
     if status != "ok" or countries is None:
-        await update.message.reply_text(
-            "⚠️ تعذر تحميل قائمة الدول الآن. أعد إرسال الرمز بعد قليل."
-        )
+        await update.message.reply_text("⚠️ تعذر تحميل قائمة الدول الآن. أعد إرسال الرمز بعد قليل.")
         return
-
     matches = tg_lion_find_countries_by_calling_code(countries, candidate)
     context.user_data.pop("tg_lion_search_page", None)
-    back_keyboard = [[
-        InlineKeyboardButton("↩️ الرجوع إلى الدول", callback_data=f"tg_lion_search_cancel:{page}")
-    ]]
+    back_keyboard = [[InlineKeyboardButton("↩️ الرجوع إلى الدول", callback_data=f"tg_lion_search_cancel:{page}")]]
     if not matches:
         await update.message.reply_text(
             f"لم أجد دولة متاحة برمز الاتصال +{candidate}.",
             reply_markup=InlineKeyboardMarkup(back_keyboard),
         )
         return
-
     rows = []
     for country in matches:
         flag = country.get("flag") or tg_lion_country_flag(country["code"])
-        label = (
-            f"{flag} {country['name']} | "
-            f"{cents_to_money(country['price_cents']):.2f}$"
-        )
-        rows.append([InlineKeyboardButton(
-            label[:64],
-            callback_data=f"tg_lion_search_result:{country['code']}:{page}",
-        )])
+        label = f"{flag} {country['name']} | {cents_to_money(country['price_cents']):.2f}$"
+        rows.append([InlineKeyboardButton(label[:64], callback_data=f"tg_lion_search_result:{country['code']}:{page}")])
     rows.extend(back_keyboard)
     await update.message.reply_text(
         f"الدول المتاحة لرمز الاتصال +{candidate}:",
@@ -317,22 +292,15 @@ async def tg_lion_country_menu(update: Update, context: ContextTypes.DEFAULT_TYP
     await show_tg_lion_confirmation(update, context, country, page)
 
 
-async def show_tg_lion_confirmation(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    country: dict,
-    page: int,
-    price_changed: bool = False,
-):
+async def show_tg_lion_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                     country: dict, page: int, price_changed: bool = False):
     query = update.callback_query
     if not query:
         return
     price_cents = country["price_cents"]
     context.user_data["tg_lion_confirmation"] = {
-        "code": country["code"],
-        "price_cents": price_cents,
-        "page": page,
-        "expires_at": time.time() + 600,
+        "code": country["code"], "price_cents": price_cents,
+        "page": page, "expires_at": time.time() + 600,
     }
     change_note = "⚠️ تغيّر السعر؛ راجعه ثم أكّد الطلب مجدداً.\n\n" if price_changed else ""
     text = (
@@ -383,12 +351,10 @@ async def tg_lion_confirm_order(update: Update, context: ContextTypes.DEFAULT_TY
     if country["price_cents"] != confirmation["price_cents"]:
         await show_tg_lion_confirmation(update, context, country, page, price_changed=True)
         return
-
     _, purchase_channel = get_configured_purchase_channels()
     if not purchase_channel:
         await query.edit_message_text("⚠️ قروب الطلبات غير مضبوط. لم يتم خصم أي رصيد؛ تواصل مع الإدارة.")
         return
-
     async with TG_LION_ORDER_LOCK:
         confirmation = context.user_data.get("tg_lion_confirmation")
         if (not confirmation or confirmation.get("code") != code.upper()
@@ -402,40 +368,25 @@ async def tg_lion_confirm_order(update: Update, context: ContextTypes.DEFAULT_TY
             await query.edit_message_text(
                 f"❌ رصيدك غير كافٍ. رصيدك: {cents_to_money(spendable_balance_cents(user_data)):.2f}$، "
                 f"السعر: {cents_to_money(total_cents):.2f}$",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("إلغاء الطلب", callback_data=f"tg_lion_cancel:{page}")]
-                ]),
-            )
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("إلغاء الطلب", callback_data=f"tg_lion_cancel:{page}")]]))
             return
-
-        snapshot = {
-            key: (key in user_data, user_data.get(key))
-            for key in ("balance", "admin_received_balance", "spent_balance", "transactions")
-        }
+        snapshot = {key: (key in user_data, user_data.get(key))
+                    for key in ("balance", "admin_received_balance", "spent_balance", "transactions")}
         if not debit_spendable_balance(user_data, total_cents):
             await query.edit_message_text("❌ رصيدك غير كافٍ. لم يتم تسجيل الطلب.")
             return
-        add_transaction(
-            user_data,
-            "purchase",
-            cents_to_money(total_cents),
-            f"حسابات لكل الدول: {country['name']} ({country['code']})",
-        )
+        add_transaction(user_data, "purchase", cents_to_money(total_cents),
+                        f"حسابات لكل الدول: {country['name']} ({country['code']})")
         try:
             save_user(user.id, user_data)
         except Exception as exc:
             for key, (existed, value) in snapshot.items():
-                if existed:
-                    user_data[key] = value
-                else:
-                    user_data.pop(key, None)
-            try:
-                save_user(user.id, user_data)
-            except Exception:
-                logger.error("TG-Lion order balance rollback failed (%s)", type(exc).__name__)
+                if existed: user_data[key] = value
+                else: user_data.pop(key, None)
+            try: save_user(user.id, user_data)
+            except Exception: pass
             await query.edit_message_text("⚠️ تعذر تسجيل الخصم. لم يتم إرسال الطلب؛ حاول مجدداً لاحقاً.")
             return
-
         order_ref = secrets.token_hex(4).upper()
         username = f"@{user.username}" if user.username else "لا يوجد"
         order_text = (
@@ -451,27 +402,16 @@ async def tg_lion_confirm_order(update: Update, context: ContextTypes.DEFAULT_TY
             f"⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
         )
         try:
-            await context.bot.send_message(
-                chat_id=purchase_channel,
-                text=order_text,
-                parse_mode=ParseMode.HTML,
-            )
+            await context.bot.send_message(chat_id=purchase_channel, text=order_text, parse_mode=ParseMode.HTML)
         except Exception as exc:
             for key, (existed, value) in snapshot.items():
-                if existed:
-                    user_data[key] = value
-                else:
-                    user_data.pop(key, None)
-            try:
-                save_user(user.id, user_data)
-            except Exception:
-                logger.error("TG-Lion order refund failed (%s)", type(exc).__name__)
+                if existed: user_data[key] = value
+                else: user_data.pop(key, None)
+            try: save_user(user.id, user_data)
+            except Exception: pass
             logger.warning("TG-Lion order receipt delivery failed (%s)", type(exc).__name__)
-            await query.edit_message_text(
-                "⚠️ تعذر إرسال الطلب إلى قروب الطلبات؛ أُعيد الرصيد إن أمكن. حاول مجدداً لاحقاً."
-            )
+            await query.edit_message_text("⚠️ تعذر إرسال الطلب إلى قروب الطلبات؛ أُعيد الرصيد إن أمكن. حاول مجدداً لاحقاً.")
             return
-
         context.user_data.pop("tg_lion_confirmation", None)
         await query.edit_message_text(
             f"✅ تم تسجيل طلبك وإرساله إلى قروب الطلبات.\n\n"
@@ -479,15 +419,22 @@ async def tg_lion_confirm_order(update: Update, context: ContextTypes.DEFAULT_TY
             f"🌍 الدولة: <b>{html.escape(country['name'])}</b>\n"
             f"💰 المخصوم: <b>{cents_to_money(total_cents):.2f}$</b>\n"
             "سيتم تنفيذ الطلب يدوياً من الإدارة.",
-            parse_mode=ParseMode.HTML,
-        )
+            parse_mode=ParseMode.HTML)
 
 
+# ==================== WITHDRAW STORE (USER) ====================
 async def withdraw_store(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
     query = update.callback_query
     send_message = (query.edit_message_text if query else update.effective_message.reply_text)
+    uid = update.effective_user.id
+    user_data = get_user(uid)
+    restriction = get_any_restriction_message(user_data)
+    if restriction:
+        await send_message(restriction, parse_mode=ParseMode.HTML,
+                           reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        return
     config = load_config()
     categories = config.get("store_categories", [])
     lion_visible = config.get("tg_lion_store_visible", True)
@@ -529,10 +476,16 @@ async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
     query = update.callback_query
+    uid = update.effective_user.id
+    user_data = get_user(uid)
+    restriction = get_any_restriction_message(user_data)
+    if restriction:
+        await query.edit_message_text(restriction, parse_mode=ParseMode.HTML,
+                                      reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        return
     parts = query.data.split(":")
     service_id = parts[1]
     cat_id = parts[2]
-    user_id = query.from_user.id
     config = load_config()
     service = None
     for cat in config.get("store_categories", []):
@@ -546,39 +499,176 @@ async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("⚠️ الخدمة غير موجودة.",
                                       reply_markup=kb_single("🔙 قسم السحب", "withdraw_store"))
         return
-    user_data = get_user(user_id)
-    price_cents = money_to_cents(service.get("price", 0))
-    price = cents_to_money(price_cents)
-    balance_cents = spendable_balance_cents(user_data)
-    if balance_cents < price_cents:
+    unit_price = float(service.get("price", 0))
+    if spendable_balance_cents(user_data) < money_to_cents(unit_price):
         await query.edit_message_text(
-            f"❌ رصيدك غير كافٍ. الرصيد: ${cents_to_money(balance_cents):.2f}, السعر: ${price:.2f}")
+            f"❌ رصيدك غير كافٍ. الرصيد: ${cents_to_money(spendable_balance_cents(user_data)):.2f}, السعر: ${unit_price:.2f}")
         return
-    PENDING_PURCHASES[user_id] = {"service_id": service_id,
-                                   "service_name": service.get("name", ""),
-                                   "service_price": price,
-                                   "service_message": service.get("message", "شكراً!"),
-                                   "purchased_at": datetime.now().isoformat()}
+    PENDING_PURCHASES[uid] = {
+        "step": "quantity",
+        "service_id": service_id,
+        "service_name": service.get("name", ""),
+        "service_price": unit_price,
+        "service_message": service.get("message", "شكراً!"),
+        "cat_id": cat_id,
+        "purchased_at": datetime.now().isoformat(),
+    }
     save_pending_purchases()
-    bot_username = (await context.bot.get_me()).username
-    total_emails = user_data.get("total_approved_emails", 0)
-    channel_1_text = (f"🛒 <b>طلب شراء جديد</b>\n\n"
-                      f"🤖 @{html.escape(bot_username or 'غير معروف')}\n"
-                      f"📦 <code>{html.escape(str(service.get('name', '')))}</code>\n"
-                      f"💰 <code>${service['price']:.2f}</code>\n"
-                      f"📧 عدد الإيميلات: <code>{total_emails}</code>")
-    purchase_channel_1, _ = get_configured_purchase_channels()
-    if purchase_channel_1:
-        try:
-            await context.bot.send_message(chat_id=purchase_channel_1, text=channel_1_text,
-                                           parse_mode=ParseMode.HTML)
-        except Exception:
-            logger.exception("Could not send purchase notification.")
     await query.edit_message_text(
-        f"✅ *تم طلب الخدمة!*\n\n🛒 *{service.get('name', '')}*\n"
-        f"💰 *${price:.2f}*\n\n📝 {service.get('message', '')}\n\n"
-        f"_📤 أرسل المعلومات في رسالة جديدة_",
-        parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 قسم السحب", "withdraw_store"))
+        f"🛒 <b>{html.escape(service.get('name', ''))}</b>\n\n"
+        f"💰 سعر الوحدة: <b>${unit_price:.2f}</b>\n\n"
+        f"📌 أرسل <b>العدد</b> الذي تريده (مثال: <code>3</code>):\n\n"
+        f"<i>أو 'إلغاء' للعودة</i>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_single("🔙 إلغاء", "withdraw_store"))
+
+
+# ==================== PURCHASE MESSAGE HANDLER (Multi-step) ====================
+async def handle_purchase_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in PENDING_PURCHASES:
+        return
+    purchase = PENDING_PURCHASES[user_id]
+    step = purchase.get("step", "message")
+    text = update.message.text.strip()
+
+    if text.casefold() in {"إلغاء", "الغاء", "cancel", "отмена"}:
+        PENDING_PURCHASES.pop(user_id, None)
+        save_pending_purchases()
+        await update.message.reply_text(
+            "❌ تم الإلغاء.",
+            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        return
+
+    # enforce restriction
+    user_data = get_user(user_id)
+    restriction = get_any_restriction_message(user_data)
+    if restriction:
+        PENDING_PURCHASES.pop(user_id, None)
+        save_pending_purchases()
+        await update.message.reply_text(restriction, parse_mode=ParseMode.HTML,
+                                        reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        return
+
+    if step == "quantity":
+        try:
+            quantity = int(text)
+            if quantity <= 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("⚠️ أرسل عدداً صحيحاً أكبر من صفر.")
+            return
+        unit_price = float(purchase.get("service_price", 0))
+        total = round(quantity * unit_price, 2)
+        if spendable_balance_cents(user_data) < money_to_cents(total):
+            await update.message.reply_text(
+                f"❌ رصيدك غير كافٍ.\n"
+                f"💰 الإجمالي المطلوب: <b>${total:.2f}</b>\n"
+                f"💳 رصيدك: <b>${cents_to_money(spendable_balance_cents(user_data)):.2f}</b>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb_single("🔙 قسم السحب", "withdraw_store"))
+            PENDING_PURCHASES.pop(user_id, None)
+            save_pending_purchases()
+            return
+        purchase["quantity"] = quantity
+        purchase["total"] = total
+        purchase["step"] = "message"
+        PENDING_PURCHASES[user_id] = purchase
+        save_pending_purchases()
+        await update.message.reply_text(
+            f"✅ <b>تم تحديد الكمية</b>\n\n"
+            f"📦 الكمية: <b>{quantity}</b>\n"
+            f"💰 الإجمالي: <b>${total:.2f}</b>\n\n"
+            f"📝 <b>أرسل الآن:</b>\n"
+            f"<i>ID أو @username أو رابط فقط</i>\n"
+            f"⚠️ <b>بدون أي كلام عربي!</b>\n\n"
+            f"<i>أو 'إلغاء' للعودة</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_single("🔙 إلغاء", "withdraw_store"))
+        return
+
+    # step == "message"
+    if contains_arabic(text):
+        await update.message.reply_text(
+            "❌ <b>الرسالة تحتوي على نص عربي!</b>\n\n"
+            "📌 <b>يجب أن تحتوي الرسالة حصراً على:</b>\n"
+            "• ID (أي طول)\n"
+            "• @username أو #username أو username_123\n"
+            "• أو رابط\n\n"
+            "❌ <b>لا يُسمح بأي كلام عربي.</b>\n\n"
+            "أرسل الرسالة مجدداً بالشكل الصحيح:",
+            parse_mode=ParseMode.HTML)
+        return
+    if not text:
+        return
+
+    total = float(purchase.get("total", 0))
+    total_cents = money_to_cents(total)
+    quantity = int(purchase.get("quantity", 1))
+    user_data = get_user(user_id)
+    if spendable_balance_cents(user_data) < total_cents:
+        await update.message.reply_text(
+            "❌ رصيدك غير كافٍ.",
+            reply_markup=kb_single("🔙 قسم السحب", "withdraw_store"))
+        PENDING_PURCHASES.pop(user_id, None)
+        save_pending_purchases()
+        return
+    debit_spendable_balance(user_data, total_cents)
+    add_transaction(user_data, "purchase", total,
+                    f"شراء: {purchase.get('service_name', '')} x{quantity}")
+    save_user(user_id, user_data)
+
+    user = update.effective_user
+    user_name = user.full_name or "غير معروف"
+    user_username = user.username or "لا يوجد"
+    total_emails = user_data.get("total_approved_emails", 0)
+    _, purchase_channel_2 = get_configured_purchase_channels()
+    if purchase_channel_2:
+        text2 = (
+            f"📋 <b>طلب شراء مكتمل</b>\n\n"
+            f"👤 <b>{html.escape(user_name)}</b>\n"
+            f"🆔 @{html.escape(user_username)}\n"
+            f"🆔 <code>{user_id}</code>\n"
+            f"📦 <code>{html.escape(str(purchase.get('service_name', '')))}</code>\n"
+            f"📊 الكمية: <code>{quantity}</code>\n"
+            f"💰 سعر الوحدة: <code>${float(purchase.get('service_price', 0)):.2f}</code>\n"
+            f"💰 الإجمالي: <code>${total:.2f}</code>\n"
+            f"📧 <code>{total_emails}</code>\n\n"
+            f"📝 <b>المعلومات:</b>\n<code>{html.escape(text)}</code>\n"
+            f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        try:
+            await context.bot.send_message(
+                chat_id=purchase_channel_2, text=text2,
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb_single("✅ تم الإيصال", f"deliver_order:{user_id}"))
+        except Exception:
+            logger.exception("Could not send member message.")
+    if OWNER_ID:
+        try:
+            await context.bot.send_message(
+                chat_id=OWNER_ID,
+                text=(f"📩 *رسالة من مستخدم*\n\n"
+                      f"👤 `{user_name}`\n"
+                      f"🆔 @{user_username}\n"
+                      f"🆔 `{user_id}`\n"
+                      f"📦 `{purchase.get('service_name', '')}`\n"
+                      f"📊 الكمية: `{quantity}`\n"
+                      f"💰 `${total:.2f}`\n\n"
+                      f"📝 `{text}`"),
+                parse_mode=ParseMode.MARKDOWN)
+        except Exception as e:
+            logger.error(f"Error: {e}")
+    await update.message.reply_text(
+        f"✅ *تم استلام رسالتك!*\n\n"
+        f"📦 الكمية: `{quantity}`\n"
+        f"💰 تم خصم `${total:.2f}`.\n"
+        f"📝 `{text}`\n\n"
+        f"_📌 سيتم التواصل معك قريباً._",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+    PENDING_PURCHASES.pop(user_id, None)
+    save_pending_purchases()
 
 
 async def deliver_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -603,66 +693,7 @@ async def deliver_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN)
 
 
-async def handle_purchase_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    from telegram_bot.application import text_input
-    user_id = update.effective_user.id
-    text = update.message.text.strip()
-    if user_id not in PENDING_PURCHASES:
-        await text_input(update, context)
-        return
-    purchase = PENDING_PURCHASES[user_id]
-    user_data = get_user(user_id)
-    price_cents = money_to_cents(purchase.get("service_price", 0))
-    price = cents_to_money(price_cents)
-    balance_cents = spendable_balance_cents(user_data)
-    if balance_cents < price_cents:
-        await update.message.reply_text("❌ رصيدك غير كافٍ.",
-                                        reply_markup=kb_single("🔙 قسم السحب", "withdraw_store"))
-        PENDING_PURCHASES.pop(user_id, None)
-        save_pending_purchases()
-        return
-    debit_spendable_balance(user_data, price_cents)
-    add_transaction(user_data, "purchase", price, f"شراء: {purchase.get('service_name', '')}")
-    save_user(user_id, user_data)
-    user = update.effective_user
-    user_name = user.full_name or "غير معروف"
-    user_username = user.username or "لا يوجد"
-    total_emails = user_data.get("total_approved_emails", 0)
-    _, purchase_channel_2 = get_configured_purchase_channels()
-    if purchase_channel_2:
-        text2 = (f"📋 <b>طلب شراء مكتمل</b>\n\n"
-                 f"👤 <b>{html.escape(user_name)}</b>\n"
-                 f"🆔 @{html.escape(user_username)}\n"
-                 f"🆔 <code>{user_id}</code>\n"
-                 f"📦 <code>{html.escape(str(purchase['service_name']))}</code>\n"
-                 f"💰 <code>${price:.2f}</code>\n"
-                 f"📧 <code>{total_emails}</code>\n\n"
-                 f"📝 <b>الرسالة:</b>\n<code>{html.escape(text)}</code>\n"
-                 f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        try:
-            await context.bot.send_message(chat_id=purchase_channel_2, text=text2,
-                                           parse_mode=ParseMode.HTML,
-                                           reply_markup=kb_single("✅ تم الإيصال", f"deliver_order:{user_id}"))
-        except Exception:
-            logger.exception("Could not send member message.")
-    if OWNER_ID:
-        try:
-            await context.bot.send_message(
-                chat_id=OWNER_ID,
-                text=f"📩 *رسالة من مستخدم*\n\n👤 `{user_name}`\n🆔 @{user_username}\n"
-                     f"🆔 `{user_id}`\n📦 `{purchase['service_name']}`\n"
-                     f"💰 `${price:.2f}`\n\n📝 `{text}`",
-                parse_mode=ParseMode.MARKDOWN)
-        except Exception as e:
-            logger.error(f"Error: {e}")
-    await update.message.reply_text(
-        f"✅ *تم استلام رسالتك!*\n\n💰 تم خصم `${price:.2f}`.\n"
-        f"📝 `{text}`\n\n_📌 سيتم التواصل معك قريباً._",
-        parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
-    PENDING_PURCHASES.pop(user_id, None)
-    save_pending_purchases()
-
-
+# ==================== WALLET ====================
 async def my_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from telegram_bot.owner import admin_balance_stats
     if not await check_forced_channel(update, context):
@@ -693,6 +724,7 @@ async def my_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
 
 
+# ==================== TUTORIALS ====================
 async def tutorials(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
@@ -735,6 +767,7 @@ async def play_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                       reply_markup=kb_single("🔙 التعليم", "tutorials"))
 
 
+# ==================== REFERRAL ====================
 def generate_referral_code():
     return secrets.token_hex(4).upper()
 
@@ -827,12 +860,15 @@ async def referral_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                   reply_markup=kb_single("🔙 إعدادات الإحالة", "referral_settings"))
 
 
+# ==================== STORE INPUT HANDLER (owner) ====================
 async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from telegram_bot.members import main_menu
     if update.effective_user.id != OWNER_ID:
         return
     text = update.message.text.strip()
-    action = context.user_data.get("store_action")
+    action = context.user_data.get("store_action", "")
+
+    # ═══ Store: add category ═══
     if action == "add_category":
         config = load_config()
         if "store_categories" not in config:
@@ -845,7 +881,10 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(f"✅ تم إضافة الفئة: {text}")
         context.user_data.pop("store_action", None)
         await main_menu(update, context)
-    elif action == "set_channel":
+        return
+
+    # ═══ Forced channel ═══
+    if action == "set_channel":
         channel, invite_link = parse_forced_channel_input(text)
         if not channel:
             await update.message.reply_text(
@@ -880,7 +919,10 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
             "يجب على الأعضاء الانضمام إليها قبل استخدام البوت.")
         context.user_data.pop("store_action", None)
         await main_menu(update, context)
-    elif action in {"set_purchase_channel_1", "set_purchase_channel_2"}:
+        return
+
+    # ═══ Purchase channel ═══
+    if action in {"set_purchase_channel_1", "set_purchase_channel_2"}:
         channel_id = normalize_chat_id(text)
         if not channel_id or not (channel_id.startswith("@") or channel_id.lstrip("-").isdigit()):
             await update.message.reply_text("⚠️ المعرف غير صحيح.")
@@ -893,7 +935,10 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(
             f"✅ تم حفظ الكروب رقم {channel_number}: {channel_id}",
             reply_markup=purchase_channels_keyboard())
-    elif action == "add_service_name":
+        return
+
+    # ═══ Add service: name → price → message ═══
+    if action == "add_service_name":
         context.user_data["store_service_name"] = text
         context.user_data["store_action"] = "add_service_price"
         await update.message.reply_text(
@@ -901,7 +946,8 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=kb_single("🔙 إلغاء",
                                    f"store_category:{context.user_data.get('current_category_id')}"))
-    elif action == "add_service_price":
+        return
+    if action == "add_service_price":
         try:
             price = float(text)
             if price <= 0:
@@ -916,7 +962,8 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
                                        f"store_category:{context.user_data.get('current_category_id')}"))
         except ValueError:
             await update.message.reply_text("⚠️ رقم صحيح!")
-    elif action == "add_service_message":
+        return
+    if action == "add_service_message":
         name = context.user_data.get("store_service_name")
         price = context.user_data.get("store_service_price")
         cat_id = context.user_data.get("current_category_id")
@@ -931,9 +978,65 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         for key in ("store_action", "store_service_name", "store_service_price", "current_category_id"):
             context.user_data.pop(key, None)
         await main_menu(update, context)
+        return
+
+    # ═══ Edit existing service: name / price / message ═══
+    if action.startswith("edit_service_"):
+        field = action.replace("edit_service_", "")
+        cat_id = context.user_data.get("edit_service_cat")
+        service_id = context.user_data.get("edit_service_id")
+        if not cat_id or not service_id:
+            await update.message.reply_text("⚠️ حدث خطأ. أعد المحاولة.",
+                                            reply_markup=kb_single("🔙 المبيعات", "store_section"))
+            context.user_data.pop("store_action", None)
+            return
+        config = load_config()
+        updated = False
+        new_value = None
+        for cat in config.get("store_categories", []):
+            if cat["id"] != cat_id:
+                continue
+            for s in cat["services"]:
+                if s["id"] != service_id:
+                    continue
+                if field == "name":
+                    s["name"] = text
+                    new_value = text
+                    updated = True
+                elif field == "price":
+                    try:
+                        price = float(text)
+                        if price <= 0:
+                            await update.message.reply_text("⚠️ السعر > 0!")
+                            return
+                        s["price"] = price
+                        new_value = f"${price:.2f}"
+                        updated = True
+                    except ValueError:
+                        await update.message.reply_text("⚠️ رقم صحيح!")
+                        return
+                elif field == "message":
+                    s["message"] = text
+                    new_value = text
+                    updated = True
+                break
+            break
+        if updated:
+            save_config(config)
+            field_labels = {"name": "الاسم", "price": "السعر", "message": "رسالة الطلب"}
+            await update.message.reply_text(
+                f"✅ تم تحديث {field_labels.get(field, field)} إلى: `{new_value}`",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=kb_single("🔙 الفئة", f"store_category:{cat_id}"))
+        else:
+            await update.message.reply_text("⚠️ لم يتم العثور على المبيعة.",
+                                            reply_markup=kb_single("🔙 المبيعات", "store_section"))
+        for key in ("store_action", "edit_service_cat", "edit_service_id"):
+            context.user_data.pop(key, None)
+        return
 
 
-# ==================== STORE SECTION ====================
+# ==================== OWNER STORE SECTION ====================
 async def owner_store_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
@@ -949,7 +1052,6 @@ async def owner_store_section(update: Update, context: ContextTypes.DEFAULT_TYPE
     buttons.append(("🔙 إعدادات المالك", "owner_panel"))
     await query.edit_message_text("🛒 *إدارة المبيعات*", parse_mode=ParseMode.MARKDOWN,
                                   reply_markup=kb_vertical(buttons))
-
 
 
 async def toggle_tg_lion_store(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -995,6 +1097,7 @@ async def store_category_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
     else:
         msg += "📭 لا توجد مبيعات.\n"
     buttons = [("➕ إضافة", f"store_add_service:{cat_id}"),
+               ("✏️ تعديل", f"store_edit_service:{cat_id}"),
                ("🗑️ حذف", f"store_delete_service:{cat_id}"),
                ("🔙 المبيعات", "store_section")]
     await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
@@ -1010,6 +1113,85 @@ async def store_add_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["store_action"] = "add_service_name"
     await query.edit_message_text("✏️ *اسم المبيعة:*", parse_mode=ParseMode.MARKDOWN,
                                   reply_markup=kb_single("🔙 إلغاء", f"store_category:{cat_id}"))
+
+
+async def store_edit_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    cat_id = query.data.split(":", 1)[1]
+    config = load_config()
+    category = next((c for c in config.get("store_categories", []) if c["id"] == cat_id), None)
+    if not category:
+        await query.edit_message_text("⚠️ الفئة غير موجودة.")
+        return
+    services = category.get("services", [])
+    if not services:
+        await query.edit_message_text("📭 لا توجد مبيعات.",
+                                      reply_markup=kb_single("🔙 الفئة", f"store_category:{cat_id}"))
+        return
+    buttons = [(f"✏️ {s['name']} - ${s['price']:.2f}", f"store_edit_field:pick:{cat_id}:{s['id']}") for s in services]
+    buttons.append(("🔙 الفئة", f"store_category:{cat_id}"))
+    await query.edit_message_text("✏️ *اختر المبيعة للتعديل:*", parse_mode=ParseMode.MARKDOWN,
+                                  reply_markup=kb_vertical(buttons))
+
+
+async def store_edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    parts = query.data.split(":")
+    # format: store_edit_field:pick:<cat_id>:<service_id> OR store_edit_field:<field>:<cat_id>:<service_id>
+    if len(parts) < 4:
+        await query.answer("⚠️", show_alert=True)
+        return
+    field = parts[1]
+    cat_id = parts[2]
+    service_id = parts[3]
+
+    config = load_config()
+    service = None
+    for cat in config.get("store_categories", []):
+        if cat["id"] != cat_id:
+            continue
+        for s in cat["services"]:
+            if s["id"] == service_id:
+                service = s
+                break
+        break
+    if not service:
+        await query.edit_message_text("⚠️ المبيعة غير موجودة.",
+                                      reply_markup=kb_single("🔙 الفئة", f"store_category:{cat_id}"))
+        return
+
+    if field == "pick":
+        buttons = [
+            (f"✏️ الاسم الحالي: {service['name']}", f"store_edit_field:name:{cat_id}:{service_id}"),
+            (f"💰 السعر الحالي: ${service['price']:.2f}", f"store_edit_field:price:{cat_id}:{service_id}"),
+            (f"📝 الرسالة الحالية: {str(service.get('message',''))[:40]}", f"store_edit_field:message:{cat_id}:{service_id}"),
+            ("🔙 الفئة", f"store_category:{cat_id}"),
+        ]
+        await query.edit_message_text(
+            f"✏️ *تعديل المبيعة:* `{service['name']}`\n\n"
+            f"📝 الرسالة: `{service.get('message','')}`\n\n"
+            "اختر ما تريد تعديله:",
+            parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
+        return
+
+    # field in name/price/message
+    field_labels = {"name": "الاسم الجديد", "price": "السعر الجديد", "message": "رسالة الطلب الجديدة"}
+    context.user_data["store_action"] = f"edit_service_{field}"
+    context.user_data["edit_service_cat"] = cat_id
+    context.user_data["edit_service_id"] = service_id
+    await query.edit_message_text(
+        f"✏️ *تعديل {field_labels.get(field, field)}*\n\n"
+        f"للمبيعة: `{service['name']}`\n\n"
+        f"📌 أرسل القيمة الجديدة:\n\n"
+        f"<i>أو 'إلغاء'</i>",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_single("🔙 إلغاء", f"store_category:{cat_id}"))
 
 
 async def store_delete_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1084,8 +1266,6 @@ async def handle_referral(update: Update, context: ContextTypes.DEFAULT_TYPE, re
             parse_mode=ParseMode.MARKDOWN)
     except Exception:
         pass
-
-
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]
