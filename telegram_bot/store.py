@@ -462,6 +462,7 @@ async def withdraw_store(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query and query.data == "withdraw_store":
         PENDING_PURCHASES.pop(uid, None)
         save_pending_purchases()
+    context.user_data.pop("buy_flow", None)
     user_data = get_user(uid)
     restriction = get_any_restriction_message(user_data)
     if restriction:
@@ -539,8 +540,9 @@ async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             f"❌ رصيدك غير كافٍ. الرصيد: ${cents_to_money(spendable_balance_cents(user_data)):.2f}, السعر: ${unit_price:.2f}")
         return
-    PENDING_PURCHASES[uid] = {
-        "step": "quantity",
+
+    # ═══ [جديد] سؤال عن طبيعة الرسالة المطلوبة أولاً ═══
+    context.user_data["buy_flow"] = {
         "service_id": service_id,
         "service_name": service.get("name", ""),
         "service_price": unit_price,
@@ -548,10 +550,80 @@ async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "cat_id": cat_id,
         "purchased_at": datetime.now().isoformat(),
     }
-    save_pending_purchases()
+    await _ask_message_type(update, context, service)
+    return
+
+
+# ═══════════════════════════════════════════════════════════════════
+# ═══ [جديد] طبيعة الرسالة — أزرار اختيار النوع ═══
+# ═══════════════════════════════════════════════════════════════════
+MESSAGE_TYPE_LABELS = {
+    "email": ("📧 إيميل", "إيميل"),
+    "id": ("🆔 آيدي", "آيدي"),
+    "user": ("👤 يوزر", "يوزر"),
+    "phone": ("📱 رقم", "رقم"),
+    "link": ("🔗 رابط", "رابط"),
+    "wallet": ("💳 عنوان محفظة", "عنوان محفظة"),
+}
+
+MESSAGE_TYPE_HINTS = {
+    "email": "مثال: <code>user@example.com</code>",
+    "id": "مثال: <code>123456789</code>",
+    "user": "مثال: <code>@username</code> أو <code>username</code>",
+    "phone": "مثال: <code>+9647701234567</code>",
+    "link": "مثال: <code>https://t.me/example</code>",
+    "wallet": "مثال: <code>T...xyz</code> أو <code>0x...abc</code>",
+}
+
+
+async def _ask_message_type(update: Update, context: ContextTypes.DEFAULT_TYPE, service: dict):
+    """يعرض أزرار اختيار نوع المعلومات المطلوبة."""
+    query = update.callback_query
+    flow = context.user_data.get("buy_flow") or {}
+    unit_price = float(flow.get("service_price", service.get("price", 0)))
     limits_text = _withdraw_limits_display()
+    buttons = [
+        ("📧 إيميل", "buy_type:email"),
+        ("🆔 آيدي", "buy_type:id"),
+        ("👤 يوزر", "buy_type:user"),
+        ("📱 رقم", "buy_type:phone"),
+        ("🔗 رابط", "buy_type:link"),
+        ("💳 عنوان محفظة", "buy_type:wallet"),
+        ("🔙 إلغاء", "withdraw_store"),
+    ]
     await query.edit_message_text(
         f"🛒 <b>{html.escape(service.get('name', ''))}</b>\n\n"
+        f"💰 سعر الوحدة: <b>${unit_price:.2f}</b>{limits_text}\n\n"
+        f"📌 <b>ما نوع المعلومات التي ستُرسلها؟</b>\n"
+        f"<i>اختر النوع المناسب وسيُطلب منك إرسال القيمة فقط:</i>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_vertical(buttons))
+
+
+async def buy_type_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يُستدعى عند اختيار نوع المعلومات — ينتقل لخطوة الكمية."""
+    query = update.callback_query
+    uid = update.effective_user.id
+    msg_type = query.data.split(":", 1)[1]
+    flow = context.user_data.get("buy_flow")
+    if not flow:
+        await query.answer("⚠️ انتهت الجلسة.", show_alert=True)
+        await query.edit_message_text(
+            "⚠️ انتهت الجلسة. ابدأ من جديد.",
+            reply_markup=kb_single("🔙 قسم السحب", "withdraw_store"))
+        return
+    if msg_type not in MESSAGE_TYPE_LABELS:
+        await query.answer("⚠️", show_alert=True)
+        return
+    flow["message_type"] = msg_type
+    flow["step"] = "quantity"
+    context.user_data["buy_flow"] = flow
+    label = MESSAGE_TYPE_LABELS[msg_type][0]
+    unit_price = float(flow.get("service_price", 0))
+    limits_text = _withdraw_limits_display()
+    await query.edit_message_text(
+        f"✅ <b>نوع المعلومات:</b> {label}\n\n"
+        f"🛒 <b>{html.escape(flow.get('service_name', ''))}</b>\n"
         f"💰 سعر الوحدة: <b>${unit_price:.2f}</b>{limits_text}\n\n"
         f"📌 أرسل <b>العدد</b> الذي تريده (مثال: <code>3</code>):\n\n"
         f"<i>أو 'إلغاء' للعودة</i>",
@@ -561,12 +633,21 @@ async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== PURCHASE MESSAGE HANDLER (Multi-step) ====================
 async def handle_purchase_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يعالج رسائل الشراء (flow الجديد عبر buy_flow + القديم عبر PENDING_PURCHASES)."""
     user_id = update.effective_user.id
+    text = update.message.text.strip() if update.message.text else ""
+
+    # ═══ Flow الجديد عبر buy_flow ═══
+    flow = context.user_data.get("buy_flow")
+    if flow:
+        await _handle_buy_flow_message(update, context, flow, text)
+        return
+
+    # ═══ Flow القديم عبر PENDING_PURCHASES (للتوافق) ═══
     if user_id not in PENDING_PURCHASES:
         return
     purchase = PENDING_PURCHASES[user_id]
     step = purchase.get("step", "message")
-    text = update.message.text.strip()
 
     if text.casefold() in {"إلغاء", "الغاء", "cancel", "отмена"}:
         PENDING_PURCHASES.pop(user_id, None)
@@ -596,7 +677,6 @@ async def handle_purchase_message(update: Update, context: ContextTypes.DEFAULT_
         unit_price = float(purchase.get("service_price", 0))
         total = round(quantity * unit_price, 2)
 
-        # ═══ تطبيق حدود السحب ═══
         limit_error = _validate_withdraw_amount(total)
         if limit_error:
             await update.message.reply_text(
@@ -632,42 +712,177 @@ async def handle_purchase_message(update: Update, context: ContextTypes.DEFAULT_
             reply_markup=kb_single("🔙 إلغاء", "withdraw_store"))
         return
 
-    # step == "message"
-    if contains_arabic(text):
+    if step == "message":
+        if contains_arabic(text):
+            await update.message.reply_text(
+                "❌ <b>الرسالة تحتوي على نص عربي!</b>\n\n"
+                "📌 <b>يجب أن تحتوي الرسالة حصراً على:</b>\n"
+                "• ID (أي طول)\n"
+                "• @username أو #username أو username_123\n"
+                "• أو رابط\n\n"
+                "❌ <b>لا يُسمح بأي كلام عربي.</b>\n\n"
+                "أرسل الرسالة مجدداً بالشكل الصحيح:",
+                parse_mode=ParseMode.HTML)
+            return
+        if not text:
+            return
+        await _finalize_purchase(update, context, purchase, text, user_data)
+
+
+async def _handle_buy_flow_message(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                    flow: dict, text: str):
+    """يعالج خطوات flow الشراء الجديد."""
+    user_id = update.effective_user.id
+    step = flow.get("step", "quantity")
+
+    if text.casefold() in {"إلغاء", "الغاء", "cancel", "отмена"}:
+        context.user_data.pop("buy_flow", None)
         await update.message.reply_text(
-            "❌ <b>الرسالة تحتوي على نص عربي!</b>\n\n"
-            "📌 <b>يجب أن تحتوي الرسالة حصراً على:</b>\n"
-            "• ID (أي طول)\n"
-            "• @username أو #username أو username_123\n"
-            "• أو رابط\n\n"
-            "❌ <b>لا يُسمح بأي كلام عربي.</b>\n\n"
-            "أرسل الرسالة مجدداً بالشكل الصحيح:",
-            parse_mode=ParseMode.HTML)
-        return
-    if not text:
+            "❌ تم الإلغاء.",
+            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
         return
 
+    user_data = get_user(user_id)
+    restriction = get_any_restriction_message(user_data)
+    if restriction:
+        context.user_data.pop("buy_flow", None)
+        await update.message.reply_text(restriction, parse_mode=ParseMode.HTML,
+                                        reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        return
+
+    if step == "quantity":
+        try:
+            quantity = int(text)
+            if quantity <= 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("⚠️ أرسل عدداً صحيحاً أكبر من صفر.")
+            return
+        unit_price = float(flow.get("service_price", 0))
+        total = round(quantity * unit_price, 2)
+
+        limit_error = _validate_withdraw_amount(total)
+        if limit_error:
+            await update.message.reply_text(
+                limit_error,
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb_single("🔙 إلغاء", "withdraw_store"))
+            return
+
+        if spendable_balance_cents(user_data) < money_to_cents(total):
+            await update.message.reply_text(
+                f"❌ رصيدك غير كافٍ.\n"
+                f"💰 الإجمالي المطلوب: <b>${total:.2f}</b>\n"
+                f"💳 رصيدك: <b>${cents_to_money(spendable_balance_cents(user_data)):.2f}</b>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb_single("🔙 قسم السحب", "withdraw_store"))
+            context.user_data.pop("buy_flow", None)
+            return
+        flow["quantity"] = quantity
+        flow["total"] = total
+        flow["step"] = "message"
+        context.user_data["buy_flow"] = flow
+        msg_type = flow.get("message_type", "id")
+        type_label = MESSAGE_TYPE_LABELS.get(msg_type, ("📝", "معلومات"))[0]
+        type_hint = MESSAGE_TYPE_HINTS.get(msg_type, "")
+        await update.message.reply_text(
+            f"✅ <b>تم تحديد الكمية</b>\n\n"
+            f"📦 الكمية: <b>{quantity}</b>\n"
+            f"💰 الإجمالي: <b>${total:.2f}</b>\n"
+            f"📋 نوع المعلومات: {type_label}\n\n"
+            f"📝 <b>أرسل الآن {MESSAGE_TYPE_LABELS.get(msg_type, ('', 'المعلومات'))[1]}:</b>\n"
+            f"{type_hint}\n\n"
+            f"⚠️ <b>بدون أي كلام عربي!</b>\n\n"
+            f"<i>أو 'إلغاء' للعودة</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_single("🔙 إلغاء", "withdraw_store"))
+        return
+
+    if step == "message":
+        if contains_arabic(text):
+            msg_type = flow.get("message_type", "id")
+            type_label = MESSAGE_TYPE_LABELS.get(msg_type, ("📝", "معلومات"))[0]
+            await update.message.reply_text(
+                f"❌ <b>الرسالة تحتوي على نص عربي!</b>\n\n"
+                f"📌 <b>المطلوب إرساله:</b> {type_label} فقط\n\n"
+                f"❌ <b>لا يُسمح بأي كلام عربي.</b>\n\n"
+                f"أرسل القيمة مجدداً بالشكل الصحيح:",
+                parse_mode=ParseMode.HTML)
+            return
+        if not text:
+            return
+        # Validate type-specific input
+        msg_type = flow.get("message_type", "id")
+        err = _validate_message_type_input(msg_type, text)
+        if err:
+            await update.message.reply_text(err, parse_mode=ParseMode.HTML)
+            return
+        await _finalize_purchase(update, context, flow, text, user_data, from_flow=True)
+
+
+def _validate_message_type_input(msg_type: str, text: str) -> Optional[str]:
+    """يتحقق من صحة القيمة حسب النوع المختار."""
+    clean = text.strip()
+    if not clean:
+        return "⚠️ أرسل قيمة صحيحة."
+    if msg_type == "email":
+        if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", clean):
+            return ("⚠️ <b>صيغة الإيميل غير صحيحة.</b>\n"
+                    "📌 مثال: <code>user@example.com</code>")
+    elif msg_type == "id":
+        if not re.fullmatch(r"\d{3,}", clean):
+            return ("⚠️ <b>الآيدي يجب أن يكون رقماً (3 أرقام على الأقل).</b>\n"
+                    "📌 مثال: <code>123456789</code>")
+    elif msg_type == "user":
+        if not re.fullmatch(r"@?[A-Za-z0-9_]{4,32}", clean):
+            return ("⚠️ <b>صيغة اليوزر غير صحيحة.</b>\n"
+                    "📌 مثال: <code>@username</code> أو <code>username</code>")
+    elif msg_type == "phone":
+        digits = re.sub(r"\D", "", clean)
+        if not (7 <= len(digits) <= 15):
+            return ("⚠️ <b>صيغة الرقم غير صحيحة.</b>\n"
+                    "📌 مثال: <code>+9647701234567</code>")
+    elif msg_type == "link":
+        if not re.match(r"^https?://\S+$", clean, re.IGNORECASE):
+            return ("⚠️ <b>صيغة الرابط غير صحيحة.</b>\n"
+                    "📌 يجب أن يبدأ بـ <code>http://</code> أو <code>https://</code>")
+    elif msg_type == "wallet":
+        if len(clean) < 10 or len(clean) > 120:
+            return ("⚠️ <b>صيغة عنوان المحفظة غير صحيحة.</b>\n"
+                    "📌 يجب أن يكون طول العنوان بين 10 و120 حرفاً.")
+    return None
+
+
+async def _finalize_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                              purchase: dict, text: str,
+                              user_data: dict, from_flow: bool = False):
+    """يُنفّذ الخصم ويرسل الإشعارات ويُنهي العملية."""
+    user_id = update.effective_user.id
     total = float(purchase.get("total", 0))
     total_cents = money_to_cents(total)
     quantity = int(purchase.get("quantity", 1))
 
-    # ═══ تحقق نهائي من الحدود (في حال تغيّرت أثناء العملية) ═══
     limit_error = _validate_withdraw_amount(total)
     if limit_error:
         await update.message.reply_text(
             limit_error, parse_mode=ParseMode.HTML,
             reply_markup=kb_single("🔙 إلغاء", "withdraw_store"))
-        PENDING_PURCHASES.pop(user_id, None)
-        save_pending_purchases()
+        if from_flow:
+            context.user_data.pop("buy_flow", None)
+        else:
+            PENDING_PURCHASES.pop(user_id, None)
+            save_pending_purchases()
         return
 
-    user_data = get_user(user_id)
     if spendable_balance_cents(user_data) < total_cents:
         await update.message.reply_text(
             "❌ رصيدك غير كافٍ.",
             reply_markup=kb_single("🔙 قسم السحب", "withdraw_store"))
-        PENDING_PURCHASES.pop(user_id, None)
-        save_pending_purchases()
+        if from_flow:
+            context.user_data.pop("buy_flow", None)
+        else:
+            PENDING_PURCHASES.pop(user_id, None)
+            save_pending_purchases()
         return
     debit_spendable_balance(user_data, total_cents)
     add_transaction(user_data, "purchase", total,
@@ -678,6 +893,10 @@ async def handle_purchase_message(update: Update, context: ContextTypes.DEFAULT_
     user_name = user.full_name or "غير معروف"
     user_username = user.username or "لا يوجد"
     total_emails = user_data.get("total_approved_emails", 0)
+    msg_type = purchase.get("message_type", "")
+    type_label = MESSAGE_TYPE_LABELS.get(msg_type, ("", ""))[1] if msg_type else ""
+    type_line = f"📋 نوع المعلومات: <code>{html.escape(type_label)}</code>\n" if type_label else ""
+
     _, purchase_channel_2 = get_configured_purchase_channels()
     if purchase_channel_2:
         text2 = (
@@ -686,6 +905,7 @@ async def handle_purchase_message(update: Update, context: ContextTypes.DEFAULT_
             f"🆔 @{html.escape(user_username)}\n"
             f"🆔 <code>{user_id}</code>\n"
             f"📦 <code>{html.escape(str(purchase.get('service_name', '')))}</code>\n"
+            f"{type_line}"
             f"📊 الكمية: <code>{quantity}</code>\n"
             f"💰 سعر الوحدة: <code>${float(purchase.get('service_price', 0)):.2f}</code>\n"
             f"💰 الإجمالي: <code>${total:.2f}</code>\n"
@@ -702,6 +922,7 @@ async def handle_purchase_message(update: Update, context: ContextTypes.DEFAULT_
             logger.exception("Could not send member message.")
     if OWNER_ID:
         try:
+            owner_type_line = f"📋 نوع: `{type_label}`\n" if type_label else ""
             await context.bot.send_message(
                 chat_id=OWNER_ID,
                 text=(f"📩 *رسالة من مستخدم*\n\n"
@@ -709,12 +930,14 @@ async def handle_purchase_message(update: Update, context: ContextTypes.DEFAULT_
                       f"🆔 @{user_username}\n"
                       f"🆔 `{user_id}`\n"
                       f"📦 `{purchase.get('service_name', '')}`\n"
+                      f"{owner_type_line}"
                       f"📊 الكمية: `{quantity}`\n"
                       f"💰 `${total:.2f}`\n\n"
                       f"📝 `{text}`"),
                 parse_mode=ParseMode.MARKDOWN)
         except Exception as e:
             logger.error(f"Error: {e}")
+
     await update.message.reply_text(
         f"✅ *تم استلام رسالتك!*\n\n"
         f"📦 الكمية: `{quantity}`\n"
@@ -723,8 +946,12 @@ async def handle_purchase_message(update: Update, context: ContextTypes.DEFAULT_
         f"_📌 سيتم التواصل معك قريباً._",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
-    PENDING_PURCHASES.pop(user_id, None)
-    save_pending_purchases()
+
+    if from_flow:
+        context.user_data.pop("buy_flow", None)
+    else:
+        PENDING_PURCHASES.pop(user_id, None)
+        save_pending_purchases()
 
 
 async def deliver_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1105,6 +1332,7 @@ async def owner_store_section(update: Update, context: ContextTypes.DEFAULT_TYPE
     toggle_label = "👁️ إخفاء حسابات لكل الدول عن الأعضاء" if visible else "👁️ إظهار حسابات لكل الدول للأعضاء"
     buttons.append((toggle_label, "toggle_tg_lion_store"))
     buttons.append(("➕ إضافة فئة", "store_add_category"))
+    buttons.append(("🗑️ حذف فئة", "store_delete_category_menu"))
     buttons.append(("🔙 إعدادات المالك", "owner_panel"))
     await query.edit_message_text("🛒 *إدارة المبيعات*", parse_mode=ParseMode.MARKDOWN,
                                   reply_markup=kb_vertical(buttons))
@@ -1123,6 +1351,96 @@ async def toggle_tg_lion_store(update: Update, context: ContextTypes.DEFAULT_TYP
     await owner_store_section(update, context)
 
 
+# ═══════════════════════════════════════════════════════════════════
+# ═══ [جديد] حذف فئة من قسم المبيعات ═══
+# ═══════════════════════════════════════════════════════════════════
+async def store_delete_category_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يعرض الفئات للحذف."""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    config = load_config()
+    categories = config.get("store_categories", [])
+    if not categories:
+        await query.edit_message_text(
+            "📭 لا توجد فئات للحذف.",
+            reply_markup=kb_single("🔙 المبيعات", "store_section"))
+        return
+    buttons = []
+    for cat in categories:
+        services_count = len(cat.get("services", []))
+        label = f"🗑️ {cat['name']} ({services_count} خدمة)"
+        buttons.append((label[:64], f"store_delete_category_confirm:{cat['id']}"))
+    buttons.append(("🔙 المبيعات", "store_section"))
+    await query.edit_message_text(
+        "🗑️ *حذف فئة*\n\n"
+        "⚠️ <b>تحذير:</b> حذف الفئة يحذف كل الخدمات داخلها نهائياً.\n\n"
+        "اختر الفئة التي تريد حذفها:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_vertical(buttons))
+
+
+async def store_delete_category_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يعرض تأكيد حذف الفئة."""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    try:
+        cat_id = query.data.split(":", 1)[1]
+    except (IndexError, ValueError):
+        await query.answer("⚠️", show_alert=True)
+        return
+    config = load_config()
+    category = next((c for c in config.get("store_categories", []) if c["id"] == cat_id), None)
+    if not category:
+        await query.answer("⚠️ الفئة غير موجودة.", show_alert=True)
+        await store_delete_category_menu(update, context)
+        return
+    services_count = len(category.get("services", []))
+    await query.edit_message_text(
+        f"⚠️ <b>تأكيد الحذف</b>\n\n"
+        f"📂 <b>الفئة:</b> {html.escape(category['name'])}\n"
+        f"📦 <b>عدد الخدمات داخلها:</b> {services_count}\n\n"
+        f"🚨 <b>سيتم حذف الفئة وكل خدماتها نهائياً!</b>\n\n"
+        f"هل أنت متأكد؟",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_vertical([
+            ("✅ نعم، احذف نهائياً", f"store_delete_category_execute:{cat_id}"),
+            ("❌ إلغاء", "store_delete_category_menu"),
+        ]))
+
+
+async def store_delete_category_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ينفذ حذف الفئة."""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    try:
+        cat_id = query.data.split(":", 1)[1]
+    except (IndexError, ValueError):
+        await query.answer("⚠️", show_alert=True)
+        return
+    config = load_config()
+    before = len(config.get("store_categories", []))
+    config["store_categories"] = [
+        c for c in config.get("store_categories", []) if c["id"] != cat_id
+    ]
+    after = len(config["store_categories"])
+    if before == after:
+        await query.answer("⚠️ لم يتم العثور على الفئة.", show_alert=True)
+        await store_delete_category_menu(update, context)
+        return
+    save_config(config)
+    await query.answer("✅ تم حذف الفئة.", show_alert=True)
+    await owner_store_section(update, context)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# ═══ إضافة فئة / إضافة خدمة ═══
+# ═══════════════════════════════════════════════════════════════════
 async def store_add_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
