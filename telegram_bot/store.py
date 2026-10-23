@@ -442,28 +442,7 @@ MESSAGE_TYPE_HINTS = {
 }
 
 
-def _service_fields_summary(service: dict) -> str:
-    """يُعيد ملخصاً لإعدادات الخدمة (للأدمن)."""
-    types = service.get("message_types") or []
-    type_labels = [MESSAGE_TYPE_LABELS[t][1] for t in types if t in MESSAGE_TYPE_LABELS]
-    types_str = " + ".join(type_labels) if type_labels else "غير محدد"
-    min_v = service.get("min_qty")
-    max_v = service.get("max_qty")
-    if min_v is None and max_v is None:
-        qty_str = "🔒 كمية ثابتة = 1 (لا يظهر حقل العدد)"
-    else:
-        parts = []
-        if min_v is not None:
-            parts.append(f"أدنى: {int(min_v)}")
-        if max_v is not None:
-            parts.append(f"أعلى: {int(max_v)}")
-        qty_str = " | ".join(parts)
-    return (f"📋 المعلومات المطلوبة: {types_str}\n"
-            f"🔢 الكمية: {qty_str}")
-
-
 def _validate_message_input_by_types(types: list, values: dict) -> Optional[str]:
-    """يتحقق من صحة كل قيمة حسب نوعها."""
     for t in types:
         clean = (values.get(t) or "").strip()
         if not clean:
@@ -546,7 +525,6 @@ async def user_category_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """يبدأ flow الشراء — يعرض ملخص الخدمة ثم يطلب المعلومات أو العدد حسب الإعدادات."""
     if not await check_forced_channel(update, context):
         return
     query = update.callback_query
@@ -588,8 +566,8 @@ async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     min_qty = service.get("min_qty")
     max_qty = service.get("max_qty")
-    # ═══ كمية ثابتة (تخطي المالك للحدود) ═══
     if min_qty is None and max_qty is None:
+        # كمية ثابتة = 1
         context.user_data["buy_flow"] = {
             "service_id": service_id,
             "service_name": service.get("name", ""),
@@ -600,15 +578,13 @@ async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "total": round(unit_price, 2),
             "message_types": types,
             "collected": {},
-            "fixed_quantity": True,
-            "step": "collect_info",
             "current_type_index": 0,
+            "step": "collect_info",
             "purchased_at": datetime.now().isoformat(),
         }
         await _ask_next_message_type(update, context)
         return
 
-    # ═══ حدود محددة → نطلب العدد أولاً ═══
     context.user_data["buy_flow"] = {
         "service_id": service_id,
         "service_name": service.get("name", ""),
@@ -619,17 +595,16 @@ async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "collected": {},
         "min_qty": min_qty,
         "max_qty": max_qty,
-        "fixed_quantity": False,
         "step": "quantity",
         "purchased_at": datetime.now().isoformat(),
     }
     limits_text = ""
-    if min_qty is not None or max_qty is not None:
-        parts_txt = []
-        if min_qty is not None:
-            parts_txt.append(f"أدنى: {int(min_qty)}")
-        if max_qty is not None:
-            parts_txt.append(f"أعلى: {int(max_qty)}")
+    parts_txt = []
+    if min_qty is not None:
+        parts_txt.append(f"أدنى: {int(min_qty)}")
+    if max_qty is not None:
+        parts_txt.append(f"أعلى: {int(max_qty)}")
+    if parts_txt:
         limits_text = "\n📊 " + " | ".join(parts_txt)
     await query.edit_message_text(
         f"🛒 <b>{html.escape(service.get('name', ''))}</b>\n\n"
@@ -641,7 +616,6 @@ async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _ask_next_message_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """يطلب من المشتري إدخال النوع التالي من المعلومات المطلوبة."""
     query = update.callback_query
     send_msg = (query.edit_message_text if query else update.effective_message.reply_text)
     flow = context.user_data.get("buy_flow")
@@ -650,7 +624,6 @@ async def _ask_next_message_type(update: Update, context: ContextTypes.DEFAULT_T
     types = flow.get("message_types", [])
     idx = flow.get("current_type_index", 0)
     if idx >= len(types):
-        # كل الأنواع تم جمعها → finalize
         await _finalize_purchase(update, context, flow, from_flow=True)
         return
     current_type = types[idx]
@@ -670,19 +643,16 @@ async def _ask_next_message_type(update: Update, context: ContextTypes.DEFAULT_T
         reply_markup=kb_single("🔙 إلغاء", "withdraw_store"))
 
 
-# ==================== PURCHASE MESSAGE HANDLER (Multi-step) ====================
+# ==================== PURCHASE MESSAGE HANDLER ====================
 async def handle_purchase_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """يعالج رسائل الشراء (flow عبر buy_flow + القديم عبر PENDING_PURCHASES)."""
     user_id = update.effective_user.id
     text = update.message.text.strip() if update.message.text else ""
 
-    # ═══ Flow الجديد عبر buy_flow ═══
     flow = context.user_data.get("buy_flow")
     if flow:
         await _handle_buy_flow_message(update, context, flow, text)
         return
 
-    # ═══ Flow القديم عبر PENDING_PURCHASES (للتوافق) ═══
     if user_id not in PENDING_PURCHASES:
         return
     purchase = PENDING_PURCHASES[user_id]
@@ -734,8 +704,7 @@ async def handle_purchase_message(update: Update, context: ContextTypes.DEFAULT_
             f"✅ <b>تم تحديد الكمية</b>\n\n"
             f"📦 الكمية: <b>{quantity}</b>\n"
             f"💰 الإجمالي: <b>${total:.2f}</b>\n\n"
-            f"📝 <b>أرسل الآن:</b>\n"
-            f"<i>ID أو @username أو رابط فقط</i>\n"
+            f"📝 <b>أرسل الآن المعلومات:</b>\n"
             f"⚠️ <b>بدون أي كلام عربي!</b>\n\n"
             f"<i>أو 'إلغاء' للعودة</i>",
             parse_mode=ParseMode.HTML,
@@ -756,7 +725,6 @@ async def handle_purchase_message(update: Update, context: ContextTypes.DEFAULT_
 
 async def _handle_buy_flow_message(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                     flow: dict, text: str):
-    """يعالج خطوات flow الشراء."""
     user_id = update.effective_user.id
     step = flow.get("step", "quantity")
 
@@ -846,7 +814,6 @@ async def _handle_buy_flow_message(update: Update, context: ContextTypes.DEFAULT
 async def _finalize_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE,
                               purchase: dict, text: str = "",
                               user_data: Optional[dict] = None, from_flow: bool = False):
-    """يُنفّذ الخصم ويرسل الإشعارات ويُنهي العملية."""
     user_id = update.effective_user.id
     total = float(purchase.get("total", 0))
     total_cents = money_to_cents(total)
@@ -875,7 +842,6 @@ async def _finalize_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE,
     user_username = user.username or "لا يوجد"
     total_emails = user_data.get("total_approved_emails", 0)
 
-    # نص المعلومات المُجمّعة
     if from_flow:
         collected = purchase.get("collected", {})
         types = purchase.get("message_types", [])
@@ -1136,7 +1102,7 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     from telegram_bot.members import main_menu
     if update.effective_user.id != OWNER_ID:
         return
-    text = update.message.text.strip()
+    text = update.message.text.strip() if update.message.text else ""
     action = context.user_data.get("store_action", "")
 
     # ═══ إضافة فئة ═══
@@ -1208,12 +1174,16 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     # ═══ إضافة خدمة: اسم ═══
     if action == "add_service_name":
+        if not text:
+            await update.message.reply_text("⚠️ أرسل اسماً صالحاً.")
+            return
         context.user_data["new_service_name"] = text
         context.user_data["new_service_types"] = []
         context.user_data["store_action"] = "add_service_types"
         cat_id = context.user_data.get("current_category_id")
         await update.message.reply_text(
-            "📋 *الخطوة 2/5*: اختر نوع المعلومات المطلوبة من المشتري",
+            "📋 *الخطوة 2/5*: اختر نوع المعلومات المطلوبة من المشتري\n\n"
+            "<i>يمكنك اختيار أكثر من نوع — ثم اضغط 'متابعة'</i>",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=_service_types_keyboard([]))
         return
@@ -1296,6 +1266,15 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         mn = context.user_data.get("new_service_min")
         mx = context.user_data.get("new_service_max")
         cat_id = context.user_data.get("current_category_id")
+        if not name or not price or not types:
+            await update.message.reply_text(
+                "⚠️ بيانات الخدمة غير مكتملة. أعد العملية من البداية.",
+                reply_markup=kb_single("🔙 المبيعات", "store_section"))
+            for key in ("store_action", "new_service_name", "new_service_price",
+                        "new_service_types", "new_service_min", "new_service_max",
+                        "current_category_id"):
+                context.user_data.pop(key, None)
+            return
         config = load_config()
         for cat in config.get("store_categories", []):
             if cat["id"] == cat_id:
@@ -1310,7 +1289,12 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 })
                 break
         save_config(config)
-        await update.message.reply_text("✅ تم إضافة الخدمة بنجاح!")
+        await update.message.reply_text(
+            f"✅ *تم إضافة الخدمة بنجاح!*\n\n"
+            f"📝 الاسم: {html.escape(name)}\n"
+            f"💰 السعر: ${price:.2f}\n"
+            f"📋 المعلومات: {' + '.join(MESSAGE_TYPE_LABELS[t][1] for t in types)}\n",
+            parse_mode=ParseMode.MARKDOWN)
         for key in ("store_action", "new_service_name", "new_service_price",
                     "new_service_types", "new_service_min", "new_service_max",
                     "current_category_id"):
@@ -1408,7 +1392,6 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 def _service_types_keyboard(selected: list) -> InlineKeyboardMarkup:
-    """أزرار اختيار أنواع المعلومات (متعدد الاختيار)."""
     rows = []
     for key, (label, _) in MESSAGE_TYPE_LABELS.items():
         mark = "✅ " if key in selected else "☐ "
@@ -1420,7 +1403,6 @@ def _service_types_keyboard(selected: list) -> InlineKeyboardMarkup:
 
 
 async def service_toggle_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """يبدّل تحديد نوع معلومات في نموذج الإضافة."""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫", show_alert=True)
@@ -1448,7 +1430,6 @@ async def service_toggle_type(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def service_types_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """ينهي اختيار الأنواع وينتقل للسعر."""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫", show_alert=True)
@@ -1468,7 +1449,6 @@ async def service_types_done(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def _skip_qty_min(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """تخطي الحد الأدنى → كمية ثابتة = 1."""
     context.user_data["new_service_min"] = None
     context.user_data["new_service_max"] = None
     context.user_data["store_action"] = "add_service_message"
@@ -1482,7 +1462,6 @@ async def _skip_qty_min(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _skip_qty_max(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """تخطي الحد الأعلى (يبقي الحد الأدنى)."""
     context.user_data["new_service_max"] = None
     context.user_data["store_action"] = "add_service_message"
     cat_id = context.user_data.get("current_category_id")
@@ -1654,11 +1633,15 @@ async def store_category_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
         for idx, s in enumerate(services, 1):
             types = s.get("message_types") or []
             types_str = " + ".join(MESSAGE_TYPE_LABELS[t][1] for t in types if t in MESSAGE_TYPE_LABELS) or "—"
-            msg += f"{idx}. 🛒 {s['name']} — 💰 ${s['price']:.2f}\n   📋 {types_str}\n"
+            msg += f"{idx}. 🛒 {s['name']} — 💰 ${float(s['price']):.2f}\n   📋 {types_str}\n"
     else:
         msg += "📭 لا توجد خدمات.\n"
-    buttons = [("➕ إضافة خدمة", f"store_add_service:{cat_id}"),
-               ("🔙 المبيعات", "store_section")]
+    buttons = [
+        ("➕ إضافة خدمة", f"store_add_service:{cat_id}"),
+        ("✏️ تعديل خدمة", f"store_edit_service:{cat_id}"),
+        ("🗑️ حذف خدمة", f"store_delete_service:{cat_id}"),
+        ("🔙 المبيعات", "store_section"),
+    ]
     await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN,
                                   reply_markup=kb_vertical(buttons))
 
@@ -1679,7 +1662,106 @@ async def store_add_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# ═══ تفاصيل الخدمة (للتعديل) ═══
+# ═══ قائمة الخدمات للتعديل / الحذف ═══
+# ═══════════════════════════════════════════════════════════════════
+async def store_edit_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫", show_alert=True)
+        return
+    cat_id = query.data.split(":", 1)[1]
+    config = load_config()
+    category = next((c for c in config.get("store_categories", []) if c["id"] == cat_id), None)
+    if not category:
+        await query.edit_message_text("⚠️ الفئة غير موجودة.")
+        return
+    services = category.get("services", [])
+    if not services:
+        await query.edit_message_text("📭 لا توجد خدمات.",
+                                      reply_markup=kb_single("🔙 الفئة", f"store_category:{cat_id}"))
+        return
+    buttons = [(f"✏️ {s['name']} — ${float(s['price']):.2f}",
+                f"service_detail:{cat_id}:{s['id']}") for s in services]
+    buttons.append(("🔙 الفئة", f"store_category:{cat_id}"))
+    await query.edit_message_text("✏️ *اختر الخدمة:*", parse_mode=ParseMode.MARKDOWN,
+                                  reply_markup=kb_vertical(buttons))
+
+
+async def store_delete_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫", show_alert=True)
+        return
+    cat_id = query.data.split(":", 1)[1]
+    config = load_config()
+    category = next((c for c in config.get("store_categories", []) if c["id"] == cat_id), None)
+    if not category:
+        await query.edit_message_text("⚠️ الفئة غير موجودة.")
+        return
+    services = category.get("services", [])
+    if not services:
+        await query.edit_message_text("📭 لا توجد خدمات.",
+                                      reply_markup=kb_single("🔙 الفئة", f"store_category:{cat_id}"))
+        return
+    buttons = [(f"❌ {s['name']} — ${float(s['price']):.2f}",
+                f"store_delete_service_confirm:{cat_id}:{s['id']}") for s in services]
+    buttons.append(("🔙 الفئة", f"store_category:{cat_id}"))
+    await query.edit_message_text("🗑️ *حذف خدمة*", parse_mode=ParseMode.MARKDOWN,
+                                  reply_markup=kb_vertical(buttons))
+
+
+async def store_delete_service_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫", show_alert=True)
+        return
+    parts = query.data.split(":")
+    cat_id = parts[1]
+    service_id = parts[2]
+    config = load_config()
+    service = None
+    for cat in config.get("store_categories", []):
+        if cat["id"] == cat_id:
+            for s in cat["services"]:
+                if s["id"] == service_id:
+                    service = s
+                    break
+            break
+    if not service:
+        await query.answer("⚠️ الخدمة غير موجودة.", show_alert=True)
+        return
+    await query.edit_message_text(
+        f"⚠️ <b>تأكيد حذف الخدمة</b>\n\n"
+        f"🛒 الاسم: {html.escape(service['name'])}\n\n"
+        f"سيتم الحذف نهائياً — لا يمكن التراجع.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_vertical([
+            ("✅ نعم، احذف", f"delete_service:{cat_id}:{service_id}"),
+            ("❌ إلغاء", f"service_detail:{cat_id}:{service_id}"),
+        ]))
+
+
+async def delete_service_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫", show_alert=True)
+        return
+    parts = query.data.split(":")
+    cat_id = parts[1]
+    service_id = parts[2]
+    config = load_config()
+    for cat in config.get("store_categories", []):
+        if cat["id"] == cat_id:
+            cat["services"] = [s for s in cat["services"] if s["id"] != service_id]
+            break
+    save_config(config)
+    await query.answer("✅ تم الحذف.")
+    await query.edit_message_text("✅ تم حذف الخدمة.",
+                                  reply_markup=kb_single("🔙 الفئة", f"store_category:{cat_id}"))
+
+
+# ═══════════════════════════════════════════════════════════════════
+# ═══ تفاصيل الخدمة (تعديل الحقول الفردية) ═══
 # ═══════════════════════════════════════════════════════════════════
 async def service_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1737,8 +1819,54 @@ async def service_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                   reply_markup=kb_vertical(buttons))
 
 
+async def store_edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫", show_alert=True)
+        return
+    parts = query.data.split(":")
+    if len(parts) < 4:
+        await query.answer("⚠️", show_alert=True)
+        return
+    field = parts[1]
+    cat_id = parts[2]
+    service_id = parts[3]
+    config = load_config()
+    service = None
+    for cat in config.get("store_categories", []):
+        if cat["id"] != cat_id:
+            continue
+        for s in cat["services"]:
+            if s["id"] == service_id:
+                service = s
+                break
+        break
+    if not service:
+        await query.edit_message_text("⚠️ الخدمة غير موجودة.",
+                                      reply_markup=kb_single("🔙 الفئة", f"store_category:{cat_id}"))
+        return
+
+    context.user_data["store_action"] = f"edit_service_{field}"
+    context.user_data["edit_service_cat"] = cat_id
+    context.user_data["edit_service_id"] = service_id
+    field_labels = {"name": "الاسم الجديد", "price": "السعر الجديد",
+                    "message": "الرسالة الجديدة", "qty_min": "الحد الأدنى الجديد",
+                    "qty_max": "الحد الأعلى الجديد"}
+    extra_hint = ""
+    if field == "qty_min":
+        extra_hint = "\n\n⚠️ <i>أرسل 'تخطي' لجعل الكمية ثابتة = 1 (مع إلغاء الحد الأعلى أيضاً)</i>"
+    elif field == "qty_max":
+        extra_hint = "\n\n⚠️ <i>أرسل 'تخطي' لإلغاء السقف الأعلى</i>"
+    await query.edit_message_text(
+        f"✏️ *تعديل {field_labels.get(field, field)}*\n\n"
+        f"للخدمة: `{service['name']}`\n\n"
+        f"📌 أرسل القيمة الجديدة:{extra_hint}\n\n"
+        f"<i>أو 'إلغاء'</i>",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_single("🔙 إلغاء", f"service_detail:{cat_id}:{service_id}"))
+
+
 async def service_edit_types(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """فتح قائمة تعديل أنواع المعلومات لخدمة قائمة."""
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫", show_alert=True)
@@ -1832,159 +1960,11 @@ async def service_edit_types_save(update: Update, context: ContextTypes.DEFAULT_
         context.user_data.pop("edit_types_service", None)
         context.user_data.pop("edit_types_selected", None)
         await query.answer("✅ تم الحفظ.")
-        # عُد لتفاصيل الخدمة
-        fake_query = type("Q", (), {"data": f"service_detail:{cat_id}:{service_id}"})()
-        # سنستدعي service_detail يدوياً:
         await query.edit_message_text(
             "✅ تم تحديث أنواع المعلومات.",
             reply_markup=kb_single("🔙 تفاصيل الخدمة", f"service_detail:{cat_id}:{service_id}"))
     else:
         await query.answer("⚠️ لم يتم الحفظ.", show_alert=True)
-
-
-async def store_edit_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معروضة سابقاً — قائمة الخدمات للتعديل → تذهب لتفاصيل الخدمة."""
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫", show_alert=True)
-        return
-    cat_id = query.data.split(":", 1)[1]
-    config = load_config()
-    category = next((c for c in config.get("store_categories", []) if c["id"] == cat_id), None)
-    if not category:
-        await query.edit_message_text("⚠️ الفئة غير موجودة.")
-        return
-    services = category.get("services", [])
-    if not services:
-        await query.edit_message_text("📭 لا توجد خدمات.",
-                                      reply_markup=kb_single("🔙 الفئة", f"store_category:{cat_id}"))
-        return
-    buttons = [(f"✏️ {s['name']} — ${float(s['price']):.2f}",
-                f"service_detail:{cat_id}:{s['id']}") for s in services]
-    buttons.append(("🔙 الفئة", f"store_category:{cat_id}"))
-    await query.edit_message_text("✏️ *اختر الخدمة:*", parse_mode=ParseMode.MARKDOWN,
-                                  reply_markup=kb_vertical(buttons))
-
-
-async def store_edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """يفتح نموذج تعديل حقل محدد."""
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫", show_alert=True)
-        return
-    parts = query.data.split(":")
-    if len(parts) < 4:
-        await query.answer("⚠️", show_alert=True)
-        return
-    field = parts[1]
-    cat_id = parts[2]
-    service_id = parts[3]
-    config = load_config()
-    service = None
-    for cat in config.get("store_categories", []):
-        if cat["id"] != cat_id:
-            continue
-        for s in cat["services"]:
-            if s["id"] == service_id:
-                service = s
-                break
-        break
-    if not service:
-        await query.edit_message_text("⚠️ الخدمة غير موجودة.",
-                                      reply_markup=kb_single("🔙 الفئة", f"store_category:{cat_id}"))
-        return
-
-    context.user_data["store_action"] = f"edit_service_{field}"
-    context.user_data["edit_service_cat"] = cat_id
-    context.user_data["edit_service_id"] = service_id
-    field_labels = {"name": "الاسم الجديد", "price": "السعر الجديد",
-                    "message": "الرسالة الجديدة", "qty_min": "الحد الأدنى الجديد",
-                    "qty_max": "الحد الأعلى الجديد"}
-    extra_hint = ""
-    if field == "qty_min":
-        extra_hint = "\n\n⚠️ <i>أرسل 'تخطي' لجعل الكمية ثابتة = 1 (مع إلغاء الحد الأعلى أيضاً)</i>"
-    elif field == "qty_max":
-        extra_hint = "\n\n⚠️ <i>أرسل 'تخطي' لإلغاء السقف الأعلى</i>"
-    await query.edit_message_text(
-        f"✏️ *تعديل {field_labels.get(field, field)}*\n\n"
-        f"للخدمة: `{service['name']}`\n\n"
-        f"📌 أرسل القيمة الجديدة:{extra_hint}\n\n"
-        f"<i>أو 'إلغاء'</i>",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb_single("🔙 إلغاء", f"service_detail:{cat_id}:{service_id}"))
-
-
-async def store_delete_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫", show_alert=True)
-        return
-    cat_id = query.data.split(":", 1)[1]
-    config = load_config()
-    category = next((c for c in config.get("store_categories", []) if c["id"] == cat_id), None)
-    if not category:
-        await query.edit_message_text("⚠️ الفئة غير موجودة.")
-        return
-    services = category.get("services", [])
-    if not services:
-        await query.edit_message_text("📭 لا توجد خدمات.",
-                                      reply_markup=kb_single("🔙 الفئة", f"store_category:{cat_id}"))
-        return
-    buttons = [(f"❌ {s['name']} — ${float(s['price']):.2f}",
-                f"store_delete_service_confirm:{cat_id}:{s['id']}") for s in services]
-    buttons.append(("🔙 الفئة", f"store_category:{cat_id}"))
-    await query.edit_message_text("🗑️ *حذف خدمة*", parse_mode=ParseMode.MARKDOWN,
-                                  reply_markup=kb_vertical(buttons))
-
-
-async def store_delete_service_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫", show_alert=True)
-        return
-    parts = query.data.split(":")
-    cat_id = parts[1]
-    service_id = parts[2]
-    config = load_config()
-    service = None
-    for cat in config.get("store_categories", []):
-        if cat["id"] == cat_id:
-            for s in cat["services"]:
-                if s["id"] == service_id:
-                    service = s
-                    break
-            break
-    if not service:
-        await query.answer("⚠️ الخدمة غير موجودة.", show_alert=True)
-        return
-    await query.edit_message_text(
-        f"⚠️ <b>تأكيد حذف الخدمة</b>\n\n"
-        f"🛒 الاسم: {html.escape(service['name'])}\n\n"
-        f"سيتم الحذف نهائياً — لا يمكن التراجع.",
-        parse_mode=ParseMode.HTML,
-        reply_markup=kb_vertical([
-            ("✅ نعم، احذف", f"delete_service:{cat_id}:{service_id}"),
-            ("❌ إلغاء", f"service_detail:{cat_id}:{service_id}"),
-        ]))
-
-
-async def delete_service_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
-        await query.answer("🚫", show_alert=True)
-        return
-    parts = query.data.split(":")
-    cat_id = parts[1]
-    service_id = parts[2]
-    config = load_config()
-    for cat in config.get("store_categories", []):
-        if cat["id"] == cat_id:
-            cat["services"] = [s for s in cat["services"] if s["id"] != service_id]
-            break
-    save_config(config)
-    await query.answer("✅ تم الحذف.")
-    await query.edit_message_text("✅ تم حذف الخدمة.",
-                                  reply_markup=kb_single("🔙 الفئة", f"store_category:{cat_id}"))
 
 
 # ==================== REFERRAL HANDLER ====================
