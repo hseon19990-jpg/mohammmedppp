@@ -43,7 +43,6 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_purchase_message(update, context); return
 
     # ═══ 5. Store action (add_category, add_service_*, set_channel, إلخ) ═══
-    #     ⚠️ مهم جداً: هذا الفحص يجب أن يكون قبل أي فحص step آخر
     store_action = str(context.user_data.get("store_action", "") or "")
     if store_action:
         await handle_store_input(update, context); return
