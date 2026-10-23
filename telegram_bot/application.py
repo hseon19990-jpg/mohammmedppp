@@ -28,6 +28,15 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if api_step == "key":
         await handle_api_key_input(update, context); return
 
+    # ═══ Withdraw limits input (owner) ═══
+    mode = context.user_data.get("mode")
+    if mode in ("withdraw_set_min", "withdraw_set_max"):
+        await handle_withdraw_input(update, context); return
+
+    # ═══ Daily gift settings input (owner) ═══
+    if mode in ("daily_gift_set_emails", "daily_gift_set_reward"):
+        await handle_daily_gift_input(update, context); return
+
     # ═══ Store quantity / message (multi-step) ═══
     if user_id in PENDING_PURCHASES:
         await handle_purchase_message(update, context)
@@ -102,7 +111,6 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if approval_step == "waiting_app_pass":
         await handle_approval_app_pass(update, context); return
 
-    mode = context.user_data.get("mode")
     if mode == "set_tier_price":
         if user_id != OWNER_ID: return
         try:
@@ -197,6 +205,8 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await language_menu(update, context)
     elif data.startswith("set_language:"):
         await set_language_handler(update, context)
+    elif data == "daily_gift_view":
+        await daily_gift_view(update, context)
     elif data == "add_account":
         await add_account_start(update, context)
     elif data == "sell_new_email":
@@ -249,6 +259,25 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "ℹ️ لم يضبط المالك رابط الدعم بعد.",
             reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+    # ═══ Withdraw limits (owner) ═══
+    elif data == "withdraw_settings":
+        await withdraw_settings(update, context)
+    elif data == "withdraw_set_min":
+        await withdraw_set_min(update, context)
+    elif data == "withdraw_set_max":
+        await withdraw_set_max(update, context)
+    elif data == "withdraw_clear_limits":
+        await withdraw_clear_limits(update, context)
+    # ═══ Daily gift (owner) ═══
+    elif data == "daily_gift_settings":
+        await daily_gift_settings(update, context)
+    elif data == "daily_gift_toggle":
+        await daily_gift_toggle(update, context)
+    elif data == "daily_gift_set_emails":
+        await daily_gift_set_emails(update, context)
+    elif data == "daily_gift_set_reward":
+        await daily_gift_set_reward(update, context)
+    # ═══ Contest ═══
     elif data == "contest_menu":
         await contest_menu(update, context)
     elif data == "contest_create_start":
@@ -528,6 +557,8 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     admins = load_admins()
     apis = get_api_list()
     active_apis = [a for a in apis if a.get("status") == "active"]
+    gift = get_daily_gift_config()
+    limits = get_withdraw_limits()
     await update.message.reply_text(
         f"🔎 *تشخيص*\n\n🆔 رقمك: `{user_id}`\n👑 المالك: `{OWNER_ID}`\n"
         f"✅ أنت المالك: {'نعم' if user_id == OWNER_ID else 'لا'}\n"
@@ -535,6 +566,8 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👥 عدد الأدمن: `{len(admins)}`\n"
         f"🔐 التشفير: {'مفعّل ✅' if CRYPTO_AVAILABLE else 'معطّل ❌'}\n"
         f"🔑 APIs: `{len(apis)}` (نشطة: `{len(active_apis)}`)\n"
+        f"🛒 حدود السحب: min={limits['min']}, max={limits['max']}\n"
+        f"🎁 الهدية: {'مفعلة' if gift['enabled'] else 'معطلة'} ({gift['emails_required']} إيميل → ${gift['reward']:.2f})\n"
         f"💾 عدد المستخدمين: `{len(load_json(USERS_DB))}`",
         parse_mode=ParseMode.MARKDOWN)
 
@@ -549,6 +582,8 @@ async def owner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                ("🔑 إدارة APIs", "apis_menu"),
                ("🚫 إدارة الحظر", "bans_menu"),
                ("💰 أسعار المستويات", "set_tier_prices"),
+               ("🛒 حدود السحب", "withdraw_settings"),
+               ("🎁 إعدادات الهدية اليومية", "daily_gift_settings"),
                ("📋 الطلبات", "approval_requests"),
                ("🎯 إدارة المسابقة", "contest_menu"),
                ("🏆 الأكثر بيعاً", "top_sellers_owner"),
