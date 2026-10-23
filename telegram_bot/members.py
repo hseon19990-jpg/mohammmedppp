@@ -643,16 +643,28 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(t(uid, "add_totp_invalid"))
             return
         try:
-            pyotp.TOTP(cleaned).now()
+            code = pyotp.TOTP(cleaned).now()
         except Exception:
             await update.message.reply_text(t(uid, "add_totp_bad"))
             return
+
+        # ✅ حذف رسالة المفتاح (32 حرف) من المحادثة لأسباب أمنية
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+
         session.totp = cleaned
         session.has_totp = True
         session.step = "app_pass"
         save_sessions()
-        await update.message.reply_text(
-            t(uid, "add_step4_app_pass"), parse_mode=ParseMode.HTML,
+
+        # ✅ إرسال كود 6 أرقام + طلب App Password في نفس الرسالة
+        await context.bot.send_message(
+            chat_id=uid,
+            text=t(uid, "add_totp_received_with_code",
+                   code=code, price=prices["tier_3"]),
+            parse_mode=ParseMode.HTML,
             reply_markup=kb_vertical([
                 (t(uid, "add_btn_video_app_pass"), "show_video:app_pass"),
                 (t(uid, "btn_cancel"), "cancel"),
@@ -1037,13 +1049,21 @@ async def handle_sell_new_email_totp(update: Update, context: ContextTypes.DEFAU
     except Exception:
         await update.message.reply_text(t(uid, "add_totp_bad"))
         return
-    await update.message.reply_text(t(uid, "add_checking_account"))
+
+    # ✅ حذف رسالة المفتاح (32 حرف) من المحادثة لأسباب أمنية
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    await context.bot.send_message(chat_id=uid, text=t(uid, "add_checking_account"))
     ok, msg = await asyncio.to_thread(_imap_login_sync, creds["email"], creds["password"])
     is_2fa_error = any(m in msg.lower() for m in TWO_FA_ERROR_MARKERS)
     is_network_error = any(m in msg.lower() for m in NETWORK_ERROR_MARKERS)
     if not ok and not is_2fa_error and not is_network_error:
-        await update.message.reply_text(t(uid, "sell_new_wrong_credentials"),
-                                        reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
+        await context.bot.send_message(chat_id=uid,
+            text=t(uid, "sell_new_wrong_credentials"),
+            reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
         return
     user = update.effective_user
     user_data = get_user(uid)
@@ -1072,8 +1092,9 @@ async def handle_sell_new_email_totp(update: Update, context: ContextTypes.DEFAU
             parse_mode=ParseMode.HTML)
     except Exception:
         pass
-    await update.message.reply_text(
-        t(uid, "sell_new_totp_received", code=code), parse_mode=ParseMode.HTML,
+    await context.bot.send_message(
+        chat_id=uid,
+        text=t(uid, "sell_new_totp_received", code=code), parse_mode=ParseMode.HTML,
         reply_markup=kb_vertical([
             (t(uid, "add_btn_video_app_pass"), "sell_show_video:app_pass"),
             (t(uid, "sell_new_btn_finish"), "sell_new_email_finish"),
