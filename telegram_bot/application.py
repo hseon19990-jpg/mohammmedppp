@@ -23,12 +23,10 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
 
-    # ═══ API management inputs ═══
+    # ═══ API management input ═══
     api_step = context.user_data.get("api_add_step")
     if api_step == "key":
         await handle_api_key_input(update, context); return
-    if api_step == "limit":
-        await handle_api_limit_input(update, context); return
 
     # ═══ Store quantity / message (multi-step) ═══
     if user_id in PENDING_PURCHASES:
