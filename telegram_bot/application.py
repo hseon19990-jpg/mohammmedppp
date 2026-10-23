@@ -23,42 +23,53 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
 
-    api_step = context.user_data.get("api_add_step")
-    if api_step == "key":
+    # ═══ 1. API management input ═══
+    if context.user_data.get("api_add_step") == "key":
         await handle_api_key_input(update, context); return
 
+    # ═══ 2. Global withdraw limits (owner) ═══
     mode = context.user_data.get("mode")
     if mode in ("withdraw_set_min", "withdraw_set_max"):
         await handle_withdraw_input(update, context); return
 
+    # ═══ 3. Daily gift settings (owner) ═══
     if mode in ("daily_gift_set_emails", "daily_gift_set_reward"):
         await handle_daily_gift_input(update, context); return
 
+    # ═══ 4. Store flow (buy_flow / legacy) ═══
     if context.user_data.get("buy_flow"):
         await handle_purchase_message(update, context); return
     if user_id in PENDING_PURCHASES:
         await handle_purchase_message(update, context); return
 
-    if str(context.user_data.get("store_action", "")).startswith("edit_service_"):
+    # ═══ 5. Store action (add_category, add_service_*, set_channel, إلخ) ═══
+    #     ⚠️ مهم جداً: هذا الفحص يجب أن يكون قبل أي فحص step آخر
+    store_action = str(context.user_data.get("store_action", "") or "")
+    if store_action:
         await handle_store_input(update, context); return
 
+    # ═══ 6. Sell new email flow ═══
     sell_step = context.user_data.get("step")
     if sell_step == "sell_new_email_totp":
         await handle_sell_new_email_totp(update, context); return
     if sell_step == "sell_new_email_app_pass":
         await handle_sell_new_email_app_pass(update, context); return
 
+    # ═══ 7. Support link input ═══
     if context.user_data.get("step") == "support_link_input":
         await handle_support_link_input(update, context); return
 
+    # ═══ 8. TG-Lion search ═══
     if "tg_lion_search_page" in context.user_data:
         await tg_lion_search_country_input(update, context); return
 
+    # ═══ 9. Contest build ═══
     if context.user_data.get("contest_build_step"):
         if user_id != OWNER_ID:
             return
         await handle_contest_build_input(update, context); return
 
+    # ═══ 10. Account session (add_account_step) ═══
     session = SESSIONS.get(user_id)
     if session and session.step:
         admin_steps = ("admin_approval_step", "step", "mode", "store_action",
@@ -67,6 +78,7 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not has_admin_step:
             await add_account_step(update, context); return
 
+    # ═══ 11. Admin approval ═══
     admin_approval_step = context.user_data.get("admin_approval_step")
     if admin_approval_step == "waiting_totp":
         await handle_admin_totp_input(update, context); return
@@ -79,9 +91,11 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.get("admin_completing_index"))
         return
 
+    # ═══ 12. Add admin input ═══
     if context.user_data.get("step") == "add_admin_input":
         await handle_add_admin_input(update, context); return
 
+    # ═══ 13. Various step inputs ═══
     step = context.user_data.get("step")
     if step == "check_email_input":
         await handle_check_email_input(update, context); return
@@ -100,12 +114,14 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if step == "editing_field":
         await handle_edit_field_input(update, context); return
 
+    # ═══ 14. Approval TOTP / App Pass ═══
     approval_step = context.user_data.get("approval_step")
     if approval_step == "waiting_totp":
         await handle_approval_totp(update, context); return
     if approval_step == "waiting_app_pass":
         await handle_approval_app_pass(update, context); return
 
+    # ═══ 15. Tier price ═══
     if mode == "set_tier_price":
         if user_id != OWNER_ID: return
         try:
@@ -128,6 +144,7 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ أرسل رقماً.")
         return
 
+    # ═══ 16. Referral bonus ═══
     if mode == "set_referral_bonus":
         if user_id != OWNER_ID: return
         try:
@@ -145,10 +162,7 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ أرسل رقماً.")
         return
 
-    # ═══ Store action (add_category, add_service_*, set_channel, إلخ) ═══
-    if context.user_data.get("store_action"):
-        await handle_store_input(update, context); return
-
+    # ═══ 17. Fallback: session step ═══
     if session and session.step:
         await add_account_step(update, context)
         return
