@@ -485,6 +485,19 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ═══ APIs management ═══
     elif data == "apis_menu":
         await apis_menu(update, context)
+    elif data == "apis_list_details":
+        context.user_data["apis_page"] = 0
+        await show_api_details(update, context)
+    elif data.startswith("apis_details_page:"):
+        try:
+            p = int(data.split(":", 1)[1])
+        except (ValueError, IndexError):
+            p = 0
+        context.user_data["apis_page"] = p
+        await show_api_details(update, context)
+    elif data.startswith("api_view:"):
+        api_id = data.split(":", 1)[1]
+        await show_api_details(update, context, api_id=api_id)
     elif data == "api_add_start":
         await api_add_start(update, context)
     elif data.startswith("api_delete:"):
