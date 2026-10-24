@@ -434,30 +434,13 @@ async def _verify_and_handle_failure(update: Update, context: ContextTypes.DEFAU
     return status, exists, VERIFICATION_FAILURES_THRESHOLD, False
 
 
-# ==================== ADD ACCOUNT FLOW (OLD EMAIL — NO API CHECK) ====================
+# ==================== ADD ACCOUNT FLOW (OLD EMAIL — NO RESTRICTIONS) ====================
 async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """بدء تدفق بيع الإيميل القديم — بلا حظر أو تقييد."""
     if not await check_forced_channel(update, context):
         return
     uid = update.effective_user.id
-    user_data_check = get_user(uid)
-    ban_msg = get_active_ban_message(user_data_check)
-    if ban_msg:
-        try:
-            await update.callback_query.answer("🚫", show_alert=True)
-        except Exception:
-            pass
-        await _safe_edit(update.callback_query, ban_msg, parse_mode=ParseMode.HTML,
-                         reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
-        return
-    restriction_msg = get_active_restriction_message(user_data_check)
-    if restriction_msg:
-        try:
-            await update.callback_query.answer("🚫", show_alert=True)
-        except Exception:
-            pass
-        await _safe_edit(update.callback_query, restriction_msg, parse_mode=ParseMode.HTML,
-                         reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
-        return
+    # ═══ لا حظر ولا تقييد في الإيميل القديم — IMAP هو الفيصل ═══
 
     SESSIONS.pop(uid, None)
     save_sessions()
@@ -492,8 +475,7 @@ async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{t(uid, 'add_old_tier2', price=prices['tier_2'])}\n"
         f"{t(uid, 'add_old_tier3', price=prices['tier_3'])}\n\n"
         f"{t(uid, 'add_old_note')}\n\n"
-        f"{t(uid, 'add_old_warning_steps')}\n"
-        f"{t(uid, 'add_old_warning_ban')}\n\n"
+        f"{t(uid, 'add_old_warning_steps')}\n\n"
         f"{t(uid, 'add_step1_email')}"
     )
     await update.callback_query.edit_message_text(
@@ -544,14 +526,7 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prices = get_tier_prices("old")
 
     if session.step == "email":
-        # ═══ Only restriction check + format + domain — NO API check ═══
-        user_data_check = get_user(uid)
-        restriction_msg = get_active_restriction_message(user_data_check)
-        if restriction_msg:
-            await update.message.reply_text(restriction_msg, parse_mode=ParseMode.HTML,
-                                            reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
-            SESSIONS.pop(uid, None); save_sessions()
-            return
+        # ═══ لا حظر ولا تقييد — التحقق عبر IMAP فقط ═══
         first_line = text.splitlines()[0].strip() if text else ""
         email = normalize_email(first_line)
         if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
@@ -562,7 +537,7 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(t(uid, "add_fake_email"))
             return
 
-        # ═══ No API check here — verification only at step 4 (app_pass) via IMAP ═══
+        # ═══ لا حد 3 مرات — فقط منع التكرار في نفس الحساب ═══
         active_status = get_active_account_status(email)
         if active_status == "approved":
             await update.message.reply_text(
@@ -570,24 +545,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
             SESSIONS.pop(uid, None); save_sessions()
             return
-        if active_status == "rejected":
-            user_data = get_user(uid)
-            rejected_count = sum(
-                1 for r in user_data.get("rejected_requests", [])
-                if normalize_email(r.get("email", "")) == email
-            )
-            if rejected_count >= 3:
-                await update.message.reply_text(
-                    t(uid, "add_email_rejected_max", email=tg_html_escape(email)),
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
-                SESSIONS.pop(uid, None); save_sessions()
-                return
-            remaining = 3 - rejected_count
-            await update.message.reply_text(
-                t(uid, "add_email_rejected_remaining",
-                  email=tg_html_escape(email), remaining=remaining),
-                parse_mode=ParseMode.HTML)
         if active_status == "pending":
             user_data = get_user(uid)
             pending = user_data.get("pending_requests", [])
@@ -619,7 +576,7 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
 
     elif session.step == "password":
-        # ═══ No IMAP check here — accept any password, verify only at step 4 ═══
+        # ═══ لا IMAP هنا — أي باسورد يُقبل مبدئياً، التحقق في الخطوة 4 ═══
         if has_active_account_password(text):
             await update.message.reply_text(
                 t(uid, "add_password_used"),
@@ -648,7 +605,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(t(uid, "add_totp_bad"))
             return
 
-        # ✅ حذف رسالة المفتاح (32 حرف) من المحادثة لأسباب أمنية
         try:
             await update.message.delete()
         except Exception:
@@ -659,7 +615,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session.step = "app_pass"
         save_sessions()
 
-        # ✅ إرسال كود 6 أرقام + طلب App Password في نفس الرسالة
         await context.bot.send_message(
             chat_id=uid,
             text=t(uid, "add_totp_received_with_code",
@@ -671,7 +626,7 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]))
 
     elif session.step == "app_pass":
-        # ═══ IMAP check ONLY here — this is the real verification ═══
+        # ═══ التحقق الوحيد الفعلي — IMAP ═══
         cleaned = text.replace(" ", "")
         if len(cleaned) != 16 or not re.match(r'^[A-Za-z0-9]{16}$', cleaned):
             await update.message.reply_text(t(uid, "add_app_pass_invalid"))
@@ -886,8 +841,9 @@ async def sell_new_email_finish_prompt(update: Update, context: ContextTypes.DEF
         await query.answer("⚠️ انتهت الجلسة.", show_alert=True)
         await query.edit_message_text(t(uid, "sell_new_session_expired"), reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
         return
+    prices = get_tier_prices("new")
     await query.edit_message_text(
-        t(uid, "sell_new_finish_prompt"),
+        t(uid, "sell_new_finish_prompt", full_price=prices["tier_3"]),
         parse_mode=ParseMode.HTML,
         reply_markup=kb_vertical([
             (t(uid, "sell_new_btn_finish_confirm"), "sell_new_email_finish_confirm"),
@@ -1050,7 +1006,6 @@ async def handle_sell_new_email_totp(update: Update, context: ContextTypes.DEFAU
         await update.message.reply_text(t(uid, "add_totp_bad"))
         return
 
-    # ✅ حذف رسالة المفتاح (32 حرف) من المحادثة لأسباب أمنية
     try:
         await update.message.delete()
     except Exception:
@@ -1350,7 +1305,6 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
     add_transaction(user_data, "release", price, f"auto transfer after {hold_hours}h", email)
     save_user(user_id, user_data)
 
-    # ═══ Daily gift check (after points reach user) ═══
     try:
         await process_daily_gift_after_approval(context, user_id)
     except Exception:
