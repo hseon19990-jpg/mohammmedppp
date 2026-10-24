@@ -1363,30 +1363,40 @@ async def bans_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
-    banned = get_banned_users()
+    try:
+        banned = get_banned_users()
+    except Exception:
+        logger.exception("Failed to load banned users")
+        banned = []
+
     if not banned:
-        await query.edit_message_text(
-            "✅ *لا يوجد أعضاء محظورون أو مقيدون حالياً.*",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=kb_single("🔙 إعدادات المالك", "owner_panel"))
-        return
-    lines = [f"🚫 *الأعضاء المحظورون/المقيدون:* {len(banned)}", ""]
-    buttons = []
-    for idx, b in enumerate(banned[:15], 1):
-        kind_icon = "🔴" if b["kind"] == "ban" else "🟠"
-        kind_label = "حظر" if b["kind"] == "ban" else "تقييد"
-        until_display = _format_iso_time(b["until"]) or "—"
-        name = b.get("name") or "غير معروف"
-        username = b.get("username") or "لا يوجد"
-        lines.append(
-            f"{idx}. {kind_icon} `{b['user_id']}` — {tg_html_escape(name)} (@{tg_html_escape(username)})\n"
-            f"   ⏳ {kind_label} حتى: {until_display}\n")
-        buttons.append((f"✅ إزالة القيد عن {b['user_id']}",
-                        f"unban_member:{b['user_id']}"))
-    buttons.append(("🔙 إعدادات المالك", "owner_panel"))
-    await query.edit_message_text(
-        "\n".join(lines), parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb_vertical(buttons))
+        text = "✅ *لا يوجد أعضاء محظورون أو مقيدون حالياً.*"
+        markup = kb_single("🔙 إعدادات المالك", "owner_panel")
+    else:
+        lines = [f"🚫 *الأعضاء المحظورون/المقيدون:* {len(banned)}", ""]
+        buttons = []
+        for idx, b in enumerate(banned[:15], 1):
+            kind_icon = "🔴" if b["kind"] == "ban" else "🟠"
+            kind_label = "حظر" if b["kind"] == "ban" else "تقييد"
+            until_display = _format_iso_time(b["until"]) or "—"
+            name = b.get("name") or "غير معروف"
+            username = b.get("username") or "لا يوجد"
+            lines.append(
+                f"{idx}. {kind_icon} `{b['user_id']}` — {tg_html_escape(name)} (@{tg_html_escape(username)})\n"
+                f"   ⏳ {kind_label} حتى: {until_display}\n")
+            buttons.append((f"✅ إزالة القيد عن {b['user_id']}",
+                            f"unban_member:{b['user_id']}"))
+        buttons.append(("🔙 إعدادات المالك", "owner_panel"))
+        text = "\n".join(lines)
+        markup = kb_vertical(buttons)
+
+    try:
+        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=markup)
+    except Exception as exc:
+        if "Message is not modified" in str(exc):
+            pass
+        else:
+            logger.exception("Failed to edit bans menu")
 
 
 async def unban_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1399,7 +1409,12 @@ async def unban_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except (ValueError, IndexError):
         await query.answer("⚠️", show_alert=True)
         return
-    changed = clear_user_restriction(user_id)
+    try:
+        changed = clear_user_restriction(user_id)
+    except Exception:
+        logger.exception("Failed to clear restriction for user %s", user_id)
+        await query.answer("⚠️ فشل إزالة القيد. حاول مجدداً.", show_alert=True)
+        return
     if changed:
         await query.answer(f"✅ تم إزالة القيد عن {user_id}")
         try:
@@ -1411,7 +1426,10 @@ async def unban_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
     else:
         await query.answer("ℹ️ لم يكن هناك قيد أصلاً.", show_alert=True)
-    await bans_menu(update, context)
+    try:
+        await bans_menu(update, context)
+    except Exception:
+        logger.exception("Failed to refresh bans menu")
 
 
 # ==================== CONTEST MENU ====================
@@ -1822,6 +1840,7 @@ async def admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     buttons = [
         ("📋 طلبات", "admin_requests:0"),
+        ("❌ الإيميلات المرفوضة", "admin_rejected:0"),
         ("🔑 إدارة APIs", "apis_menu"),
         ("🔙 الإدارية", "admin_panel"),
     ]
