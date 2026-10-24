@@ -1127,7 +1127,6 @@ async def handle_approval_totp(update: Update, context: ContextTypes.DEFAULT_TYP
         save_user(target_uid, user_data)
         context.user_data["approval_data"] = approved_request
 
-        # ✅ حذف رسالة المفتاح (32 حرف) من المحادثة لأسباب أمنية
         try:
             await update.message.delete()
         except Exception:
@@ -1182,7 +1181,6 @@ async def handle_approval_app_pass(update: Update, context: ContextTypes.DEFAULT
     save_user(target_uid, user_data)
     context.user_data["approval_data"] = approved_request
 
-    # ✅ حذف رسالة كلمة مرور التطبيق (16 حرف) من المحادثة
     try:
         await update.message.delete()
     except Exception:
@@ -2171,7 +2169,9 @@ async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TY
         move_request_to_rejected(user_data, request, reason_type)
         user_data["pending_requests"] = pending
 
-        ban_result = register_rejection_and_maybe_ban(user_data)
+        # ═══ الإيميلات القديمة لا تُحتسب في الحظر ═══
+        is_old_account = request.get("account_type", "old") == "old"
+        ban_result = register_rejection_and_maybe_ban(user_data, count_for_ban=not is_old_account)
 
         actor = update.effective_user
         if user_data.get("rejected_requests"):
@@ -2245,7 +2245,9 @@ async def handle_reject_reason_text(update: Update, context: ContextTypes.DEFAUL
     move_request_to_rejected(user_data, request, "other", text)
     user_data["pending_requests"] = pending
 
-    ban_result = register_rejection_and_maybe_ban(user_data)
+    # ═══ الإيميلات القديمة لا تُحتسب في الحظر ═══
+    is_old_account = request.get("account_type", "old") == "old"
+    ban_result = register_rejection_and_maybe_ban(user_data, count_for_ban=not is_old_account)
 
     actor = update.effective_user
     if user_data.get("rejected_requests"):
@@ -2275,6 +2277,112 @@ async def handle_reject_reason_text(update: Update, context: ContextTypes.DEFAUL
     await update.message.reply_text(
         confirmation,
         reply_markup=kb_single(t(actor_id, "appr_btn_requests"), rejection_list_callback(actor_id)))
+
+
+# ==================== ADMIN REJECTED EMAILS ====================
+async def admin_rejected_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """قسم الإيميلات المرفوضة للأدمن — عرض مع تفاصيل كاملة."""
+    query = update.callback_query
+    uid = query.from_user.id
+    if not is_admin(uid):
+        await query.answer("🚫", show_alert=True)
+        return
+    try:
+        page = int(query.data.split(":")[1])
+    except (IndexError, ValueError):
+        page = 0
+    items = _collect_all("rejected_requests", sort_order="newest")
+    if not items:
+        await query.edit_message_text(
+            t(uid, "appr_empty"),
+            reply_markup=kb_single(t(uid, "admin_btn_settings"), "admin_settings"))
+        return
+
+    def label(rej):
+        reason = rej.get('reject_reason', 'unknown')
+        icon = REJECT_REASON_ICONS.get(reason, "❌")
+        email = rej.get("email", "")
+        email_display = email[:18] + "..." if len(email) > 18 else email
+        acc_type = rej.get("account_type", "old")
+        type_icon = "🆕" if acc_type == "new" else "📝"
+        return (f"{type_icon}{icon} {email_display}",
+                f"admin_rejected_detail:{rej['user_id']}:{account_callback_token(email)}")
+
+    buttons = paginate_buttons(items, page, "admin_rejected", label)
+    buttons.append((t(uid, "admin_btn_settings"), "admin_settings"))
+    await query.edit_message_text(
+        t(uid, "appr_rejected_title", count=len(items)),
+        parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
+
+
+async def admin_rejected_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تفاصيل إيميل مرفوض — للأدمن."""
+    query = update.callback_query
+    uid = query.from_user.id
+    if not is_admin(uid):
+        await query.answer("🚫", show_alert=True)
+        return
+    parts = query.data.split(":")
+    if len(parts) < 3:
+        await query.answer(t(uid, "msg_error"), show_alert=True)
+        return
+    try:
+        target_uid = int(parts[1])
+        token = parts[2]
+    except (ValueError, IndexError):
+        await query.answer(t(uid, "msg_error"), show_alert=True)
+        return
+    user_data = get_user(target_uid)
+    match = None
+    for idx, r in enumerate(user_data.get("rejected_requests", [])):
+        if account_callback_token(r.get("email", "")) == token:
+            match = (idx, r)
+            break
+    if match is None:
+        await query.edit_message_text(
+            t(uid, "appr_not_found"),
+            reply_markup=kb_single(t(uid, "admin_btn_settings"), "admin_settings"))
+        return
+    idx, request = match
+    email = request.get("email", "")
+    reason = request.get("reject_reason", "unknown")
+    reason_text = request.get("reject_reason_text") or REJECT_REASON_MESSAGES.get(reason, reason)
+    tier_icon = "🟢" if request.get("has_app_pass") else "🟡" if request.get("has_totp") else "🔵"
+    tier_text = t(uid, "appr_tier_full") if request.get("has_app_pass") else \
+                t(uid, "appr_tier_totp") if request.get("has_totp") else t(uid, "appr_tier_pass_only")
+    acc_type = request.get("account_type", "old")
+    type_text = t(uid, "appr_type_new") if acc_type == "new" else t(uid, "appr_type_old")
+
+    msg = t(uid, "owner_rejected_detail_title")
+    msg += t(uid, "admin_req_detail_seller",
+             name=tg_html_escape(request.get('user_name', 'unknown')),
+             username=tg_html_escape(request.get('user_username', 'none')))
+    msg += t(uid, "admin_req_detail_email", email=tg_html_escape(email))
+    msg += t(uid, "admin_req_detail_pass", password=tg_html_escape(request.get('password', '')))
+    if request.get("has_totp", False):
+        msg += t(uid, "admin_req_detail_totp", totp=tg_html_escape(request.get('totp', '')))
+    else:
+        msg += t(uid, "admin_req_detail_totp_none")
+    if request.get("has_app_pass", False):
+        msg += t(uid, "admin_req_detail_app_pass",
+                 status=f"<code>{tg_html_escape(format_app_password(request.get('app_pass', '')))}</code>")
+    else:
+        msg += t(uid, "admin_req_detail_app_pass", status=t(uid, "appr_none"))
+    msg += t(uid, "owner_pending_detail_misc",
+             tier_icon=tier_icon, tier_text=tier_text, uid=target_uid,
+             amount=request.get('amount', 0))
+    msg += t(uid, "owner_rejected_reason", reason=tg_html_escape(str(reason_text)))
+    if request.get("rejected_by"):
+        msg += t(uid, "owner_rejected_by",
+                 id=request.get('rejected_by'),
+                 name=tg_html_escape(request.get('rejected_by_name', 'Unknown')))
+
+    buttons = [
+        (t(uid, "appr_btn_rejected"), "admin_rejected:0"),
+        (t(uid, "admin_btn_settings"), "admin_settings"),
+    ]
+    await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN,
+                                  reply_markup=kb_vertical(buttons))
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]
