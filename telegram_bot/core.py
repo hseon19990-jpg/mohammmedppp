@@ -1124,10 +1124,17 @@ def get_active_ban_message(user_data: dict) -> Optional[str]:
             f"<i>السبب: 3 رفضات متتالية.</i>")
 
 
-def register_rejection_and_maybe_ban(user_data: dict) -> Optional[Tuple[int, str]]:
+def register_rejection_and_maybe_ban(user_data: dict, count_for_ban: bool = True) -> Optional[Tuple[int, str]]:
+    """
+    تسجيل رفض جديد.
+    - count_for_ban=True  → يحتسب في consecutive_rejections ويُطبّق الحظر عند 3 رفضات (للإيميلات الجديدة).
+    - count_for_ban=False → يُحصي total_rejections فقط، بدون حظر (للإيميلات القديمة).
+    """
+    user_data["total_rejections"] = int(user_data.get("total_rejections", 0) or 0) + 1
+    if not count_for_ban:
+        return None
     consecutive = int(user_data.get("consecutive_rejections", 0) or 0) + 1
     user_data["consecutive_rejections"] = consecutive
-    user_data["total_rejections"] = int(user_data.get("total_rejections", 0) or 0) + 1
     if consecutive < BAN_THRESHOLD:
         return None
     ban_level = int(user_data.get("ban_level", 0) or 0) + 1
@@ -1263,14 +1270,17 @@ def get_banned_users() -> list:
 
 
 def clear_user_restriction(user_id: int) -> bool:
+    """إزالة الحظر/التقييد عن مستخدم — يعيد True إذا تغيّر شيء."""
     user_data = get_user(user_id)
     changed = False
-    if user_data.get("ban_until"):
+    ban_str = str(user_data.get("ban_until", "") or "").strip()
+    if ban_str:
         user_data["ban_until"] = ""
         user_data["ban_level"] = 0
         user_data["consecutive_rejections"] = 0
         changed = True
-    if user_data.get("restricted_until"):
+    rest_str = str(user_data.get("restricted_until", "") or "").strip()
+    if rest_str:
         user_data["restricted_until"] = ""
         user_data["verification_failures"] = 0
         changed = True
