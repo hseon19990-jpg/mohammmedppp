@@ -513,7 +513,8 @@ async def add_account_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE)
                                                   reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
 
 
-async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+        async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     text = update.message.text.strip()
     session = SESSIONS.get(uid)
@@ -526,37 +527,36 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prices = get_tier_prices("old")
 
     if session.step == "email":
-        # ═══ لا حظر ولا تقييد — التحقق عبر IMAP فقط ═══
+        # ═══ لا حظر ولا تقييد — IMAP هو الفيصل ═══
+        # ═══ لا فحص صيغة ولا DNS — نقبل أي نص، والتحقق عبر IMAP لاحقاً ═══
         first_line = text.splitlines()[0].strip() if text else ""
-        email = normalize_email(first_line)
-        if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
+        if not first_line:
             await update.message.reply_text(t(uid, "add_invalid_email"))
             return
-        valid_domain = await asyncio.to_thread(is_valid_email_domain, email)
-        if not valid_domain:
-            await update.message.reply_text(t(uid, "add_fake_email"))
-            return
+        email = first_line  # نحفظ النص كما هو — التحقق سيأتي في الخطوة 4
 
-        # ═══ لا حد 3 مرات — فقط منع التكرار في نفس الحساب ═══
-        active_status = get_active_account_status(email)
-        if active_status == "approved":
-            await update.message.reply_text(
-                t(uid, "add_email_approved"),
-                reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
-            SESSIONS.pop(uid, None); save_sessions()
-            return
-        if active_status == "pending":
-            user_data = get_user(uid)
-            pending = user_data.get("pending_requests", [])
-            old_amounts = [float(r.get("amount", 0.0)) for r in pending
-                           if normalize_email(r.get("email", "")) == email]
-            new_pending = [r for r in pending
-                           if normalize_email(r.get("email", "")) != email]
-            if len(new_pending) != len(pending):
-                user_data["pending_requests"] = new_pending
-                user_data["pending_balance"] = clamp_money(
-                    float(user_data.get("pending_balance", 0.0)) - sum(old_amounts))
-                save_user(uid, user_data)
+        # فحص التكرار فقط إذا كان يبدو كإيميل (يحتوي @)
+        if "@" in email:
+            active_status = get_active_account_status(email)
+            if active_status == "approved":
+                await update.message.reply_text(
+                    t(uid, "add_email_approved"),
+                    reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
+                SESSIONS.pop(uid, None); save_sessions()
+                return
+            if active_status == "pending":
+                user_data = get_user(uid)
+                pending = user_data.get("pending_requests", [])
+                old_amounts = [float(r.get("amount", 0.0)) for r in pending
+                               if normalize_email(r.get("email", "")) == normalize_email(email)]
+                new_pending = [r for r in pending
+                               if normalize_email(r.get("email", "")) != normalize_email(email)]
+                if len(new_pending) != len(pending):
+                    user_data["pending_requests"] = new_pending
+                    user_data["pending_balance"] = clamp_money(
+                        float(user_data.get("pending_balance", 0.0)) - sum(old_amounts))
+                    save_user(uid, user_data)
+
         session.password = ""
         session.totp = ""
         session.app_pass = ""
@@ -710,9 +710,7 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text=t(uid, "add_success", email=tg_html_escape(session.email), price=price),
             parse_mode=ParseMode.HTML,
             reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
-
-
-# ==================== SELL NEW EMAIL FLOW (API check preserved) ====================
+    
 async def sell_new_email_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
