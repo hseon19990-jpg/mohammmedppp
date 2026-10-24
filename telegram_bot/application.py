@@ -316,6 +316,11 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await admin_requests(update, context)
     elif data.startswith("admin_request_detail:"):
         await admin_request_detail(update, context)
+    # ═══ NEW: Admin rejected emails section ═══
+    elif data.startswith("admin_rejected_detail:"):
+        await admin_rejected_detail(update, context)
+    elif data.startswith("admin_rejected:"):
+        await admin_rejected_requests(update, context)
     elif data.startswith("admin_complete_start:"):
         await admin_complete_start(update, context)
     elif data.startswith("admin_accept_auto:") or data.startswith("admin_accept_leave:"):
