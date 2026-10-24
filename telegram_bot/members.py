@@ -512,9 +512,7 @@ async def add_account_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.callback_query.edit_message_text(t(uid, "msg_cancelled"),
                                                   reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
 
-
-
-        async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
+ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     text = update.message.text.strip()
     session = SESSIONS.get(uid)
