@@ -577,7 +577,6 @@ async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "total": round(unit_price, 2),
             "message_types": types,
             "collected": {},
-            "current_type_index": 0,
             "step": "collect_info",
             "purchased_at": datetime.now().isoformat(),
         }
@@ -614,6 +613,9 @@ async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=kb_single("🔙 إلغاء", "withdraw_store"))
 
 
+# ─────────────────────────────────────────────────────────────
+# ═══ [مُعدَّل] طلب نوع واحد فقط مهما تعددت أنواع المعلومات ═══
+# ─────────────────────────────────────────────────────────────
 async def _ask_next_message_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     send_msg = (query.edit_message_text if query else update.effective_message.reply_text)
@@ -621,21 +623,37 @@ async def _ask_next_message_type(update: Update, context: ContextTypes.DEFAULT_T
     if not flow:
         return
     types = flow.get("message_types", [])
-    idx = flow.get("current_type_index", 0)
-    if idx >= len(types):
+    if not types:
         await _finalize_purchase(update, context, flow, from_flow=True)
         return
-    current_type = types[idx]
-    label = MESSAGE_TYPE_LABELS[current_type][0]
-    hint = MESSAGE_TYPE_HINTS.get(current_type, "")
+
     qty = flow.get("quantity", 1)
     total = flow.get("total", flow.get("service_price", 0))
+
+    if len(types) == 1:
+        # نوع واحد فقط — اطلب النوع المحدد مباشرة
+        current_type = types[0]
+        label = MESSAGE_TYPE_LABELS[current_type][0]
+        hint = MESSAGE_TYPE_HINTS.get(current_type, "")
+        prompt = f"📝 <b>أرسل الآن ({label}):</b>\n{hint}"
+    else:
+        # عدة أنواع — اطلب واحداً يكفي، واعرض الصيغ المقبولة
+        labels_line = " أو ".join(MESSAGE_TYPE_LABELS[t][0] for t in types)
+        hints_lines = "\n".join(
+            f"  • {MESSAGE_TYPE_LABELS[t][1]}: {MESSAGE_TYPE_HINTS.get(t, '')}"
+            for t in types
+        )
+        prompt = (
+            f"📝 <b>أرسل أحد المعلومات التالية (واحد فقط يكفي):</b>\n"
+            f"{labels_line}\n\n"
+            f"{hints_lines}"
+        )
+
     await send_msg(
         f"🛒 <b>{html.escape(flow.get('service_name', ''))}</b>\n\n"
         f"📦 الكمية: <b>{qty}</b>\n"
         f"💰 الإجمالي: <b>${float(total):.2f}</b>\n\n"
-        f"📝 <b>أرسل الآن ({label}):</b>\n"
-        f"{hint}\n\n"
+        f"{prompt}\n\n"
         f"⚠️ <b>بدون أي كلام عربي!</b>\n\n"
         f"<i>أو 'إلغاء' للعودة</i>",
         parse_mode=ParseMode.HTML,
@@ -776,37 +794,61 @@ async def _handle_buy_flow_message(update: Update, context: ContextTypes.DEFAULT
         flow["quantity"] = quantity
         flow["total"] = total
         flow["step"] = "collect_info"
-        flow["current_type_index"] = 0
         context.user_data["buy_flow"] = flow
         await _ask_next_message_type(update, context)
         return
 
+    # ─────────────────────────────────────────────────────────────
+    # ═══ [مُعدَّل] استقبال رسالة واحدة فقط → كشف النوع → إنهاء ═══
+    # ─────────────────────────────────────────────────────────────
     if step == "collect_info":
         types = flow.get("message_types", [])
-        idx = flow.get("current_type_index", 0)
-        if idx >= len(types):
+        if not types:
             await _finalize_purchase(update, context, flow, from_flow=True)
             return
-        current_type = types[idx]
         if contains_arabic(text):
-            label = MESSAGE_TYPE_LABELS[current_type][0]
+            labels = " أو ".join(MESSAGE_TYPE_LABELS[t][0] for t in types)
             await update.message.reply_text(
                 f"❌ <b>الرسالة تحتوي على نص عربي!</b>\n\n"
-                f"📌 المطلوب: {label} فقط",
+                f"📌 المطلوب: {labels} فقط",
                 parse_mode=ParseMode.HTML)
             return
         if not text:
             return
-        err = _validate_message_input_by_types([current_type], {current_type: text})
-        if err:
-            await update.message.reply_text(err, parse_mode=ParseMode.HTML)
-            return
-        collected = flow.get("collected", {})
-        collected[current_type] = text
-        flow["collected"] = collected
-        flow["current_type_index"] = idx + 1
+
+        if len(types) == 1:
+            # نوع واحد — تحقق مباشر
+            t = types[0]
+            err = _validate_message_input_by_types([t], {t: text})
+            if err:
+                await update.message.reply_text(err, parse_mode=ParseMode.HTML)
+                return
+            flow["collected"] = {t: text}
+        else:
+            # عدة أنواع — اكتشف النوع المطابق تلقائياً
+            matched_type = None
+            for t in types:
+                if _validate_message_input_by_types([t], {t: text}) is None:
+                    matched_type = t
+                    break
+
+            if not matched_type:
+                labels = " أو ".join(MESSAGE_TYPE_LABELS[t][0] for t in types)
+                hints_lines = "\n".join(
+                    f"  • {MESSAGE_TYPE_LABELS[t][1]}: {MESSAGE_TYPE_HINTS.get(t, '')}"
+                    for t in types
+                )
+                await update.message.reply_text(
+                    f"⚠️ <b>لم يتم التعرف على نوع المعلومات المُرسلة.</b>\n\n"
+                    f"📌 يمكنك إرسال: {labels}\n\n"
+                    f"{hints_lines}",
+                    parse_mode=ParseMode.HTML)
+                return
+
+            flow["collected"] = {matched_type: text}
+
         context.user_data["buy_flow"] = flow
-        await _ask_next_message_type(update, context)
+        await _finalize_purchase(update, context, flow, from_flow=True)
         return
 
 
@@ -841,15 +883,17 @@ async def _finalize_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE,
     user_username = user.username or "لا يوجد"
     total_emails = user_data.get("total_approved_emails", 0)
 
+    # ─────────────────────────────────────────────────────────────
+    # ═══ [مُعدَّل] نعرض فقط ما أرسله العضو فعلاً ═══
+    # ─────────────────────────────────────────────────────────────
     if from_flow:
         collected = purchase.get("collected", {})
-        types = purchase.get("message_types", [])
         info_lines = []
-        for t in types:
+        for t, v in collected.items():
             if t in MESSAGE_TYPE_LABELS:
                 label = MESSAGE_TYPE_LABELS[t][1]
-                info_lines.append(f"  • {label}: <code>{html.escape(collected.get(t, ''))}</code>")
-        info_block = "\n".join(info_lines)
+                info_lines.append(f"  • {label}: <code>{html.escape(str(v))}</code>")
+        info_block = "\n".join(info_lines) if info_lines else "—"
     else:
         info_block = f"<code>{html.escape(text)}</code>"
 
