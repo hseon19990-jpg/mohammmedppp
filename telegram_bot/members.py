@@ -434,13 +434,30 @@ async def _verify_and_handle_failure(update: Update, context: ContextTypes.DEFAU
     return status, exists, VERIFICATION_FAILURES_THRESHOLD, False
 
 
-# ==================== ADD ACCOUNT FLOW (OLD EMAIL — NO RESTRICTIONS) ====================
+# ==================== ADD ACCOUNT FLOW (OLD EMAIL — NO API CHECK) ====================
 async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """بدء تدفق بيع الإيميل القديم — بلا حظر أو تقييد."""
     if not await check_forced_channel(update, context):
         return
     uid = update.effective_user.id
-    # ═══ لا حظر ولا تقييد في الإيميل القديم — IMAP هو الفيصل ═══
+    user_data_check = get_user(uid)
+    ban_msg = get_active_ban_message(user_data_check)
+    if ban_msg:
+        try:
+            await update.callback_query.answer("🚫", show_alert=True)
+        except Exception:
+            pass
+        await _safe_edit(update.callback_query, ban_msg, parse_mode=ParseMode.HTML,
+                         reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
+        return
+    restriction_msg = get_active_restriction_message(user_data_check)
+    if restriction_msg:
+        try:
+            await update.callback_query.answer("🚫", show_alert=True)
+        except Exception:
+            pass
+        await _safe_edit(update.callback_query, restriction_msg, parse_mode=ParseMode.HTML,
+                         reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
+        return
 
     SESSIONS.pop(uid, None)
     save_sessions()
@@ -475,7 +492,8 @@ async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{t(uid, 'add_old_tier2', price=prices['tier_2'])}\n"
         f"{t(uid, 'add_old_tier3', price=prices['tier_3'])}\n\n"
         f"{t(uid, 'add_old_note')}\n\n"
-        f"{t(uid, 'add_old_warning_steps')}\n\n"
+        f"{t(uid, 'add_old_warning_steps')}\n"
+        f"{t(uid, 'add_old_warning_ban')}\n\n"
         f"{t(uid, 'add_step1_email')}"
     )
     await update.callback_query.edit_message_text(
@@ -513,7 +531,6 @@ async def add_account_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE)
                                                   reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
 
 
-
 async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     text = update.message.text.strip()
@@ -527,36 +544,60 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prices = get_tier_prices("old")
 
     if session.step == "email":
-        # ═══ لا حظر ولا تقييد — IMAP هو الفيصل ═══
-        # ═══ لا فحص صيغة ولا DNS — نقبل أي نص، والتحقق عبر IMAP لاحقاً ═══
+        user_data_check = get_user(uid)
+        restriction_msg = get_active_restriction_message(user_data_check)
+        if restriction_msg:
+            await update.message.reply_text(restriction_msg, parse_mode=ParseMode.HTML,
+                                            reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
+            SESSIONS.pop(uid, None); save_sessions()
+            return
         first_line = text.splitlines()[0].strip() if text else ""
-        if not first_line:
+        email = normalize_email(first_line)
+        if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
             await update.message.reply_text(t(uid, "add_invalid_email"))
             return
-        email = first_line  # نحفظ النص كما هو — التحقق سيأتي في الخطوة 4
+        valid_domain = await asyncio.to_thread(is_valid_email_domain, email)
+        if not valid_domain:
+            await update.message.reply_text(t(uid, "add_fake_email"))
+            return
 
-        # فحص التكرار فقط إذا كان يبدو كإيميل (يحتوي @)
-        if "@" in email:
-            active_status = get_active_account_status(email)
-            if active_status == "approved":
+        active_status = get_active_account_status(email)
+        if active_status == "approved":
+            await update.message.reply_text(
+                t(uid, "add_email_approved"),
+                reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
+            SESSIONS.pop(uid, None); save_sessions()
+            return
+        if active_status == "rejected":
+            user_data = get_user(uid)
+            rejected_count = sum(
+                1 for r in user_data.get("rejected_requests", [])
+                if normalize_email(r.get("email", "")) == email
+            )
+            if rejected_count >= 3:
                 await update.message.reply_text(
-                    t(uid, "add_email_approved"),
+                    t(uid, "add_email_rejected_max", email=tg_html_escape(email)),
+                    parse_mode=ParseMode.HTML,
                     reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
                 SESSIONS.pop(uid, None); save_sessions()
                 return
-            if active_status == "pending":
-                user_data = get_user(uid)
-                pending = user_data.get("pending_requests", [])
-                old_amounts = [float(r.get("amount", 0.0)) for r in pending
-                               if normalize_email(r.get("email", "")) == normalize_email(email)]
-                new_pending = [r for r in pending
-                               if normalize_email(r.get("email", "")) != normalize_email(email)]
-                if len(new_pending) != len(pending):
-                    user_data["pending_requests"] = new_pending
-                    user_data["pending_balance"] = clamp_money(
-                        float(user_data.get("pending_balance", 0.0)) - sum(old_amounts))
-                    save_user(uid, user_data)
-
+            remaining = 3 - rejected_count
+            await update.message.reply_text(
+                t(uid, "add_email_rejected_remaining",
+                  email=tg_html_escape(email), remaining=remaining),
+                parse_mode=ParseMode.HTML)
+        if active_status == "pending":
+            user_data = get_user(uid)
+            pending = user_data.get("pending_requests", [])
+            old_amounts = [float(r.get("amount", 0.0)) for r in pending
+                           if normalize_email(r.get("email", "")) == email]
+            new_pending = [r for r in pending
+                           if normalize_email(r.get("email", "")) != email]
+            if len(new_pending) != len(pending):
+                user_data["pending_requests"] = new_pending
+                user_data["pending_balance"] = clamp_money(
+                    float(user_data.get("pending_balance", 0.0)) - sum(old_amounts))
+                save_user(uid, user_data)
         session.password = ""
         session.totp = ""
         session.app_pass = ""
@@ -576,7 +617,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
 
     elif session.step == "password":
-        # ═══ لا IMAP هنا — أي باسورد يُقبل مبدئياً، التحقق في الخطوة 4 ═══
         if has_active_account_password(text):
             await update.message.reply_text(
                 t(uid, "add_password_used"),
@@ -626,7 +666,6 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]))
 
     elif session.step == "app_pass":
-        # ═══ التحقق الوحيد الفعلي — IMAP ═══
         cleaned = text.replace(" ", "")
         if len(cleaned) != 16 or not re.match(r'^[A-Za-z0-9]{16}$', cleaned):
             await update.message.reply_text(t(uid, "add_app_pass_invalid"))
@@ -710,7 +749,9 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text=t(uid, "add_success", email=tg_html_escape(session.email), price=price),
             parse_mode=ParseMode.HTML,
             reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
-    
+
+
+# ==================== SELL NEW EMAIL FLOW (API check preserved) ====================
 async def sell_new_email_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
@@ -839,9 +880,8 @@ async def sell_new_email_finish_prompt(update: Update, context: ContextTypes.DEF
         await query.answer("⚠️ انتهت الجلسة.", show_alert=True)
         await query.edit_message_text(t(uid, "sell_new_session_expired"), reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
         return
-    prices = get_tier_prices("new")
     await query.edit_message_text(
-        t(uid, "sell_new_finish_prompt", full_price=prices["tier_3"]),
+        t(uid, "sell_new_finish_prompt"),
         parse_mode=ParseMode.HTML,
         reply_markup=kb_vertical([
             (t(uid, "sell_new_btn_finish_confirm"), "sell_new_email_finish_confirm"),
@@ -1221,6 +1261,9 @@ async def schedule_leave_check(context: ContextTypes.DEFAULT_TYPE, user_id: int,
         name=job_name)
 
 
+# ─────────────────────────────────────────────────────────────
+# ═══ [مُعدَّل] تحرير/إلغاء مكافأة الأدمن عند الفحص الثاني ═══
+# ─────────────────────────────────────────────────────────────
 async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
     job_data = context.job.data
     user_id = job_data["user_id"]
@@ -1266,6 +1309,13 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
             "verified_at": datetime.now(timezone.utc).isoformat(),
             "verified_by": "second_check_failed",
         }
+        # ═══ NEW: إلغاء مكافأة الأدمن عند فشل الفحص الثاني ═══
+        try:
+            if settle_admin_bonus(failed_account, "rejected",
+                                   owner_data=user_data, owner_id=user_id):
+                failed_account["admin_bonus_status"] = "rejected"
+        except Exception:
+            logger.exception("Failed to reject admin bonus on leave recheck failure")
         move_approved_account_to_rejected(user_data, failed_account, "imap_failed_24h",
                                           f"Second check failed: {recheck['message'][:150]}")
         add_transaction(user_data, "debit", price, f"rejected after {hold_hours}h check", email)
@@ -1298,11 +1348,19 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
         "verified_at": datetime.now(timezone.utc).isoformat(),
         "verified_by": "second_check_passed",
     }
+    # ═══ NEW: تحرير مكافأة الأدمن عند نجاح الفحص الثاني ═══
+    try:
+        if settle_admin_bonus(account, "released",
+                               owner_data=user_data, owner_id=user_id):
+            account["admin_bonus_status"] = "released"
+    except Exception:
+        logger.exception("Failed to release admin bonus on leave check success")
     accounts[account_idx] = account
     user_data["approved_accounts"] = accounts
     add_transaction(user_data, "release", price, f"auto transfer after {hold_hours}h", email)
     save_user(user_id, user_data)
 
+    # ═══ Daily gift check (after points reach user) ═══
     try:
         await process_daily_gift_after_approval(context, user_id)
     except Exception:
@@ -1316,8 +1374,74 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Could not send auto-confirmation to {user_id}: {e}")
 
 
+# ─────────────────────────────────────────────────────────────
+# ═══ [جديد] تنظيف المكافآت المعلقة القديمة عند الإقلاع ═══
+# ─────────────────────────────────────────────────────────────
+def _cleanup_stuck_admin_bonuses() -> bool:
+    """
+    Fix legacy accounts whose admin bonus is still stuck at 'pending'
+    even though the leave period has already ended (leave_confirmed=True
+    or rejected_at_24h=True). Runs at startup.
+    """
+    users = load_json(USERS_DB)
+    changed = False
+    for raw_uid, encrypted_data in users.items():
+        try:
+            uid = int(raw_uid)
+        except (TypeError, ValueError):
+            continue
+        user_data = decrypt_user_data(encrypted_data)
+        record_changed = False
+
+        for account in user_data.get("approved_accounts", []):
+            status = str(account.get("admin_bonus_status") or "")
+            if status not in ("pending", ""):
+                continue
+            if not account.get("completed_by_admin"):
+                continue
+            if account.get("rejected_at_24h"):
+                new_status = "rejected"
+            elif account.get("leave_confirmed"):
+                new_status = "released"
+            else:
+                continue
+            try:
+                if settle_admin_bonus(account, new_status, owner_data=user_data, owner_id=uid):
+                    account["admin_bonus_status"] = new_status
+                    record_changed = True
+            except Exception:
+                logger.exception("Failed to settle stuck admin bonus (approved)")
+
+        for rec in user_data.get("rejected_requests", []):
+            status = str(rec.get("admin_bonus_status") or "")
+            if status not in ("pending", ""):
+                continue
+            if not rec.get("completed_by_admin"):
+                continue
+            try:
+                if settle_admin_bonus(rec, "rejected", owner_data=user_data, owner_id=uid):
+                    rec["admin_bonus_status"] = "rejected"
+                    record_changed = True
+            except Exception:
+                logger.exception("Failed to settle stuck admin bonus (rejected)")
+
+        if record_changed:
+            save_user(uid, user_data)
+            changed = True
+
+    if changed:
+        logger.info("Cleaned up stuck admin bonuses.")
+    return changed
+
+
 # ==================== RESTORE JOBS ====================
 async def restore_leave_checks(application: Application):
+    # ═══ NEW: إصلاح المكافآت المعلقة القديمة ═══
+    try:
+        _cleanup_stuck_admin_bonuses()
+    except Exception:
+        logger.exception("Failed to cleanup stuck admin bonuses")
+
     users = load_json(USERS_DB)
     changed = False
     now = datetime.now(timezone.utc)
