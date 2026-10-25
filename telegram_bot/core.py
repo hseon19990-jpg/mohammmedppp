@@ -1064,6 +1064,60 @@ def add_transaction(user_data: dict, kind: str, amount: float, note: str = "", e
     })
 
 
+# ==================== ADMIN BONUS SETTLEMENT ====================
+def settle_admin_bonus(account: dict, new_status: str,
+                       owner_data: Optional[dict] = None,
+                       owner_id: Optional[int] = None) -> bool:
+    """
+    Settle the admin bonus tied to an approved account.
+
+    new_status: "released" or "rejected"
+    - "released": moves the bonus from admin_pending_balance → admin_received_balance
+    - "rejected": removes the bonus from admin_pending_balance
+
+    If `admin_id == owner_id` and `owner_data` is provided, the updates are applied
+    to `owner_data` in memory (NOT saved here). Otherwise, the admin's data is loaded,
+    updated, and saved automatically.
+    """
+    if not isinstance(account, dict) or new_status not in ("released", "rejected"):
+        return False
+    admin_id_raw = account.get("completed_by_admin")
+    if admin_id_raw is None:
+        return False
+    try:
+        admin_id = int(admin_id_raw)
+    except (TypeError, ValueError):
+        return False
+    if admin_id == OWNER_ID:
+        return False
+    bonus_cents = money_to_cents(account.get("admin_bonus", 0.0))
+    if bonus_cents <= 0:
+        return False
+    current_status = str(account.get("admin_bonus_status") or "")
+    if current_status not in ("pending", ""):
+        return False
+
+    same_user = owner_id is not None and admin_id == owner_id and owner_data is not None
+    admin_data = owner_data if same_user else get_user(admin_id)
+
+    pending_cents = max(0, money_to_cents(admin_data.get("admin_pending_balance", 0.0)) - bonus_cents)
+    admin_data["admin_pending_balance"] = cents_to_money(pending_cents)
+
+    email = account.get("email", "")
+    if new_status == "released":
+        received_cents = money_to_cents(admin_data.get("admin_received_balance", 0.0)) + bonus_cents
+        admin_data["admin_received_balance"] = cents_to_money(received_cents)
+        add_transaction(admin_data, "admin_bonus_release", cents_to_money(bonus_cents),
+                        f"Released admin bonus for {email}", email)
+    else:
+        add_transaction(admin_data, "admin_bonus_reversal", cents_to_money(bonus_cents),
+                        f"Reversed admin bonus for {email}", email)
+
+    if not same_user:
+        save_user(admin_id, admin_data)
+    return True
+
+
 # ==================== LANGUAGE HELPERS ====================
 SUPPORTED_LANGUAGES = ("ar", "en", "ru")
 
@@ -1124,17 +1178,10 @@ def get_active_ban_message(user_data: dict) -> Optional[str]:
             f"<i>السبب: 3 رفضات متتالية.</i>")
 
 
-def register_rejection_and_maybe_ban(user_data: dict, count_for_ban: bool = True) -> Optional[Tuple[int, str]]:
-    """
-    تسجيل رفض جديد.
-    - count_for_ban=True  → يحتسب في consecutive_rejections ويُطبّق الحظر عند 3 رفضات (للإيميلات الجديدة).
-    - count_for_ban=False → يُحصي total_rejections فقط، بدون حظر (للإيميلات القديمة).
-    """
-    user_data["total_rejections"] = int(user_data.get("total_rejections", 0) or 0) + 1
-    if not count_for_ban:
-        return None
+def register_rejection_and_maybe_ban(user_data: dict) -> Optional[Tuple[int, str]]:
     consecutive = int(user_data.get("consecutive_rejections", 0) or 0) + 1
     user_data["consecutive_rejections"] = consecutive
+    user_data["total_rejections"] = int(user_data.get("total_rejections", 0) or 0) + 1
     if consecutive < BAN_THRESHOLD:
         return None
     ban_level = int(user_data.get("ban_level", 0) or 0) + 1
@@ -1270,17 +1317,14 @@ def get_banned_users() -> list:
 
 
 def clear_user_restriction(user_id: int) -> bool:
-    """إزالة الحظر/التقييد عن مستخدم — يعيد True إذا تغيّر شيء."""
     user_data = get_user(user_id)
     changed = False
-    ban_str = str(user_data.get("ban_until", "") or "").strip()
-    if ban_str:
+    if user_data.get("ban_until"):
         user_data["ban_until"] = ""
         user_data["ban_level"] = 0
         user_data["consecutive_rejections"] = 0
         changed = True
-    rest_str = str(user_data.get("restricted_until", "") or "").strip()
-    if rest_str:
+    if user_data.get("restricted_until"):
         user_data["restricted_until"] = ""
         user_data["verification_failures"] = 0
         changed = True
