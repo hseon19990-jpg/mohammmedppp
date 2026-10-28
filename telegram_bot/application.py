@@ -23,6 +23,23 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
 
+    # ═══ 0. Crypto withdrawal flow (wallet / binance id / amount) ═══
+    crypto_state = context.user_data.get("crypto_withdraw")
+    if crypto_state:
+        stage = crypto_state.get("stage")
+        if stage == "awaiting_wallet":
+            from telegram_bot.store import crypto_handle_wallet
+            await crypto_handle_wallet(update, context)
+            return
+        if stage == "awaiting_binance_id":
+            from telegram_bot.store import crypto_handle_binance_id
+            await crypto_handle_binance_id(update, context)
+            return
+        if stage == "awaiting_amount":
+            from telegram_bot.store import crypto_amount_input
+            if await crypto_amount_input(update, context):
+                return
+
     # ═══ 1. API management input ═══
     if context.user_data.get("api_add_step") == "key":
         await handle_api_key_input(update, context); return
@@ -232,6 +249,19 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await sell_new_email_finish(update, context)
     elif data.startswith("sell_show_video:"):
         await sell_show_video(update, context)
+
+    # ═══ Resume saved sell-new sessions ═══
+    elif data == "resume_sell_new":
+        await resume_sell_new_session(update, context)
+    elif data.startswith("resume_sell_pick:"):
+        await resume_sell_pick(update, context)
+
+    # ═══ Crypto withdrawals ═══
+    elif data == "crypto_withdraw_menu":
+        await crypto_withdraw_menu(update, context)
+    elif data.startswith("crypto_pick:"):
+        await crypto_pick_network(update, context)
+
     elif data == "cancel":
         await add_account_cancel(update, context)
     elif data.startswith("complete_more:"):
@@ -316,7 +346,6 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await admin_requests(update, context)
     elif data.startswith("admin_request_detail:"):
         await admin_request_detail(update, context)
-    # ═══ NEW: Admin rejected emails section ═══
     elif data.startswith("admin_rejected_detail:"):
         await admin_rejected_detail(update, context)
     elif data.startswith("admin_rejected:"):
