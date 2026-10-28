@@ -1,4 +1,4 @@
-"""Purchase channels, catalog, wallet, store, and referrals."""
+"""Purchase channels, catalog, wallet, store, crypto withdrawals, and referrals."""
 
 from telegram_bot.core import *
 
@@ -469,6 +469,207 @@ def _validate_message_input_by_types(types: list, values: dict) -> Optional[str]
     return None
 
 
+# ==================== CRYPTO WITHDRAWAL ====================
+async def crypto_withdraw_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = query.from_user.id
+    user_data = get_user(uid)
+    restriction = get_any_restriction_message(user_data)
+    if restriction:
+        await query.edit_message_text(restriction, parse_mode=ParseMode.HTML,
+                                      reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        return
+    balance = spendable_balance_cents(user_data) / 100
+    await query.edit_message_text(
+        f"💎 <b>سحب العملات الرقمية</b>\n\n"
+        f"💳 <b>رصيدك المتاح:</b> <code>${balance:.2f}</code>\n\n"
+        f"اختر الشبكة/العملة التي تريد السحب عليها:\n\n"
+        f"⚠️ <i>العمولة تُضاف فوق المبلغ الذي تطلبه.</i>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=crypto_menu_keyboard())
+
+
+async def crypto_pick_network(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = query.from_user.id
+    try:
+        key = query.data.split(":", 1)[1]
+    except (IndexError, ValueError):
+        await query.answer("⚠️", show_alert=True)
+        return
+    info = CRYPTO_WITHDRAWALS.get(key)
+    if not info:
+        await query.answer("⚠️", show_alert=True)
+        return
+    user_data = get_user(uid)
+    balance = spendable_balance_cents(user_data) / 100
+    if balance < info["min"]:
+        await query.answer(
+            f"⚠️ الحد الأدنى لهذه الشبكة ${info['min']:.2f} — رصيدك ${balance:.2f}",
+            show_alert=True)
+        return
+    context.user_data["crypto_withdraw"] = {"network": key, "info": info}
+    if info["needs"] == "binance_id":
+        prompt = ("🆔 أرسل <b>معرّف Binance (Pay ID)</b> الخاص بك:\n"
+                  "<i>مثال: 123456789</i>")
+        context.user_data["crypto_withdraw"]["stage"] = "awaiting_binance_id"
+    else:
+        prompt = (f"📬 أرسل <b>عنوان محفظة {info['name']}</b>:\n"
+                  f"<i>مثال: 0x... أو T...xyz</i>")
+        context.user_data["crypto_withdraw"]["stage"] = "awaiting_wallet"
+    await query.edit_message_text(
+        f"{info['emoji']} <b>{info['name']}</b>\n\n"
+        f"💰 الحد الأدنى: <b>${info['min']:.2f}</b>\n"
+        f"💸 العمولة: <b>${info['fee']:.2f}</b>\n"
+        f"💳 رصيدك: <b>${balance:.2f}</b>\n\n"
+        f"{prompt}\n\n"
+        f"<i>أو 'إلغاء' للعودة</i>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_single("🔙 إلغاء", "crypto_withdraw_menu"))
+
+
+async def crypto_handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    text = update.message.text.strip() if update.message.text else ""
+    if text.casefold() in {"إلغاء", "الغاء", "cancel", "отмена"}:
+        context.user_data.pop("crypto_withdraw", None)
+        await update.message.reply_text("❌ تم الإلغاء.",
+                                        reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        return
+    if not (10 <= len(text) <= 120):
+        await update.message.reply_text("⚠️ عنوان المحفظة غير صالح (10-120 حرفاً).")
+        return
+    state = context.user_data.get("crypto_withdraw")
+    if not state:
+        return
+    state["target"] = text
+    state["stage"] = "awaiting_amount"
+    info = state["info"]
+    user_data = get_user(uid)
+    balance = spendable_balance_cents(user_data) / 100
+    await update.message.reply_text(
+        f"✅ <b>تم حفظ العنوان.</b>\n\n"
+        f"💰 أرسل المبلغ الذي تريد سحبه (USDT):\n"
+        f"📌 الحد الأدنى: <b>${info['min']:.2f}</b>\n"
+        f"💸 العمولة: <b>${info['fee']:.2f}</b>\n"
+        f"💳 رصيدك: <b>${balance:.2f}</b>\n\n"
+        f"<i>مثال: 10</i>\n"
+        f"<i>أو 'إلغاء' للعودة</i>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_single("🔙 إلغاء", "crypto_withdraw_menu"))
+
+
+async def crypto_handle_binance_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    text = update.message.text.strip() if update.message.text else ""
+    if text.casefold() in {"إلغاء", "الغاء", "cancel", "отмена"}:
+        context.user_data.pop("crypto_withdraw", None)
+        await update.message.reply_text("❌ تم الإلغاء.",
+                                        reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        return
+    if not text.isdigit() or not (5 <= len(text) <= 20):
+        await update.message.reply_text("⚠️ معرّف Binance يجب أن يكون رقماً (5-20 خانة).")
+        return
+    state = context.user_data.get("crypto_withdraw")
+    if not state:
+        return
+    state["target"] = text
+    state["stage"] = "awaiting_amount"
+    info = state["info"]
+    user_data = get_user(uid)
+    balance = spendable_balance_cents(user_data) / 100
+    await update.message.reply_text(
+        f"✅ <b>تم حفظ معرّف Binance.</b>\n\n"
+        f"💰 أرسل المبلغ الذي تريد سحبه (USDT):\n"
+        f"📌 الحد الأدنى: <b>${info['min']:.2f}</b>\n"
+        f"💸 العمولة: <b>${info['fee']:.2f}</b>\n"
+        f"💳 رصيدك: <b>${balance:.2f}</b>\n\n"
+        f"<i>مثال: 10</i>\n"
+        f"<i>أو 'إلغاء' للعودة</i>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_single("🔙 إلغاء", "crypto_withdraw_menu"))
+
+
+async def crypto_amount_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """يُستدعى من text_input عند مرحلة awaiting_amount. يعيد True إذا تعامل مع الرسالة."""
+    uid = update.effective_user.id
+    state = context.user_data.get("crypto_withdraw")
+    if not state or state.get("stage") != "awaiting_amount":
+        return False
+    text = update.message.text.strip() if update.message.text else ""
+    if text.casefold() in {"إلغاء", "الغاء", "cancel", "отмена"}:
+        context.user_data.pop("crypto_withdraw", None)
+        await update.message.reply_text("❌ تم الإلغاء.",
+                                        reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        return True
+    try:
+        amount = float(text)
+        if amount <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("⚠️ أرسل رقماً صحيحاً أكبر من صفر.")
+        return True
+    info = state["info"]
+    if amount < info["min"]:
+        await update.message.reply_text(f"⚠️ الحد الأدنى ${info['min']:.2f}.")
+        return True
+    user_data = get_user(uid)
+    balance = spendable_balance_cents(user_data) / 100
+    total_deduct = round(amount + info["fee"], 2)
+    if balance < total_deduct:
+        await update.message.reply_text(
+            f"❌ رصيدك غير كافٍ.\n"
+            f"💰 المطلوب: <b>${total_deduct:.2f}</b> "
+            f"(${amount:.2f} + ${info['fee']:.2f} عمولة)\n"
+            f"💳 رصيدك: <b>${balance:.2f}</b>",
+            parse_mode=ParseMode.HTML)
+        return True
+    # خصم من الرصيد
+    if not debit_spendable_balance(user_data, money_to_cents(total_deduct)):
+        await update.message.reply_text("❌ رصيدك غير كافٍ. لم يتم تسجيل الطلب.")
+        return True
+    target = state.get("target", "")
+    target_label = "معرّف Binance" if info["needs"] == "binance_id" else "عنوان المحفظة"
+    add_transaction(user_data, "crypto_withdraw", total_deduct,
+                    f"سحب {info['name']} — مبلغ ${amount:.2f} + عمولة ${info['fee']:.2f}",
+                    "")
+    save_user(uid, user_data)
+
+    # إشعار المالك + قروب الشراء
+    _, purchase_channel = get_configured_purchase_channels()
+    user = update.effective_user
+    order_text = (
+        f"💎 <b>طلب سحب عملة رقمية</b>\n\n"
+        f"👤 {html.escape(user.full_name or 'غير معروف')}\n"
+        f"🆔 @{html.escape(user.username or 'لا يوجد')} | <code>{uid}</code>\n"
+        f"🌐 الشبكة: <b>{info['name']}</b>\n"
+        f"📬 {target_label}: <code>{html.escape(target)}</code>\n"
+        f"💰 المبلغ المطلوب: <b>${amount:.2f}</b>\n"
+        f"💸 العمولة: <b>${info['fee']:.2f}</b>\n"
+        f"💳 إجمالي المخصوم: <b>${total_deduct:.2f}</b>\n"
+        f"⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
+    )
+    for chat_id in filter(None, [OWNER_ID, purchase_channel]):
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=order_text,
+                                           parse_mode=ParseMode.HTML)
+        except Exception:
+            logger.exception("Failed to send crypto withdraw order to %s", chat_id)
+
+    await update.message.reply_text(
+        f"✅ <b>تم تسجيل طلب السحب</b>\n\n"
+        f"🌐 {info['name']}\n"
+        f"💰 المبلغ: <b>${amount:.2f}</b>\n"
+        f"💸 العمولة: <b>${info['fee']:.2f}</b>\n"
+        f"💳 إجمالي المخصوم: <b>${total_deduct:.2f}</b>\n"
+        f"📬 {target_label}: <code>{html.escape(target)}</code>\n\n"
+        f"<i>سيتم التنفيذ يدوياً خلال 24 ساعة.</i>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+    context.user_data.pop("crypto_withdraw", None)
+    return True
+
+
 # ==================== WITHDRAW STORE (USER) ====================
 async def withdraw_store(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
@@ -490,12 +691,17 @@ async def withdraw_store(update: Update, context: ContextTypes.DEFAULT_TYPE):
     categories = config.get("store_categories", [])
     lion_visible = config.get("tg_lion_store_visible", True)
     if not categories and not lion_visible:
-        await send_message("🛒 لا توجد فئات.",
-                           reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        # لا يزال قسم السحب الرقمي متاحاً
+        buttons = [("💎 سحب عملات رقمية", "crypto_withdraw_menu"),
+                   ("🔙 القائمة الرئيسية", "main_menu")]
+        await send_message("🛒 *قسم السحب*\nاختر الفئة:",
+                           parse_mode=ParseMode.MARKDOWN,
+                           reply_markup=kb_vertical(buttons))
         return
     buttons = [(f"📂 {cat['name']}", f"user_category:{cat['id']}") for cat in categories]
     if lion_visible:
         buttons.append(("🌍 حسابات لكل الدول", "tg_lion_catalog"))
+    buttons.append(("💎 سحب عملات رقمية", "crypto_withdraw_menu"))
     buttons.append(("🔙 القائمة الرئيسية", "main_menu"))
     await send_message("🛒 *قسم السحب*\nاختر الفئة:",
                        parse_mode=ParseMode.MARKDOWN,
@@ -613,9 +819,6 @@ async def user_buy_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=kb_single("🔙 إلغاء", "withdraw_store"))
 
 
-# ─────────────────────────────────────────────────────────────
-# ═══ [مُعدَّل] طلب نوع واحد فقط مهما تعددت أنواع المعلومات ═══
-# ─────────────────────────────────────────────────────────────
 async def _ask_next_message_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     send_msg = (query.edit_message_text if query else update.effective_message.reply_text)
@@ -631,13 +834,11 @@ async def _ask_next_message_type(update: Update, context: ContextTypes.DEFAULT_T
     total = flow.get("total", flow.get("service_price", 0))
 
     if len(types) == 1:
-        # نوع واحد فقط — اطلب النوع المحدد مباشرة
         current_type = types[0]
         label = MESSAGE_TYPE_LABELS[current_type][0]
         hint = MESSAGE_TYPE_HINTS.get(current_type, "")
         prompt = f"📝 <b>أرسل الآن ({label}):</b>\n{hint}"
     else:
-        # عدة أنواع — اطلب واحداً يكفي، واعرض الصيغ المقبولة
         labels_line = " أو ".join(MESSAGE_TYPE_LABELS[t][0] for t in types)
         hints_lines = "\n".join(
             f"  • {MESSAGE_TYPE_LABELS[t][1]}: {MESSAGE_TYPE_HINTS.get(t, '')}"
@@ -798,9 +999,6 @@ async def _handle_buy_flow_message(update: Update, context: ContextTypes.DEFAULT
         await _ask_next_message_type(update, context)
         return
 
-    # ─────────────────────────────────────────────────────────────
-    # ═══ [مُعدَّل] استقبال رسالة واحدة فقط → كشف النوع → إنهاء ═══
-    # ─────────────────────────────────────────────────────────────
     if step == "collect_info":
         types = flow.get("message_types", [])
         if not types:
@@ -817,7 +1015,6 @@ async def _handle_buy_flow_message(update: Update, context: ContextTypes.DEFAULT
             return
 
         if len(types) == 1:
-            # نوع واحد — تحقق مباشر
             t = types[0]
             err = _validate_message_input_by_types([t], {t: text})
             if err:
@@ -825,7 +1022,6 @@ async def _handle_buy_flow_message(update: Update, context: ContextTypes.DEFAULT
                 return
             flow["collected"] = {t: text}
         else:
-            # عدة أنواع — اكتشف النوع المطابق تلقائياً
             matched_type = None
             for t in types:
                 if _validate_message_input_by_types([t], {t: text}) is None:
@@ -883,9 +1079,6 @@ async def _finalize_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE,
     user_username = user.username or "لا يوجد"
     total_emails = user_data.get("total_approved_emails", 0)
 
-    # ─────────────────────────────────────────────────────────────
-    # ═══ [مُعدَّل] نعرض فقط ما أرسله العضو فعلاً ═══
-    # ─────────────────────────────────────────────────────────────
     if from_flow:
         collected = purchase.get("collected", {})
         info_lines = []
@@ -1148,7 +1341,6 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = update.message.text.strip() if update.message.text else ""
     action = context.user_data.get("store_action", "")
 
-    # ═══ إضافة فئة ═══
     if action == "add_category":
         config = load_config()
         if "store_categories" not in config:
@@ -1163,7 +1355,6 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await main_menu(update, context)
         return
 
-    # ═══ القناة الإجبارية ═══
     if action == "set_channel":
         channel, invite_link = parse_forced_channel_input(text)
         if not channel:
@@ -1199,7 +1390,6 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await main_menu(update, context)
         return
 
-    # ═══ كروب الشراء ═══
     if action in {"set_purchase_channel_1", "set_purchase_channel_2"}:
         channel_id = normalize_chat_id(text)
         if not channel_id or not (channel_id.startswith("@") or channel_id.lstrip("-").isdigit()):
@@ -1215,7 +1405,6 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
             reply_markup=purchase_channels_keyboard())
         return
 
-    # ═══ إضافة خدمة: اسم ═══
     if action == "add_service_name":
         if not text:
             await update.message.reply_text("⚠️ أرسل اسماً صالحاً.")
@@ -1231,7 +1420,6 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
             reply_markup=_service_types_keyboard([]))
         return
 
-    # ═══ إضافة خدمة: سعر ═══
     if action == "add_service_price":
         try:
             price = float(text)
@@ -1254,7 +1442,6 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await update.message.reply_text("⚠️ أرسل رقماً صحيحاً أكبر من صفر.")
         return
 
-    # ═══ إضافة خدمة: حد أدنى ═══
     if action == "add_service_qty_min":
         if text.casefold() in {"تخطي", "skip"}:
             await _skip_qty_min(update, context)
@@ -1278,7 +1465,6 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await update.message.reply_text("⚠️ أرسل رقماً صحيحاً ≥ 1.")
         return
 
-    # ═══ إضافة خدمة: حد أعلى ═══
     if action == "add_service_qty_max":
         if text.casefold() in {"تخطي", "skip"}:
             await _skip_qty_max(update, context)
@@ -1301,7 +1487,6 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await update.message.reply_text("⚠️ أرسل رقماً صحيحاً.")
         return
 
-    # ═══ إضافة خدمة: رسالة الطلب (إتمام) ═══
     if action == "add_service_message":
         name = context.user_data.get("new_service_name")
         price = context.user_data.get("new_service_price")
@@ -1345,7 +1530,6 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await main_menu(update, context)
         return
 
-    # ═══ تعديل خدمة ═══
     if action.startswith("edit_service_"):
         field = action.replace("edit_service_", "")
         cat_id = context.user_data.get("edit_service_cat")
@@ -1566,9 +1750,7 @@ async def toggle_tg_lion_store(update: Update, context: ContextTypes.DEFAULT_TYP
     await owner_store_section(update, context)
 
 
-# ═══════════════════════════════════════════════════════════════════
 # ═══ حذف فئة ═══
-# ═══════════════════════════════════════════════════════════════════
 async def store_delete_category_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
@@ -1645,9 +1827,6 @@ async def store_delete_category_execute(update: Update, context: ContextTypes.DE
     await owner_store_section(update, context)
 
 
-# ═══════════════════════════════════════════════════════════════════
-# ═══ إضافة فئة / إضافة خدمة ═══
-# ═══════════════════════════════════════════════════════════════════
 async def store_add_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
@@ -1704,9 +1883,6 @@ async def store_add_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=kb_single("🔙 إلغاء", f"store_category:{cat_id}"))
 
 
-# ═══════════════════════════════════════════════════════════════════
-# ═══ قائمة الخدمات للتعديل / الحذف ═══
-# ═══════════════════════════════════════════════════════════════════
 async def store_edit_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
@@ -1803,9 +1979,6 @@ async def delete_service_execute(update: Update, context: ContextTypes.DEFAULT_T
                                   reply_markup=kb_single("🔙 الفئة", f"store_category:{cat_id}"))
 
 
-# ═══════════════════════════════════════════════════════════════════
-# ═══ تفاصيل الخدمة (تعديل الحقول الفردية) ═══
-# ═══════════════════════════════════════════════════════════════════
 async def service_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
