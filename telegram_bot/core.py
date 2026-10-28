@@ -296,6 +296,9 @@ RESTRICTION_DURATION_HOURS = 1
 # Daily gift
 IRAQ_TZ_OFFSET_HOURS = 3
 
+# Sell-new-session expiry (30 days — effectively "forever" for user purposes)
+SELL_NEW_SESSION_MAX_AGE_DAYS = 30
+
 # ==================== SELL NEW EMAIL GENERATOR ====================
 FIRST_NAMES_EN = [
     "James", "John", "Robert", "Michael", "William", "David", "Richard", "Joseph",
@@ -1023,6 +1026,7 @@ DEFAULT_USER_FIELDS = {
     "verification_failures": 0,
     "restricted_until": "",
     "daily_gift_progress": {},
+    "sell_new_sessions": [],  # ✅ جلسات بيع إيميل جديد محفوظة (للاستئناف)
 }
 
 
@@ -1062,6 +1066,85 @@ def add_transaction(user_data: dict, kind: str, amount: float, note: str = "", e
         "note": note[:200], "email": email,
         "at": datetime.now(timezone.utc).isoformat(),
     })
+
+
+# ==================== SELL-NEW SESSIONS PERSISTENCE ====================
+def get_user_sell_sessions(user_id: int) -> list:
+    """يعيد جلسات بيع الإيميل الجديد المحفوظة للعضو."""
+    user_data = get_user(user_id)
+    sessions = user_data.get("sell_new_sessions", [])
+    return sessions if isinstance(sessions, list) else []
+
+
+def _purge_old_sell_sessions(sessions: list) -> list:
+    """يحذف الجلسات الأقدم من SELL_NEW_SESSION_MAX_AGE_DAYS."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=SELL_NEW_SESSION_MAX_AGE_DAYS)
+    kept = []
+    for s in sessions:
+        try:
+            created = datetime.fromisoformat(s.get("created_at", ""))
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            if created >= cutoff:
+                kept.append(s)
+        except (ValueError, TypeError):
+            kept.append(s)
+    return kept
+
+
+def upsert_sell_session(user_id: int, session: dict) -> None:
+    """يضيف/يحدّث جلسة بيع إيميل جديد ويحفظها بشكل دائم."""
+    user_data = get_user(user_id)
+    sessions = user_data.get("sell_new_sessions", [])
+    if not isinstance(sessions, list):
+        sessions = []
+    sessions = [s for s in sessions if s.get("email") != session.get("email")]
+    sessions.append(session)
+    sessions = _purge_old_sell_sessions(sessions)
+    user_data["sell_new_sessions"] = sessions
+    save_user(user_id, user_data)
+
+
+def update_sell_session(user_id: int, email: str, **fields) -> None:
+    """تحديث حقول جلسة محددة."""
+    user_data = get_user(user_id)
+    sessions = user_data.get("sell_new_sessions", [])
+    if not isinstance(sessions, list):
+        return
+    updated = False
+    for s in sessions:
+        if s.get("email") == email:
+            s.update(fields)
+            updated = True
+            break
+    if updated:
+        user_data["sell_new_sessions"] = sessions
+        save_user(user_id, user_data)
+
+
+def remove_sell_session(user_id: int, email: str) -> None:
+    """يحذف جلسة بيع إيميل جديد (بعد الإكمال أو الإلغاء)."""
+    user_data = get_user(user_id)
+    sessions = user_data.get("sell_new_sessions", [])
+    if not isinstance(sessions, list):
+        return
+    new_sessions = [s for s in sessions if s.get("email") != email]
+    if len(new_sessions) != len(sessions):
+        user_data["sell_new_sessions"] = new_sessions
+        save_user(user_id, user_data)
+
+
+def get_sell_session(user_id: int, email: str) -> Optional[dict]:
+    for s in get_user_sell_sessions(user_id):
+        if s.get("email") == email:
+            return s
+    return None
+
+
+def get_pending_sell_sessions(user_id: int) -> list:
+    """يعيد فقط الجلسات غير المكتملة (التي لم تُسلَّم بعد)."""
+    return [s for s in get_user_sell_sessions(user_id)
+            if s.get("status") in ("pending_creation", "created_verified", "totp_ready")]
 
 
 # ==================== ADMIN BONUS SETTLEMENT ====================
@@ -2412,6 +2495,27 @@ def _format_iso_time(value: Any) -> str:
         return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
     except Exception:
         return value[:19]
+
+
+# ==================== CRYPTO WITHDRAWAL CONFIGURATION ====================
+CRYPTO_WITHDRAWALS: Dict[str, Dict[str, Any]] = {
+    "bsc":     {"name": "BSC (BEP20)",  "symbol": "USDT", "min": 5.0, "fee": 0.01, "needs": "wallet",     "emoji": "🟡", "network_label": "BSC / BEP20"},
+    "opbnb":   {"name": "opBNB",        "symbol": "USDT", "min": 5.0, "fee": 0.10, "needs": "wallet",     "emoji": "🟠", "network_label": "opBNB"},
+    "trx":     {"name": "TRX (TRC20)",  "symbol": "USDT", "min": 5.0, "fee": 1.50, "needs": "wallet",     "emoji": "🔴", "network_label": "TRON / TRC20"},
+    "eth":     {"name": "Ethereum",     "symbol": "USDT", "min": 3.0, "fee": 0.60, "needs": "wallet",     "emoji": "🔷", "network_label": "Ethereum / ERC20"},
+    "pol":     {"name": "Polygon",      "symbol": "USDT", "min": 3.0, "fee": 0.03, "needs": "wallet",     "emoji": "🟣", "network_label": "Polygon / POL"},
+    "ton":     {"name": "TON",          "symbol": "USDT", "min": 3.0, "fee": 0.30, "needs": "wallet",     "emoji": "💎", "network_label": "TON"},
+    "binance": {"name": "Binance Pay",  "symbol": "USDT", "min": 0.3, "fee": 0.00, "needs": "binance_id", "emoji": "🟨", "network_label": "Binance Pay ID"},
+}
+
+
+def crypto_menu_keyboard() -> InlineKeyboardMarkup:
+    rows = []
+    for key, info in CRYPTO_WITHDRAWALS.items():
+        label = f"{info['emoji']} {info['name']} | حد ${info['min']:.2f} | عمولة ${info['fee']:.2f}"
+        rows.append([InlineKeyboardButton(label[:64], callback_data=f"crypto_pick:{key}")])
+    rows.append([InlineKeyboardButton("🔙 قسم السحب", callback_data="withdraw_store")])
+    return InlineKeyboardMarkup(rows)
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]
