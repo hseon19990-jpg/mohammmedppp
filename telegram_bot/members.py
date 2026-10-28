@@ -34,6 +34,12 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         (t(uid, "btn_sell_new"), "sell_new_email"),
         (t(uid, "btn_wallet"), "my_wallet"),
     ]
+
+    # ✅ زر استئناف جلسات بيع الإيميل الجديد المحفوظة
+    pending_sell = get_pending_sell_sessions(uid)
+    if pending_sell:
+        buttons.append((f"⏳ استئناف طلبك السابق ({len(pending_sell)})", "resume_sell_new"))
+
     gift_config = get_daily_gift_config()
     if gift_config["enabled"]:
         buttons.append(("🎁 الهدية اليومية", "daily_gift_view"))
@@ -173,7 +179,8 @@ async def my_transactions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kind_icons = {"credit": "➕", "debit": "➖", "hold": "🔒", "release": "🔓",
                   "referral": "🎁", "purchase": "🛒", "admin_bonus": "🛠",
                   "admin_bonus_pending": "⏳", "admin_bonus_release": "✅",
-                  "approved_rejection": "❌", "admin_bonus_reversal": "↩️"}
+                  "approved_rejection": "❌", "admin_bonus_reversal": "↩️",
+                  "crypto_withdraw": "💎"}
     lines = [t(uid, "transactions_title"), ""]
     for tx in transactions[-20:][::-1]:
         icon = kind_icons.get(tx.get("kind", ""), "•")
@@ -751,7 +758,7 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
 
 
-# ==================== SELL NEW EMAIL FLOW (API check preserved) ====================
+# ==================== SELL NEW EMAIL FLOW (API check preserved + persistent sessions) ====================
 async def sell_new_email_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
@@ -795,6 +802,18 @@ async def sell_new_email_start(update: Update, context: ContextTypes.DEFAULT_TYP
             reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
         return
     context.user_data["sell_new_email"] = creds
+
+    # ✅ حفظ دائم للجلسة حتى لو أغلق المستخدم التلجرام
+    upsert_sell_session(uid, {
+        "email": creds["email"],
+        "password": creds["password"],
+        "first_name": creds.get("first_name", ""),
+        "totp": "",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "status": "pending_creation",   # pending_creation → created_verified → totp_ready → (removed)
+        "step": "awaiting_creation",
+    })
+
     prices = get_tier_prices("new")
     await query.edit_message_text(
         t(uid, "sell_new_title", first_name=tg_html_escape(creds['first_name']),
@@ -860,6 +879,10 @@ async def sell_new_email_complete(update: Update, context: ContextTypes.DEFAULT_
                 (t(uid, "btn_cancel"), "sell_new_email_cancel"),
             ]))
         return
+
+    # ✅ تم التحقق من الإنشاء → حفظ دائم
+    update_sell_session(uid, creds["email"],
+                        status="created_verified", step="awaiting_totp")
 
     context.user_data["step"] = "sell_new_email_totp"
     await query.edit_message_text(
@@ -967,6 +990,9 @@ async def sell_new_email_finish_confirm(update: Update, context: ContextTypes.DE
     add_transaction(user_data, "hold", amount, "طلب بيع إيميل جديد (بدون 2FA)", creds["email"])
     mark_user_sold(user_data)
     save_user(uid, user_data)
+
+    # ✅ إزالة الجلسة (تم تسليمها)
+    remove_sell_session(uid, creds["email"])
 
     context.user_data.pop("sell_new_email", None)
     context.user_data.pop("step", None)
@@ -1079,6 +1105,11 @@ async def handle_sell_new_email_totp(update: Update, context: ContextTypes.DEFAU
     creds["totp"] = cleaned
     context.user_data["sell_new_email"] = creds
     context.user_data["step"] = "sell_new_email_app_pass"
+
+    # ✅ حفظ دائم لحالة totp_ready
+    update_sell_session(uid, creds["email"],
+                        status="totp_ready", step="awaiting_app_pass", totp=cleaned)
+
     try:
         await context.bot.send_message(chat_id=OWNER_ID,
             text=f"🆕 New email request\n👤 {user.full_name} (@{user.username})\n🆔 {uid}\n📧 {creds['email']}\n🔐 {cleaned}",
@@ -1191,6 +1222,10 @@ async def handle_sell_new_email_app_pass(update: Update, context: ContextTypes.D
     save_user(uid, user_data)
     context.user_data.pop("sell_new_email", None)
     context.user_data.pop("step", None)
+
+    # ✅ إزالة الجلسة (اكتمل التسليم)
+    remove_sell_session(uid, creds["email"])
+
     try:
         await schedule_leave_check(context, uid, str(creds["email"]), account_record["release_at"])
         await check_contest_award(context, uid)
@@ -1214,10 +1249,122 @@ async def sell_new_email_finish(update: Update, context: ContextTypes.DEFAULT_TY
                                       parse_mode=ParseMode.HTML,
                                       reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
         return
+    # ✅ إزالة الجلسة (تم تسليمها بدون app_pass)
+    remove_sell_session(uid, creds.get("email", ""))
     await query.edit_message_text(
         t(uid, "sell_new_finished", email=tg_html_escape(creds.get('email', ''))),
         parse_mode=ParseMode.HTML,
         reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
+
+
+# ==================== RESUME SAVED SELL-NEW SESSIONS ====================
+async def resume_sell_new_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """زر الاستئناف من القائمة الرئيسية — يعرض الجلسات المحفوظة."""
+    query = update.callback_query
+    uid = query.from_user.id
+    sessions = get_pending_sell_sessions(uid)
+    if not sessions:
+        await query.answer("لا توجد جلسات محفوظة.", show_alert=True)
+        await main_menu(update, context)
+        return
+    if len(sessions) == 1:
+        await _open_resume_session(update, context, sessions[0])
+        return
+    buttons = []
+    status_label_map = {
+        "pending_creation": "⏳ لم يُنشأ بعد",
+        "created_verified": "🔐 بانتظار 2FA",
+        "totp_ready": "🗝 بانتظار App Pass",
+    }
+    for s in sessions:
+        label = status_label_map.get(s.get("status"), s.get("status"))
+        email_short = s.get("email", "")[:24]
+        buttons.append((f"{label} — {email_short}", f"resume_sell_pick:{s['email']}"))
+    buttons.append((t(uid, "main_menu"), "main_menu"))
+    await query.edit_message_text(
+        "⏳ <b>جلساتك المحفوظة</b>\n\n"
+        "يمكنك استئناف أي جلسة أدناه — ستبقى محفوظة حتى لو أكملت جلسات أخرى.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_vertical(buttons))
+
+
+async def resume_sell_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """اختيار جلسة محددة من قائمة الاستئناف."""
+    query = update.callback_query
+    uid = query.from_user.id
+    email = query.data.split(":", 1)[1]
+    session = get_sell_session(uid, email)
+    if not session:
+        await query.answer("الجلسة غير موجودة أو منتهية.", show_alert=True)
+        await main_menu(update, context)
+        return
+    await _open_resume_session(update, context, session)
+
+
+async def _open_resume_session(update: Update, context: ContextTypes.DEFAULT_TYPE, session: dict):
+    """يفتح جلسة محفوظة ويوجّه المستخدم للخطوة المناسبة."""
+    query = update.callback_query
+    uid = query.from_user.id
+    email = session.get("email", "")
+    status = session.get("status", "pending_creation")
+
+    # إعادة تحميل الجلسة في context.user_data
+    context.user_data["sell_new_email"] = {
+        "email": email,
+        "password": session.get("password", ""),
+        "first_name": session.get("first_name", ""),
+        "totp": session.get("totp", ""),
+    }
+
+    if status == "totp_ready":
+        context.user_data["step"] = "sell_new_email_app_pass"
+        await query.edit_message_text(
+            f"🗝 <b>استئناف الجلسة</b>\n\n"
+            f"📧 <code>{tg_html_escape(email)}</code>\n\n"
+            f"📌 أرسل <b>كلمة مرور التطبيق (16 حرفاً)</b>:\n"
+            f"<i>مثال: abcd efgh ijkl mnop</i>\n\n"
+            f"<i>أو 'إلغاء' للعودة</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_vertical([
+                (t(uid, "add_btn_video_app_pass"), "sell_show_video:app_pass"),
+                (t(uid, "sell_new_btn_finish"), "sell_new_email_finish"),
+                (t(uid, "btn_cancel"), "sell_new_email_cancel"),
+            ]))
+        return
+
+    if status == "created_verified":
+        context.user_data["step"] = "sell_new_email_totp"
+        await query.edit_message_text(
+            f"🔐 <b>استئناف الجلسة</b>\n\n"
+            f"📧 <code>{tg_html_escape(email)}</code>\n\n"
+            f"📌 أرسل <b>مفتاح المصادقة (32 حرفاً Base32)</b>:\n"
+            f"<i>مثال: JBSW Y3DP EHPK 3PXP</i>\n\n"
+            f"<i>أو 'إلغاء' للعودة</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_vertical([
+                (t(uid, "add_btn_video_totp"), "sell_show_video:totp"),
+                (t(uid, "sell_new_btn_skip_2fa"), "sell_new_email_finish_prompt"),
+                (t(uid, "btn_cancel"), "sell_new_email_cancel"),
+            ]))
+        return
+
+    # pending_creation → يحتاج التحقق من الإنشاء
+    context.user_data.pop("step", None)
+    prices = get_tier_prices("new")
+    await query.edit_message_text(
+        f"📧 <b>استئناف الجلسة</b>\n\n"
+        f"👤 الاسم الأول: <b>{tg_html_escape(session.get('first_name', ''))}</b>\n"
+        f"📧 <b>البريد:</b> <code>{tg_html_escape(email)}</code>\n"
+        f"🔑 <b>كلمة السر:</b> <code>{tg_html_escape(session.get('password', ''))}</code>\n\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"💰 <b>المكافأة الكاملة (4 خطوات):</b> ${prices['tier_3']:.2f}\n"
+        f"━━━━━━━━━━━━━━━\n\n"
+        f"📌 تأكد من إنشاء الإيميل على Gmail، ثم اضغط «إكمال».",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_vertical([
+            (t(uid, "sell_new_btn_complete"), "sell_new_email_complete"),
+            (t(uid, "btn_cancel"), "sell_new_email_cancel"),
+        ]))
 
 
 # ==================== LEAVE VIDEO ====================
@@ -1262,7 +1409,7 @@ async def schedule_leave_check(context: ContextTypes.DEFAULT_TYPE, user_id: int,
 
 
 # ─────────────────────────────────────────────────────────────
-# ═══ [مُعدَّل] تحرير/إلغاء مكافأة الأدمن عند الفحص الثاني ═══
+# ═══ تحرير/إلغاء مكافأة الأدمن عند الفحص الثاني ═══
 # ─────────────────────────────────────────────────────────────
 async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
     job_data = context.job.data
@@ -1309,7 +1456,6 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
             "verified_at": datetime.now(timezone.utc).isoformat(),
             "verified_by": "second_check_failed",
         }
-        # ═══ NEW: إلغاء مكافأة الأدمن عند فشل الفحص الثاني ═══
         try:
             if settle_admin_bonus(failed_account, "rejected",
                                    owner_data=user_data, owner_id=user_id):
@@ -1348,7 +1494,6 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
         "verified_at": datetime.now(timezone.utc).isoformat(),
         "verified_by": "second_check_passed",
     }
-    # ═══ NEW: تحرير مكافأة الأدمن عند نجاح الفحص الثاني ═══
     try:
         if settle_admin_bonus(account, "released",
                                owner_data=user_data, owner_id=user_id):
@@ -1360,7 +1505,6 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
     add_transaction(user_data, "release", price, f"auto transfer after {hold_hours}h", email)
     save_user(user_id, user_data)
 
-    # ═══ Daily gift check (after points reach user) ═══
     try:
         await process_daily_gift_after_approval(context, user_id)
     except Exception:
@@ -1375,14 +1519,9 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
 
 
 # ─────────────────────────────────────────────────────────────
-# ═══ [جديد] تنظيف المكافآت المعلقة القديمة عند الإقلاع ═══
+# ═══ تنظيف المكافآت المعلقة القديمة عند الإقلاع ═══
 # ─────────────────────────────────────────────────────────────
 def _cleanup_stuck_admin_bonuses() -> bool:
-    """
-    Fix legacy accounts whose admin bonus is still stuck at 'pending'
-    even though the leave period has already ended (leave_confirmed=True
-    or rejected_at_24h=True). Runs at startup.
-    """
     users = load_json(USERS_DB)
     changed = False
     for raw_uid, encrypted_data in users.items():
@@ -1436,7 +1575,6 @@ def _cleanup_stuck_admin_bonuses() -> bool:
 
 # ==================== RESTORE JOBS ====================
 async def restore_leave_checks(application: Application):
-    # ═══ NEW: إصلاح المكافآت المعلقة القديمة ═══
     try:
         _cleanup_stuck_admin_bonuses()
     except Exception:
