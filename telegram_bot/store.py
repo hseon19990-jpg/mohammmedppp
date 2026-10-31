@@ -387,11 +387,27 @@ async def tg_lion_confirm_order(update: Update, context: ContextTypes.DEFAULT_TY
             except Exception: pass
             await query.edit_message_text("⚠️ تعذر تسجيل الخصم. لم يتم إرسال الطلب؛ حاول مجدداً لاحقاً.")
             return
-        order_ref = secrets.token_hex(4).upper()
+        # ═══ إنشاء كود الطلب (جديد) ═══
+        order_record = {
+            "type": "tg_lion",
+            "country_code": country["code"],
+            "country_name": country["name"],
+            "user_id": user.id,
+            "user_name": user.full_name or "غير معروف",
+            "user_username": user.username or "",
+            "total": cents_to_money(total_cents),
+            "price_cents": total_cents,
+            "base_price": cents_to_money(country["base_price_cents"]),
+            "quantity": 1,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "status": "pending",
+            "description": f"{country['name']} ({country['code']})",
+        }
+        order_code = save_order_record(order_record)
         username = f"@{user.username}" if user.username else "لا يوجد"
         order_text = (
             "📥 <b>طلب جديد — حسابات لكل الدول</b>\n\n"
-            f"🧾 رقم الطلب: <code>{order_ref}</code>\n"
+            f"🧾 رقم الطلب: <code>{order_code}</code>\n"
             f"👤 العضو: {html.escape(user.full_name or 'غير معروف')}\n"
             f"🆔 المعرف: {html.escape(username)} | <code>{user.id}</code>\n"
             f"🌍 الدولة: <b>{html.escape(country['name'])}</b> (<code>{html.escape(country['code'])}</code>)\n"
@@ -402,20 +418,23 @@ async def tg_lion_confirm_order(update: Update, context: ContextTypes.DEFAULT_TY
             f"⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
         )
         try:
-            await context.bot.send_message(chat_id=purchase_channel, text=order_text, parse_mode=ParseMode.HTML)
+            await context.bot.send_message(
+                chat_id=purchase_channel, text=order_text, parse_mode=ParseMode.HTML,
+                reply_markup=kb_single("✅ اكتمل الطلب", f"complete_order:{order_code}"))
         except Exception as exc:
             for key, (existed, value) in snapshot.items():
                 if existed: user_data[key] = value
                 else: user_data.pop(key, None)
             try: save_user(user.id, user_data)
             except Exception: pass
+            delete_order_record(order_code)
             logger.warning("TG-Lion order receipt delivery failed (%s)", type(exc).__name__)
             await query.edit_message_text("⚠️ تعذر إرسال الطلب إلى قروب الطلبات؛ أُعيد الرصيد إن أمكن. حاول مجدداً لاحقاً.")
             return
         context.user_data.pop("tg_lion_confirmation", None)
         await query.edit_message_text(
             f"✅ تم تسجيل طلبك وإرساله إلى قروب الطلبات.\n\n"
-            f"🧾 رقم الطلب: <code>{order_ref}</code>\n"
+            f"🧾 رقم الطلب: <code>{order_code}</code>\n"
             f"🌍 الدولة: <b>{html.escape(country['name'])}</b>\n"
             f"💰 المخصوم: <b>{cents_to_money(total_cents):.2f}$</b>\n"
             "سيتم تنفيذ الطلب يدوياً من الإدارة.",
@@ -624,22 +643,39 @@ async def crypto_amount_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"💳 رصيدك: <b>${balance:.2f}</b>",
             parse_mode=ParseMode.HTML)
         return True
-    # خصم من الرصيد
     if not debit_spendable_balance(user_data, money_to_cents(total_deduct)):
         await update.message.reply_text("❌ رصيدك غير كافٍ. لم يتم تسجيل الطلب.")
         return True
     target = state.get("target", "")
     target_label = "معرّف Binance" if info["needs"] == "binance_id" else "عنوان المحفظة"
     add_transaction(user_data, "crypto_withdraw", total_deduct,
-                    f"سحب {info['name']} — مبلغ ${amount:.2f} + عمولة ${info['fee']:.2f}",
-                    "")
+                    f"سحب {info['name']} — مبلغ ${amount:.2f} + عمولة ${info['fee']:.2f}", "")
     save_user(uid, user_data)
 
-    # إشعار المالك + قروب الشراء
-    _, purchase_channel = get_configured_purchase_channels()
+    # ═══ إنشاء كود الطلب (جديد) ═══
     user = update.effective_user
+    order_record = {
+        "type": "crypto_withdraw",
+        "network_key": state.get("network", ""),
+        "network_name": info["name"],
+        "target": target,
+        "target_label": target_label,
+        "user_id": uid,
+        "user_name": user.full_name or "غير معروف",
+        "user_username": user.username or "",
+        "total": total_deduct,
+        "amount": amount,
+        "unit_fee": info["fee"],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "status": "pending",
+        "description": f"سحب {info['name']} — ${amount:.2f}",
+    }
+    order_code = save_order_record(order_record)
+
+    _, purchase_channel = get_configured_purchase_channels()
     order_text = (
         f"💎 <b>طلب سحب عملة رقمية</b>\n\n"
+        f"🧾 <b>كود الطلب:</b> <code>{order_code}</code>\n"
         f"👤 {html.escape(user.full_name or 'غير معروف')}\n"
         f"🆔 @{html.escape(user.username or 'لا يوجد')} | <code>{uid}</code>\n"
         f"🌐 الشبكة: <b>{info['name']}</b>\n"
@@ -651,13 +687,15 @@ async def crypto_amount_input(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
     for chat_id in filter(None, [OWNER_ID, purchase_channel]):
         try:
-            await context.bot.send_message(chat_id=chat_id, text=order_text,
-                                           parse_mode=ParseMode.HTML)
+            await context.bot.send_message(
+                chat_id=chat_id, text=order_text, parse_mode=ParseMode.HTML,
+                reply_markup=kb_single("✅ اكتمل الطلب", f"complete_order:{order_code}"))
         except Exception:
             logger.exception("Failed to send crypto withdraw order to %s", chat_id)
 
     await update.message.reply_text(
         f"✅ <b>تم تسجيل طلب السحب</b>\n\n"
+        f"🧾 <b>كود الطلب:</b> <code>{order_code}</code>\n"
         f"🌐 {info['name']}\n"
         f"💰 المبلغ: <b>${amount:.2f}</b>\n"
         f"💸 العمولة: <b>${info['fee']:.2f}</b>\n"
@@ -668,6 +706,239 @@ async def crypto_amount_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
     context.user_data.pop("crypto_withdraw", None)
     return True
+
+
+# ==================== MASTER & BALANCES (NEW) ====================
+async def master_balances_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """قائمة ماستر وأرصدة (ماستر / آسيا / أثير)."""
+    if not await check_forced_channel(update, context):
+        return
+    query = update.callback_query
+    uid = query.from_user.id
+    user_data = get_user(uid)
+    restriction = get_any_restriction_message(user_data)
+    if restriction:
+        await query.edit_message_text(restriction, parse_mode=ParseMode.HTML,
+                                      reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        return
+    balance = spendable_balance_cents(user_data) / 100
+    buttons = []
+    for key, info in MASTER_BALANCE_OPTIONS.items():
+        if info["fee"] > 0:
+            label = f"{info['emoji']} {info['name']} — ${info['price']:.2f} + ${info['fee']:.2f} عمولة/وحدة"
+        else:
+            label = f"{info['emoji']} {info['name']} — ${info['price']:.2f} (بدون عمولة)"
+        buttons.append((label, f"master_pick:{key}"))
+    buttons.append(("🔙 قسم السحب", "withdraw_store"))
+    await query.edit_message_text(
+        f"🎖️ <b>ماستر وأرصدة</b>\n\n"
+        f"💳 <b>رصيدك المتاح:</b> <code>${balance:.2f}</code>\n\n"
+        f"اختر ما تريد شراءه:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_vertical(buttons))
+
+
+async def master_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """المستخدم اختار خدمة ماستر/آسيا/أثير → يطلب الكمية."""
+    if not await check_forced_channel(update, context):
+        return
+    query = update.callback_query
+    uid = query.from_user.id
+    try:
+        key = query.data.split(":", 1)[1]
+    except (IndexError, ValueError):
+        await query.answer("⚠️", show_alert=True)
+        return
+    info = MASTER_BALANCE_OPTIONS.get(key)
+    if not info:
+        await query.answer("⚠️", show_alert=True)
+        return
+    user_data = get_user(uid)
+    balance = spendable_balance_cents(user_data) / 100
+    if balance < (info["price"] + info["fee"]):
+        await query.answer(
+            f"⚠️ رصيدك غير كافٍ. الحد الأدنى للوحدة: ${info['price'] + info['fee']:.2f}",
+            show_alert=True)
+        return
+    context.user_data["master_balance"] = {"key": key, "info": info, "stage": "awaiting_quantity"}
+    fee_line = (f"💸 <b>عمولة الوحدة:</b> <b>${info['fee']:.2f}</b>\n" if info["fee"] > 0
+                else "💸 <b>العمولة:</b> <b>لا توجد</b>\n")
+    await query.edit_message_text(
+        f"{info['emoji']} <b>{info['name']}</b>\n\n"
+        f"💰 <b>سعر الوحدة:</b> <b>${info['price']:.2f}</b>\n"
+        f"{fee_line}"
+        f"💳 <b>رصيدك:</b> <b>${balance:.2f}</b>\n\n"
+        f"📌 <b>أرسل عدد الوحدات التي تريد شراءها:</b>\n"
+        f"<i>مثال: 10</i>\n\n"
+        f"<i>أو 'إلغاء' للعودة</i>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_single("🔙 إلغاء", "master_balances_menu"))
+
+
+async def master_quantity_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """يستقبل الكمية المطلوبة من ماستر/آسيا/أثير. يعيد True إذا تعامل مع الرسالة."""
+    uid = update.effective_user.id
+    state = context.user_data.get("master_balance")
+    if not state or state.get("stage") != "awaiting_quantity":
+        return False
+    text = update.message.text.strip() if update.message.text else ""
+    if text.casefold() in {"إلغاء", "الغاء", "cancel", "отмена"}:
+        context.user_data.pop("master_balance", None)
+        await update.message.reply_text("❌ تم الإلغاء.",
+                                        reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+        return True
+    try:
+        quantity = int(text)
+        if quantity <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("⚠️ أرسل عدداً صحيحاً أكبر من صفر.")
+        return True
+    info = state["info"]
+    key = state["key"]
+    unit_total = round(info["price"] + info["fee"], 2)
+    total = round(quantity * unit_total, 2)
+    user_data = get_user(uid)
+    if spendable_balance_cents(user_data) < money_to_cents(total):
+        await update.message.reply_text(
+            f"❌ رصيدك غير كافٍ.\n"
+            f"💰 المطلوب: <b>${total:.2f}</b>\n"
+            f"💳 رصيدك: <b>${cents_to_money(spendable_balance_cents(user_data)):.2f}</b>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_single("🔙 إلغاء", "master_balances_menu"))
+        return True
+    if not debit_spendable_balance(user_data, money_to_cents(total)):
+        await update.message.reply_text("❌ رصيدك غير كافٍ. لم يتم تسجيل الطلب.")
+        return True
+    now = datetime.now(timezone.utc)
+    order = {
+        "type": "master_balance",
+        "balance_key": key,
+        "balance_name": info["name"],
+        "quantity": quantity,
+        "unit_price": info["price"],
+        "unit_fee": info["fee"],
+        "total": total,
+        "user_id": uid,
+        "user_name": update.effective_user.full_name or "غير معروف",
+        "user_username": update.effective_user.username or "",
+        "created_at": now.isoformat(),
+        "status": "pending",
+        "description": f"{info['name']} × {quantity} وحدة",
+    }
+    order_code = save_order_record(order)
+    add_transaction(user_data, "purchase", total,
+                    f"شراء {info['name']} × {quantity} — كود {order_code}")
+    save_user(uid, user_data)
+    context.user_data.pop("master_balance", None)
+
+    _, purchase_channel_2 = get_configured_purchase_channels()
+    fee_block = (f"💸 <b>عمولة الوحدة:</b> ${info['fee']:.2f}\n"
+                 if info["fee"] > 0 else "")
+    order_text = (
+        f"🎖️ <b>طلب ماستر وأرصدة</b>\n\n"
+        f"🧾 <b>كود الطلب:</b> <code>{order_code}</code>\n"
+        f"👤 {html.escape(order['user_name'])}\n"
+        f"🆔 @{html.escape(order['user_username'] or 'لا يوجد')} | <code>{uid}</code>\n"
+        f"📦 <b>النوع:</b> {info['emoji']} {info['name']}\n"
+        f"🔢 <b>العدد:</b> {quantity}\n"
+        f"💰 <b>سعر الوحدة:</b> ${info['price']:.2f}\n"
+        f"{fee_block}"
+        f"💳 <b>الإجمالي المخصوم:</b> ${total:.2f}\n"
+        f"⏰ {now.strftime('%Y-%m-%d %H:%M:%S UTC')}"
+    )
+    for chat in filter(None, [OWNER_ID, purchase_channel_2]):
+        try:
+            await context.bot.send_message(
+                chat_id=chat, text=order_text, parse_mode=ParseMode.HTML,
+                reply_markup=kb_single("✅ اكتمل الطلب", f"complete_order:{order_code}"))
+        except Exception:
+            logger.exception("Failed to send master balance order to %s", chat)
+
+    await update.message.reply_text(
+        f"✅ <b>تم استلام طلبك</b>\n\n"
+        f"🧾 <b>كود الطلب:</b> <code>{order_code}</code>\n"
+        f"📦 {info['emoji']} {info['name']} × {quantity}\n"
+        f"💰 المخصوم: <b>${total:.2f}</b>\n\n"
+        f"<i>سيتم التواصل معك عند اكتمال التنفيذ.</i>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+    return True
+
+
+# ==================== COMPLETE ORDER (FROM PURCHASE GROUP) ====================
+async def complete_order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يعرض تفاصيل الطلب + زر تأكيد الإكمال عند الضغط على 'اكتمل الطلب' في القروب."""
+    query = update.callback_query
+    actor = update.effective_user
+    if not is_admin_or_owner(actor.id):
+        await query.answer("🚫", show_alert=True)
+        return
+    try:
+        code = query.data.split(":", 1)[1]
+    except (IndexError, ValueError):
+        await query.answer("⚠️", show_alert=True)
+        return
+    order = get_order_record(code)
+    if not order:
+        await query.answer("⚠️ الطلب غير موجود.", show_alert=True)
+        return
+    details = format_order_details_html(order)
+    if order.get("status") == "completed":
+        await query.answer("ℹ️ هذا الطلب مكتمل مسبقاً.", show_alert=True)
+        await query.edit_message_text(details, parse_mode=ParseMode.HTML,
+                                      reply_markup=kb_single("🔙 إغلاق", "noop"))
+        return
+    await query.edit_message_text(
+        details, parse_mode=ParseMode.HTML,
+        reply_markup=kb_vertical([
+            ("✅ تأكيد الإكمال", f"confirm_complete_order:{code}"),
+            ("❌ إلغاء", "noop"),
+        ]))
+
+
+async def confirm_complete_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يؤكد الإكمال: يحدّث الحالة ويرسل إشعاراً للعضو + يعرض التفاصيل للمالك."""
+    query = update.callback_query
+    actor = update.effective_user
+    if not is_admin_or_owner(actor.id):
+        await query.answer("🚫", show_alert=True)
+        return
+    try:
+        code = query.data.split(":", 1)[1]
+    except (IndexError, ValueError):
+        await query.answer("⚠️", show_alert=True)
+        return
+    order = get_order_record(code)
+    if not order:
+        await query.answer("⚠️ الطلب غير موجود.", show_alert=True)
+        return
+    if order.get("status") == "completed":
+        await query.answer("ℹ️ مكتمل مسبقاً.", show_alert=True)
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    update_order_record(
+        code, status="completed", completed_at=now,
+        completed_by=actor.id,
+        completed_by_name=actor.full_name or "",
+        completed_by_username=actor.username or "")
+    order = get_order_record(code) or order
+    user_id = order.get("user_id")
+    if user_id:
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=(f"✅ <b>تم إكمال طلبك</b>\n\n"
+                      f"🧾 <b>كود الطلب:</b> <code>{code}</code>\n"
+                      f"📝 {tg_html_escape(order.get('description', ''))}\n"
+                      f"💰 المبلغ: <b>${float(order.get('total', 0)):.2f}</b>\n\n"
+                      f"<i>شكراً لاستخدامك البوت.</i>"),
+                parse_mode=ParseMode.HTML)
+        except Exception:
+            logger.exception("Failed to notify member about order completion")
+    await query.edit_message_text(
+        format_order_details_html(order), parse_mode=ParseMode.HTML,
+        reply_markup=kb_single("🔙 إغلاق", "noop"))
 
 
 # ==================== WITHDRAW STORE (USER) ====================
@@ -691,14 +962,15 @@ async def withdraw_store(update: Update, context: ContextTypes.DEFAULT_TYPE):
     categories = config.get("store_categories", [])
     lion_visible = config.get("tg_lion_store_visible", True)
     if not categories and not lion_visible:
-        # لا يزال قسم السحب الرقمي متاحاً
-        buttons = [("💎 سحب عملات رقمية", "crypto_withdraw_menu"),
+        buttons = [("🎖️ ماستر وأرصدة", "master_balances_menu"),
+                   ("💎 سحب عملات رقمية", "crypto_withdraw_menu"),
                    ("🔙 القائمة الرئيسية", "main_menu")]
         await send_message("🛒 *قسم السحب*\nاختر الفئة:",
                            parse_mode=ParseMode.MARKDOWN,
                            reply_markup=kb_vertical(buttons))
         return
     buttons = [(f"📂 {cat['name']}", f"user_category:{cat['id']}") for cat in categories]
+    buttons.append(("🎖️ ماستر وأرصدة", "master_balances_menu"))
     if lion_visible:
         buttons.append(("🌍 حسابات لكل الدول", "tg_lion_catalog"))
     buttons.append(("💎 سحب عملات رقمية", "crypto_withdraw_menu"))
@@ -1090,10 +1362,28 @@ async def _finalize_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE,
     else:
         info_block = f"<code>{html.escape(text)}</code>"
 
+    # ═══ إنشاء كود الطلب (جديد) ═══
+    order_record = {
+        "type": "store_purchase",
+        "service_name": purchase.get("service_name", ""),
+        "quantity": quantity,
+        "unit_price": float(purchase.get("service_price", 0)),
+        "total": total,
+        "user_id": user_id,
+        "user_name": user_name,
+        "user_username": user_username,
+        "info_block": info_block,
+        "created_at": datetime.now().isoformat(),
+        "status": "pending",
+        "description": f"{purchase.get('service_name', '')} × {quantity}",
+    }
+    order_code = save_order_record(order_record)
+
     _, purchase_channel_2 = get_configured_purchase_channels()
     if purchase_channel_2:
         text2 = (
             f"📋 <b>طلب شراء مكتمل</b>\n\n"
+            f"🧾 <b>كود الطلب:</b> <code>{order_code}</code>\n"
             f"👤 <b>{html.escape(user_name)}</b>\n"
             f"🆔 @{html.escape(user_username)}\n"
             f"🆔 <code>{user_id}</code>\n"
@@ -1109,7 +1399,7 @@ async def _finalize_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE,
             await context.bot.send_message(
                 chat_id=purchase_channel_2, text=text2,
                 parse_mode=ParseMode.HTML,
-                reply_markup=kb_single("✅ تم الإيصال", f"deliver_order:{user_id}"))
+                reply_markup=kb_single("✅ اكتمل الطلب", f"complete_order:{order_code}"))
         except Exception:
             logger.exception("Could not send member message.")
     if OWNER_ID:
@@ -1117,6 +1407,7 @@ async def _finalize_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE,
             await context.bot.send_message(
                 chat_id=OWNER_ID,
                 text=(f"📩 *رسالة من مستخدم*\n\n"
+                      f"🧾 كود الطلب: `{order_code}`\n"
                       f"👤 `{user_name}`\n"
                       f"🆔 @{user_username}\n"
                       f"🆔 `{user_id}`\n"
@@ -1130,6 +1421,7 @@ async def _finalize_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     await update.effective_message.reply_text(
         f"✅ *تم استلام رسالتك!*\n\n"
+        f"🧾 كود الطلب: `{order_code}`\n"
         f"📦 الكمية: `{quantity}`\n"
         f"💰 تم خصم `${total:.2f}`.\n\n"
         f"📝 المعلومات:\n{re.sub('<[^>]+>', '', info_block)}\n\n"
