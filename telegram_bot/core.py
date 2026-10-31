@@ -240,7 +240,7 @@ def migrate_legacy_data():
     for legacy_dir in legacy_dirs:
         if not legacy_dir.exists():
             continue
-        for filename in ("users.json", "config.json", "admins.json"):
+        for filename in ("users.json", "config.json", "admins.json", "orders.json"):
             source = legacy_dir / filename
             destination = DATA_DIR / filename
             if source.is_file() and not destination.exists():
@@ -268,6 +268,7 @@ migrate_legacy_data()
 USERS_DB = DATA_DIR / "users.json"
 SESSIONS_DB = DATA_DIR / "sessions.json"
 PENDING_PURCHASES_DB = DATA_DIR / "pending_purchases.json"
+ORDERS_DB = DATA_DIR / "orders.json"
 ADMINS_DB = DATA_DIR / "admins.json"
 VIDEOS_DIR = DATA_DIR / "videos"
 BACKUP_DIR = DATA_DIR / "backups"
@@ -285,7 +286,6 @@ BAN_THRESHOLD = 3
 BAN_FIRST_DURATION_HOURS = 24
 BAN_WEEKLY_DURATION_HOURS = 24 * 7
 
-# API rotation system limits
 MAX_APIS_TOTAL = 30
 MAX_APIS_PER_DAY_PER_ADMIN = 3
 API_ADD_BONUS = 0.05
@@ -293,10 +293,7 @@ API_WARNING_THRESHOLD = 50
 VERIFICATION_FAILURES_THRESHOLD = 3
 RESTRICTION_DURATION_HOURS = 1
 
-# Daily gift
 IRAQ_TZ_OFFSET_HOURS = 3
-
-# Sell-new-session expiry (30 days — effectively "forever" for user purposes)
 SELL_NEW_SESSION_MAX_AGE_DAYS = 30
 
 # ==================== SELL NEW EMAIL GENERATOR ====================
@@ -360,26 +357,19 @@ def check_email_availability_sync(username: str) -> Optional[bool]:
         req = Request(url, data=payload, headers=headers, method="POST")
         with urlopen(req, timeout=10) as response:
             if getattr(response, "status", 200) != 200:
-                logger.warning(
-                    "InputValidator HTTP %s for %s",
-                    getattr(response, "status", "?"), username,
-                )
+                logger.warning("InputValidator HTTP %s for %s",
+                               getattr(response, "status", "?"), username)
                 return None
             body = response.read().decode("utf-8", errors="ignore")
-
         try:
             data = json.loads(body)
         except json.JSONDecodeError:
             logger.warning("InputValidator non-JSON response for %s", username)
             return None
-
         if not isinstance(data, dict):
-            logger.warning(
-                "InputValidator non-dict response for %s: %s",
-                username, type(data).__name__,
-            )
+            logger.warning("InputValidator non-dict response for %s: %s",
+                           username, type(data).__name__)
             return None
-
         errors = data.get("errors")
         if errors:
             error_messages: List[str] = []
@@ -390,17 +380,13 @@ def check_email_availability_sync(username: str) -> Optional[bool]:
                     error_messages.append(str(e))
             combined = " ".join(error_messages).lower()
             logger.info("InputValidator errors for %s: %s", username, error_messages)
-
             if any(marker in combined for marker in _TAKEN_MARKERS):
                 return False
             return None
-
         return True
     except Exception as exc:
-        logger.warning(
-            "Availability check failed for %s: %s: %s",
-            username, type(exc).__name__, exc,
-        )
+        logger.warning("Availability check failed for %s: %s: %s",
+                       username, type(exc).__name__, exc)
         return None
 
 
@@ -428,14 +414,8 @@ def _call_abstractapi_key(api_key: str, email: str) -> Optional[bool]:
 
 
 def _call_abstractapi_with_meta(api_key: str, email: str) -> dict:
-    meta = {
-        "result": None,
-        "limit_header": None,
-        "remaining_header": None,
-        "quota_exceeded": False,
-        "invalid_key": False,
-        "error": None,
-    }
+    meta = {"result": None, "limit_header": None, "remaining_header": None,
+            "quota_exceeded": False, "invalid_key": False, "error": None}
     try:
         url = "https://emailreputation.abstractapi.com/v1/"
         params = urllib.parse.urlencode({"api_key": api_key, "email": email})
@@ -444,7 +424,6 @@ def _call_abstractapi_with_meta(api_key: str, email: str) -> dict:
             headers = dict(response.headers)
             body = response.read().decode("utf-8", errors="ignore")
         data = json.loads(body)
-
         err = data.get("error")
         if err:
             msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
@@ -455,7 +434,6 @@ def _call_abstractapi_with_meta(api_key: str, email: str) -> dict:
             if "invalid api key" in low or "unauthorized" in low or "authentication" in low:
                 meta["invalid_key"] = True
             return meta
-
         for name, value in headers.items():
             lower = name.lower()
             if "ratelimit-limit" in lower or "rate-limit-limit" in lower:
@@ -468,7 +446,6 @@ def _call_abstractapi_with_meta(api_key: str, email: str) -> dict:
                     meta["remaining_header"] = int(value)
                 except (ValueError, TypeError):
                     pass
-
         if meta["limit_header"] is None:
             quota = data.get("quota") or data.get("rate_limit") or {}
             if isinstance(quota, dict):
@@ -478,7 +455,6 @@ def _call_abstractapi_with_meta(api_key: str, email: str) -> dict:
                         meta["remaining_header"] = int(quota["remaining"])
                     except (ValueError, TypeError):
                         pass
-
         is_valid = data.get("is_valid")
         deliverability = str((data.get("email_deliverability") or {}).get("status", "")).lower()
         is_smtp_valid = (data.get("is_smtp_valid") or {}).get("value")
@@ -489,7 +465,6 @@ def _call_abstractapi_with_meta(api_key: str, email: str) -> dict:
             meta["result"] = True
         elif is_valid is False or deliverability in ("undeliverable", "invalid"):
             meta["result"] = False
-
         return meta
     except urllib.error.HTTPError as exc:
         if exc.code == 429:
@@ -575,25 +550,20 @@ def record_admin_api_addition(admin_id: int):
 
 def test_api_key_sync(api_key: str) -> dict:
     meta = _call_abstractapi_with_meta(api_key, "test@gmail.com")
-
     if meta.get("invalid_key"):
         return {"ok": False, "message": "مفتاح غير صالح أو منتهي الصلاحية",
                 "limit": 0, "used": 0, "status": "invalid"}
-
     if meta.get("quota_exceeded"):
         return {"ok": True,
                 "message": "⚠️ المفتاح صحيح لكن الحصة منتهية (429) — سيُضاف بحالة مستنفد",
                 "limit": 100, "used": 100, "status": "exhausted"}
-
     if meta.get("error"):
         return {"ok": False, "message": f"خطأ: {meta['error'][:150]}",
                 "limit": 0, "used": 0, "status": "invalid"}
-
     if meta["result"] is None:
         return {"ok": False,
                 "message": "رد غير متوقع من المزوّد (لا يحتوي على بيانات صالحة)",
                 "limit": 0, "used": 0, "status": "invalid"}
-
     if meta.get("limit_header") and meta["limit_header"] > 0:
         limit = int(meta["limit_header"])
         used = 1
@@ -602,7 +572,6 @@ def test_api_key_sync(api_key: str) -> dict:
         return {"ok": True,
                 "message": f"✅ تم اكتشاف الحد تلقائياً من المزوّد: {limit}",
                 "limit": limit, "used": used, "status": "active"}
-
     return {"ok": True,
             "message": "✅ تم التحقق (الحد الافتراضي: 100 — سيُصحّح عند أول استعمال)",
             "limit": 100, "used": 1, "status": "active"}
@@ -680,15 +649,12 @@ async def check_email_via_rotation_api(email: str, context=None) -> Optional[boo
         if api is None:
             return None
         tried_ids.add(api.get("id"))
-
         meta = await asyncio.to_thread(
             _call_abstractapi_with_meta, api.get("api_key", ""), email
         )
-
         if meta.get("invalid_key"):
             mark_api_invalid(api.get("id"))
             continue
-
         if meta.get("quota_exceeded"):
             mark_api_exhausted(api.get("id"))
             warning = _compute_api_warning()
@@ -698,14 +664,12 @@ async def check_email_via_rotation_api(email: str, context=None) -> Optional[boo
                 except Exception:
                     logger.exception("Failed to notify API warning")
             continue
-
         warning = _update_api_from_meta(api.get("id"), meta)
         if warning and context:
             try:
                 await notify_api_warning(context, warning)
             except Exception:
                 logger.exception("Failed to notify API warning")
-
         if meta["result"] is not None:
             return meta["result"]
     return None
@@ -713,10 +677,6 @@ async def check_email_via_rotation_api(email: str, context=None) -> Optional[boo
 
 # ==================== STRICT EMAIL EXISTENCE VERIFICATION ====================
 async def verify_gmail_account_exists_strict(email: str, context=None) -> Tuple[str, Optional[bool]]:
-    """
-    التحقق الصارم من وجود حساب Gmail.
-    يُستخدم فقط في تدفق 'بيع إيميل جديد'.
-    """
     try:
         result_api = await check_email_via_rotation_api(email, context=context)
     except Exception:
@@ -726,7 +686,6 @@ async def verify_gmail_account_exists_strict(email: str, context=None) -> Tuple[
         return "exists", True
     if result_api is False:
         return "available", False
-
     env_key = os.environ.get("ABSTRACT_API_KEY", "").strip()
     if env_key:
         result_env = await asyncio.to_thread(_call_abstractapi_key, env_key, email)
@@ -734,7 +693,6 @@ async def verify_gmail_account_exists_strict(email: str, context=None) -> Tuple[
             return "exists", True
         if result_env is False:
             return "available", False
-
     last_result: Optional[bool] = None
     for attempt in range(3):
         try:
@@ -749,7 +707,6 @@ async def verify_gmail_account_exists_strict(email: str, context=None) -> Tuple[
             return "exists", True
         if attempt < 2:
             await asyncio.sleep(2 + attempt)
-
     logger.warning(
         "Email existence verification unknown for %s after all attempts (last=%s)",
         email, last_result,
@@ -801,7 +758,6 @@ def check_and_reset_daily_gift_progress(user_data: dict) -> dict:
 
 
 async def process_daily_gift_after_approval(context: ContextTypes.DEFAULT_TYPE, user_id: int):
-    """يُستدعى عند تحرير نقاط إيميل للعضو. يحسب التقدم ويصرف الهدية عند الوصول للهدف."""
     gift = get_daily_gift_config()
     if not gift["enabled"] or gift["emails_required"] <= 0 or gift["reward"] <= 0:
         return
@@ -823,7 +779,6 @@ async def process_daily_gift_after_approval(context: ContextTypes.DEFAULT_TYPE, 
             awarded = True
         user_data["daily_gift_progress"] = progress
         save_user(user_id, user_data)
-
     if awarded:
         try:
             await context.bot.send_message(
@@ -1026,7 +981,7 @@ DEFAULT_USER_FIELDS = {
     "verification_failures": 0,
     "restricted_until": "",
     "daily_gift_progress": {},
-    "sell_new_sessions": [],  # ✅ جلسات بيع إيميل جديد محفوظة (للاستئناف)
+    "sell_new_sessions": [],
 }
 
 
@@ -1070,14 +1025,12 @@ def add_transaction(user_data: dict, kind: str, amount: float, note: str = "", e
 
 # ==================== SELL-NEW SESSIONS PERSISTENCE ====================
 def get_user_sell_sessions(user_id: int) -> list:
-    """يعيد جلسات بيع الإيميل الجديد المحفوظة للعضو."""
     user_data = get_user(user_id)
     sessions = user_data.get("sell_new_sessions", [])
     return sessions if isinstance(sessions, list) else []
 
 
 def _purge_old_sell_sessions(sessions: list) -> list:
-    """يحذف الجلسات الأقدم من SELL_NEW_SESSION_MAX_AGE_DAYS."""
     cutoff = datetime.now(timezone.utc) - timedelta(days=SELL_NEW_SESSION_MAX_AGE_DAYS)
     kept = []
     for s in sessions:
@@ -1093,7 +1046,6 @@ def _purge_old_sell_sessions(sessions: list) -> list:
 
 
 def upsert_sell_session(user_id: int, session: dict) -> None:
-    """يضيف/يحدّث جلسة بيع إيميل جديد ويحفظها بشكل دائم."""
     user_data = get_user(user_id)
     sessions = user_data.get("sell_new_sessions", [])
     if not isinstance(sessions, list):
@@ -1106,7 +1058,6 @@ def upsert_sell_session(user_id: int, session: dict) -> None:
 
 
 def update_sell_session(user_id: int, email: str, **fields) -> None:
-    """تحديث حقول جلسة محددة."""
     user_data = get_user(user_id)
     sessions = user_data.get("sell_new_sessions", [])
     if not isinstance(sessions, list):
@@ -1123,7 +1074,6 @@ def update_sell_session(user_id: int, email: str, **fields) -> None:
 
 
 def remove_sell_session(user_id: int, email: str) -> None:
-    """يحذف جلسة بيع إيميل جديد (بعد الإكمال أو الإلغاء)."""
     user_data = get_user(user_id)
     sessions = user_data.get("sell_new_sessions", [])
     if not isinstance(sessions, list):
@@ -1142,7 +1092,6 @@ def get_sell_session(user_id: int, email: str) -> Optional[dict]:
 
 
 def get_pending_sell_sessions(user_id: int) -> list:
-    """يعيد فقط الجلسات غير المكتملة (التي لم تُسلَّم بعد)."""
     return [s for s in get_user_sell_sessions(user_id)
             if s.get("status") in ("pending_creation", "created_verified", "totp_ready")]
 
@@ -1151,17 +1100,6 @@ def get_pending_sell_sessions(user_id: int) -> list:
 def settle_admin_bonus(account: dict, new_status: str,
                        owner_data: Optional[dict] = None,
                        owner_id: Optional[int] = None) -> bool:
-    """
-    Settle the admin bonus tied to an approved account.
-
-    new_status: "released" or "rejected"
-    - "released": moves the bonus from admin_pending_balance → admin_received_balance
-    - "rejected": removes the bonus from admin_pending_balance
-
-    If `admin_id == owner_id` and `owner_data` is provided, the updates are applied
-    to `owner_data` in memory (NOT saved here). Otherwise, the admin's data is loaded,
-    updated, and saved automatically.
-    """
     if not isinstance(account, dict) or new_status not in ("released", "rejected"):
         return False
     admin_id_raw = account.get("completed_by_admin")
@@ -1179,13 +1117,10 @@ def settle_admin_bonus(account: dict, new_status: str,
     current_status = str(account.get("admin_bonus_status") or "")
     if current_status not in ("pending", ""):
         return False
-
     same_user = owner_id is not None and admin_id == owner_id and owner_data is not None
     admin_data = owner_data if same_user else get_user(admin_id)
-
     pending_cents = max(0, money_to_cents(admin_data.get("admin_pending_balance", 0.0)) - bonus_cents)
     admin_data["admin_pending_balance"] = cents_to_money(pending_cents)
-
     email = account.get("email", "")
     if new_status == "released":
         received_cents = money_to_cents(admin_data.get("admin_received_balance", 0.0)) + bonus_cents
@@ -1195,7 +1130,6 @@ def settle_admin_bonus(account: dict, new_status: str,
     else:
         add_transaction(admin_data, "admin_bonus_reversal", cents_to_money(bonus_cents),
                         f"Reversed admin bonus for {email}", email)
-
     if not same_user:
         save_user(admin_id, admin_data)
     return True
@@ -1353,12 +1287,12 @@ def get_banned_users() -> list:
     users = load_json(USERS_DB)
     rows = []
     now = datetime.now(timezone.utc)
-    for raw_uid, enc in users.items():
+    for raw_uid, enc_data in users.items():
         try:
             uid = int(raw_uid)
         except (TypeError, ValueError):
             continue
-        ud = decrypt_user_data(enc)
+        ud = decrypt_user_data(enc_data)
         info = {"user_id": uid, "kind": None, "until": None, "name": "", "username": ""}
         ban_str = str(ud.get("ban_until", "") or "").strip()
         if ban_str:
@@ -1539,6 +1473,137 @@ def load_pending_purchases_from_disk():
         except (ValueError, TypeError):
             continue
     logger.info("Loaded %d pending purchases.", len(PENDING_PURCHASES))
+
+
+# ==================== ORDERS TRACKING (NEW) ====================
+def _generate_order_code() -> str:
+    """يولّد كود طلب فريد مثل ORD-A1B2C3."""
+    orders = load_json(ORDERS_DB)
+    for _ in range(50):
+        code = "ORD-" + secrets.token_hex(3).upper()
+        if code not in orders:
+            return code
+    return "ORD-" + secrets.token_hex(4).upper()
+
+
+def save_order_record(order: dict) -> str:
+    """يحفظ طلباً جديداً في orders.json ويعيد كوده."""
+    orders = load_json(ORDERS_DB)
+    code = order.get("code")
+    if not code or code in orders:
+        code = _generate_order_code()
+    order["code"] = code
+    orders[code] = order
+    save_json(ORDERS_DB, orders)
+    return code
+
+
+def update_order_record(code: str, **fields) -> bool:
+    """يحدّث حقول طلب موجود بالكود."""
+    orders = load_json(ORDERS_DB)
+    key = str(code).upper()
+    if key not in orders:
+        return False
+    orders[key].update(fields)
+    save_json(ORDERS_DB, orders)
+    return True
+
+
+def delete_order_record(code: str) -> bool:
+    """يحذف طلباً بالكود."""
+    orders = load_json(ORDERS_DB)
+    key = str(code).upper()
+    if key not in orders:
+        return False
+    orders.pop(key)
+    save_json(ORDERS_DB, orders)
+    return True
+
+
+def get_order_record(code: str) -> Optional[dict]:
+    """يعيد طلباً بالكود."""
+    orders = load_json(ORDERS_DB)
+    return orders.get(str(code).upper())
+
+
+def search_order_records(query: str, limit: int = 30) -> List[dict]:
+    """يبحث في الطلبات بالكود/معرف العضو/اليوزر/النوع/الوصف."""
+    q = str(query or "").strip().upper()
+    if not q:
+        return []
+    orders = load_json(ORDERS_DB)
+    hits = []
+    for code, order in orders.items():
+        haystack = " ".join([
+            code.upper(),
+            str(order.get("user_id", "")),
+            str(order.get("user_name", "")).upper(),
+            str(order.get("user_username", "")).upper(),
+            str(order.get("type", "")).upper(),
+            str(order.get("description", "")).upper(),
+            str(order.get("country_name", "")).upper(),
+            str(order.get("balance_name", "")).upper(),
+            str(order.get("network_name", "")).upper(),
+        ])
+        if q in haystack:
+            hits.append(order)
+    hits.sort(key=lambda o: o.get("created_at", ""), reverse=True)
+    return hits[:limit]
+
+
+def format_order_details_html(order: dict) -> str:
+    """يبني تقرير HTML شامل لتفاصيل الطلب."""
+    status_map = {
+        "pending": "⏳ قيد الانتظار",
+        "completed": "✅ مكتمل",
+        "failed": "❌ فشل",
+    }
+    type_map = {
+        "tg_lion": "🌍 حسابات لكل الدول",
+        "master_balance": "🎖️ ماستر وأرصدة",
+        "crypto_withdraw": "💎 سحب عملات رقمية",
+        "store_purchase": "🛒 شراء خدمة",
+    }
+    lines = ["📋 <b>تفاصيل الطلب</b>", ""]
+    lines.append(f"🧾 <b>كود الطلب:</b> <code>{order.get('code', '—')}</code>")
+    lines.append(f"📦 <b>النوع:</b> {type_map.get(order.get('type', ''), order.get('type', '—'))}")
+    lines.append(f"📝 <b>الوصف:</b> {tg_html_escape(order.get('description', '—'))}")
+    lines.append("")
+    lines.append(f"👤 <b>العضو:</b> {tg_html_escape(order.get('user_name') or 'غير معروف')}")
+    lines.append(f"🆔 <b>اليوزر:</b> @{tg_html_escape(order.get('user_username') or 'لا يوجد')}")
+    lines.append(f"🔢 <b>المعرف:</b> <code>{order.get('user_id', '—')}</code>")
+    lines.append("")
+    total = float(order.get("total", 0) or 0)
+    lines.append(f"💰 <b>الإجمالي:</b> ${total:.2f}")
+    if order.get("quantity"):
+        lines.append(f"🔢 <b>العدد:</b> {order.get('quantity')}")
+    if order.get("unit_price"):
+        lines.append(f"💵 <b>سعر الوحدة:</b> ${float(order.get('unit_price', 0)):.2f}")
+    if order.get("unit_fee"):
+        lines.append(f"💸 <b>عمولة الوحدة:</b> ${float(order.get('unit_fee', 0)):.2f}")
+    if order.get("country_name"):
+        lines.append(f"🌍 <b>الدولة:</b> {tg_html_escape(order['country_name'])}")
+    if order.get("balance_name"):
+        lines.append(f"🎖️ <b>الخدمة:</b> {tg_html_escape(order['balance_name'])}")
+    if order.get("network_name"):
+        lines.append(f"🌐 <b>الشبكة:</b> {tg_html_escape(order['network_name'])}")
+    if order.get("target"):
+        lines.append(f"📬 <b>الهدف:</b> <code>{tg_html_escape(str(order['target']))}</code>")
+    if order.get("service_name"):
+        lines.append(f"🛒 <b>الخدمة:</b> {tg_html_escape(order['service_name'])}")
+    info = order.get("info_block", "")
+    if info:
+        lines.append("")
+        lines.append("📝 <b>المعلومات:</b>")
+        lines.append(info)
+    lines.append("")
+    lines.append(f"🕐 <b>وقت الطلب:</b> <code>{order.get('created_at', '')[:19].replace('T', ' ')}</code>")
+    lines.append(f"📊 <b>الحالة:</b> {status_map.get(order.get('status', 'pending'), '—')}")
+    if order.get("status") == "completed":
+        lines.append(f"✅ <b>اكتمل بواسطة:</b> <code>{order.get('completed_by', '—')}</code>")
+        if order.get("completed_at"):
+            lines.append(f"🕐 <b>وقت الإكمال:</b> <code>{order['completed_at'][:19].replace('T', ' ')}</code>")
+    return "\n".join(lines)
 
 
 # ==================== KEYBOARD HELPERS ====================
@@ -1835,7 +1900,6 @@ def _imap_login_sync(email: str, password: str, timeout: int = 15) -> Tuple[bool
     host, port = get_imap_host(email)
     if not host:
         return False, "⚠️ فشل تحديد مزود الإيميل: لا يوجد خادم IMAP معروف لهذا النطاق."
-
     started = time.monotonic()
 
     def elapsed() -> str:
@@ -1931,13 +1995,11 @@ async def verify_account_credentials(email: str, password: str = "", app_pass: s
                 result["totp_ok"] = True
             except Exception:
                 result["totp_ok"] = False
-
     imap_pass = ""
     if app_pass:
         imap_pass = app_pass.replace(" ", "")
     elif password:
         imap_pass = password
-
     is_gmail_account = email.rsplit("@", 1)[-1].lower() in {"gmail.com", "googlemail.com"}
     if password and not app_pass and is_gmail_account:
         result["level"] = "unknown"
@@ -1955,7 +2017,6 @@ async def verify_account_credentials(email: str, password: str = "", app_pass: s
     else:
         result["message"] = "لا توجد بيانات دخول للتحقق منها."
         result["category"] = "no_credentials"
-
     if result["imap_ok"]:
         result["level"] = "verified"
         result["badge"] = "🟢"
@@ -2038,7 +2099,7 @@ async def send_totp_code_message(context, chat_id: int, totp_secret: str, email:
     try:
         msg = await context.bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
         return msg
-    except Exception as exc:
+    except Exception:
         logger.exception("Failed to send TOTP code message")
         try:
             await context.bot.send_message(chat_id=chat_id, text=f"🔢 الكود: {code}\n⏰ {seconds} ثانية")
@@ -2423,12 +2484,12 @@ async def inactive_member_reminder_job(context: ContextTypes.DEFAULT_TYPE):
     users = load_json(USERS_DB)
     now = datetime.now(timezone.utc)
     week_ago = now - timedelta(days=7)
-    for raw_uid, enc in users.items():
+    for raw_uid, enc_data in users.items():
         try:
             uid = int(raw_uid)
         except (TypeError, ValueError):
             continue
-        ud = decrypt_user_data(enc)
+        ud = decrypt_user_data(enc_data)
         last_sold_str = ud.get("last_sold_at", "") or ""
         if last_sold_str:
             try:
@@ -2516,6 +2577,14 @@ def crypto_menu_keyboard() -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton(label[:64], callback_data=f"crypto_pick:{key}")])
     rows.append([InlineKeyboardButton("🔙 قسم السحب", callback_data="withdraw_store")])
     return InlineKeyboardMarkup(rows)
+
+
+# ==================== MASTER & BALANCES CONFIGURATION (NEW) ====================
+MASTER_BALANCE_OPTIONS: Dict[str, Dict[str, Any]] = {
+    "master": {"name": "ماستر", "emoji": "🎖️", "price": 0.75, "fee": 0.00},
+    "asia":   {"name": "آسيا",  "emoji": "🌏", "price": 0.75, "fee": 0.20},
+    "ather":  {"name": "أثير",  "emoji": "✨", "price": 0.75, "fee": 0.20},
+}
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]
