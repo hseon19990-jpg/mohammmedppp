@@ -40,6 +40,13 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if await crypto_amount_input(update, context):
                 return
 
+    # ═══ 0b. Master & balances purchase (quantity input) ═══
+    master_state = context.user_data.get("master_balance")
+    if master_state and master_state.get("stage") == "awaiting_quantity":
+        from telegram_bot.store import master_quantity_input
+        if await master_quantity_input(update, context):
+            return
+
     # ═══ 1. API management input ═══
     if context.user_data.get("api_add_step") == "key":
         await handle_api_key_input(update, context); return
@@ -129,6 +136,10 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_member_check_input(update, context); return
     if step == "editing_field":
         await handle_edit_field_input(update, context); return
+
+    # ═══ 13b. Search orders input (owner) ═══
+    if step == "search_orders_input":
+        await handle_search_orders_input(update, context); return
 
     # ═══ 14. Approval TOTP / App Pass ═══
     approval_step = context.user_data.get("approval_step")
@@ -262,6 +273,16 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("crypto_pick:"):
         await crypto_pick_network(update, context)
 
+    # ═══ Master & balances ═══
+    elif data == "master_balances_menu":
+        await master_balances_menu(update, context)
+    elif data.startswith("master_pick:"):
+        await master_pick(update, context)
+    elif data.startswith("complete_order:"):
+        await complete_order_callback(update, context)
+    elif data.startswith("confirm_complete_order:"):
+        await confirm_complete_order(update, context)
+
     elif data == "cancel":
         await add_account_cancel(update, context)
     elif data.startswith("complete_more:"):
@@ -362,6 +383,8 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await check_member(update, context)
     elif data == "check_email_by_address":
         await check_email_by_address(update, context)
+    elif data == "search_orders_menu":
+        await search_orders_menu(update, context)
     elif data == "set_tier_prices":
         await set_tier_prices(update, context)
     elif data.startswith("set_tier:"):
