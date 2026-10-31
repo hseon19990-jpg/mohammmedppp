@@ -387,7 +387,6 @@ async def tg_lion_confirm_order(update: Update, context: ContextTypes.DEFAULT_TY
             except Exception: pass
             await query.edit_message_text("⚠️ تعذر تسجيل الخصم. لم يتم إرسال الطلب؛ حاول مجدداً لاحقاً.")
             return
-        # ═══ إنشاء كود الطلب (جديد) ═══
         order_record = {
             "type": "tg_lion",
             "country_code": country["code"],
@@ -652,7 +651,6 @@ async def crypto_amount_input(update: Update, context: ContextTypes.DEFAULT_TYPE
                     f"سحب {info['name']} — مبلغ ${amount:.2f} + عمولة ${info['fee']:.2f}", "")
     save_user(uid, user_data)
 
-    # ═══ إنشاء كود الطلب (جديد) ═══
     user = update.effective_user
     order_record = {
         "type": "crypto_withdraw",
@@ -725,7 +723,7 @@ async def master_balances_menu(update: Update, context: ContextTypes.DEFAULT_TYP
     buttons = []
     for key, info in MASTER_BALANCE_OPTIONS.items():
         if info["fee"] > 0:
-            label = f"{info['emoji']} {info['name']} — ${info['price']:.2f} + ${info['fee']:.2f} عمولة/وحدة"
+            label = f"{info['emoji']} {info['name']} — ${info['price']:.2f} + ${info['fee']:.2f} عمولة/طلب"
         else:
             label = f"{info['emoji']} {info['name']} — ${info['price']:.2f} (بدون عمولة)"
         buttons.append((label, f"master_pick:{key}"))
@@ -733,7 +731,8 @@ async def master_balances_menu(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.edit_message_text(
         f"🎖️ <b>ماستر وأرصدة</b>\n\n"
         f"💳 <b>رصيدك المتاح:</b> <code>${balance:.2f}</code>\n\n"
-        f"اختر ما تريد شراءه:",
+        f"اختر ما تريد شراءه:\n\n"
+        f"<i>💡 العمولة تُخصم مرة واحدة فقط لكل طلب (وليس لكل وحدة)</i>",
         parse_mode=ParseMode.HTML,
         reply_markup=kb_vertical(buttons))
 
@@ -755,14 +754,18 @@ async def master_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     user_data = get_user(uid)
     balance = spendable_balance_cents(user_data) / 100
-    if balance < (info["price"] + info["fee"]):
+    # الحد الأدنى للوحدة الواحدة = سعر + عمولة (إن وجدت)
+    min_for_one = round(info["price"] + info["fee"], 2)
+    if balance < min_for_one:
         await query.answer(
-            f"⚠️ رصيدك غير كافٍ. الحد الأدنى للوحدة: ${info['price'] + info['fee']:.2f}",
+            f"⚠️ رصيدك غير كافٍ. الحد الأدنى للوحدة الواحدة: ${min_for_one:.2f}",
             show_alert=True)
         return
     context.user_data["master_balance"] = {"key": key, "info": info, "stage": "awaiting_quantity"}
-    fee_line = (f"💸 <b>عمولة الوحدة:</b> <b>${info['fee']:.2f}</b>\n" if info["fee"] > 0
-                else "💸 <b>العمولة:</b> <b>لا توجد</b>\n")
+    if info["fee"] > 0:
+        fee_line = f"💸 <b>العمولة (مرة واحدة):</b> <b>${info['fee']:.2f}</b>\n"
+    else:
+        fee_line = "💸 <b>العمولة:</b> <b>لا توجد</b>\n"
     await query.edit_message_text(
         f"{info['emoji']} <b>{info['name']}</b>\n\n"
         f"💰 <b>سعر الوحدة:</b> <b>${info['price']:.2f}</b>\n"
@@ -770,13 +773,14 @@ async def master_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💳 <b>رصيدك:</b> <b>${balance:.2f}</b>\n\n"
         f"📌 <b>أرسل عدد الوحدات التي تريد شراءها:</b>\n"
         f"<i>مثال: 10</i>\n\n"
+        f"<i>💡 العمولة تُخصم مرة واحدة فقط لكل طلب</i>\n\n"
         f"<i>أو 'إلغاء' للعودة</i>",
         parse_mode=ParseMode.HTML,
         reply_markup=kb_single("🔙 إلغاء", "master_balances_menu"))
 
 
 async def master_quantity_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """يستقبل الكمية المطلوبة من ماستر/آسيا/أثير. يعيد True إذا تعامل مع الرسالة."""
+    """يستقبل الكمية المطلوبة من ماستر/آسيا/أثير. العمولة تُخصم مرة واحدة فقط لكل طلب."""
     uid = update.effective_user.id
     state = context.user_data.get("master_balance")
     if not state or state.get("stage") != "awaiting_quantity":
@@ -794,10 +798,14 @@ async def master_quantity_input(update: Update, context: ContextTypes.DEFAULT_TY
     except ValueError:
         await update.message.reply_text("⚠️ أرسل عدداً صحيحاً أكبر من صفر.")
         return True
+
     info = state["info"]
     key = state["key"]
-    unit_total = round(info["price"] + info["fee"], 2)
-    total = round(quantity * unit_total, 2)
+
+    # ═══ العمولة تُخصم مرة واحدة فقط لكل طلب (وليس لكل وحدة) ═══
+    subtotal = round(quantity * info["price"], 2)
+    total = round(subtotal + info["fee"], 2)
+
     user_data = get_user(uid)
     if spendable_balance_cents(user_data) < money_to_cents(total):
         await update.message.reply_text(
@@ -810,6 +818,7 @@ async def master_quantity_input(update: Update, context: ContextTypes.DEFAULT_TY
     if not debit_spendable_balance(user_data, money_to_cents(total)):
         await update.message.reply_text("❌ رصيدك غير كافٍ. لم يتم تسجيل الطلب.")
         return True
+
     now = datetime.now(timezone.utc)
     order = {
         "type": "master_balance",
@@ -818,6 +827,7 @@ async def master_quantity_input(update: Update, context: ContextTypes.DEFAULT_TY
         "quantity": quantity,
         "unit_price": info["price"],
         "unit_fee": info["fee"],
+        "subtotal": subtotal,
         "total": total,
         "user_id": uid,
         "user_name": update.effective_user.full_name or "غير معروف",
@@ -833,8 +843,17 @@ async def master_quantity_input(update: Update, context: ContextTypes.DEFAULT_TY
     context.user_data.pop("master_balance", None)
 
     _, purchase_channel_2 = get_configured_purchase_channels()
-    fee_block = (f"💸 <b>عمولة الوحدة:</b> ${info['fee']:.2f}\n"
-                 if info["fee"] > 0 else "")
+    # تفصيل العمولة (مرة واحدة)
+    if info["fee"] > 0:
+        fee_block = (
+            f"💰 <b>سعر الوحدة:</b> ${info['price']:.2f} × {quantity} = ${subtotal:.2f}\n"
+            f"💸 <b>العمولة (مرة واحدة):</b> ${info['fee']:.2f}\n"
+        )
+    else:
+        fee_block = (
+            f"💰 <b>سعر الوحدة:</b> ${info['price']:.2f} × {quantity} = ${subtotal:.2f}\n"
+            f"💸 <b>العمولة:</b> لا توجد\n"
+        )
     order_text = (
         f"🎖️ <b>طلب ماستر وأرصدة</b>\n\n"
         f"🧾 <b>كود الطلب:</b> <code>{order_code}</code>\n"
@@ -842,7 +861,6 @@ async def master_quantity_input(update: Update, context: ContextTypes.DEFAULT_TY
         f"🆔 @{html.escape(order['user_username'] or 'لا يوجد')} | <code>{uid}</code>\n"
         f"📦 <b>النوع:</b> {info['emoji']} {info['name']}\n"
         f"🔢 <b>العدد:</b> {quantity}\n"
-        f"💰 <b>سعر الوحدة:</b> ${info['price']:.2f}\n"
         f"{fee_block}"
         f"💳 <b>الإجمالي المخصوم:</b> ${total:.2f}\n"
         f"⏰ {now.strftime('%Y-%m-%d %H:%M:%S UTC')}"
@@ -855,11 +873,22 @@ async def master_quantity_input(update: Update, context: ContextTypes.DEFAULT_TY
         except Exception:
             logger.exception("Failed to send master balance order to %s", chat)
 
+    if info["fee"] > 0:
+        detail_line = (
+            f"📦 {info['emoji']} {info['name']} × {quantity}\n"
+            f"💵 {quantity} × ${info['price']:.2f} = <b>${subtotal:.2f}</b>\n"
+            f"💸 العمولة (مرة واحدة): <b>${info['fee']:.2f}</b>\n"
+            f"💰 <b>الإجمالي المخصوم: ${total:.2f}</b>"
+        )
+    else:
+        detail_line = (
+            f"📦 {info['emoji']} {info['name']} × {quantity}\n"
+            f"💰 <b>الإجمالي المخصوم: ${total:.2f}</b>"
+        )
     await update.message.reply_text(
         f"✅ <b>تم استلام طلبك</b>\n\n"
         f"🧾 <b>كود الطلب:</b> <code>{order_code}</code>\n"
-        f"📦 {info['emoji']} {info['name']} × {quantity}\n"
-        f"💰 المخصوم: <b>${total:.2f}</b>\n\n"
+        f"{detail_line}\n\n"
         f"<i>سيتم التواصل معك عند اكتمال التنفيذ.</i>",
         parse_mode=ParseMode.HTML,
         reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
@@ -1362,7 +1391,6 @@ async def _finalize_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE,
     else:
         info_block = f"<code>{html.escape(text)}</code>"
 
-    # ═══ إنشاء كود الطلب (جديد) ═══
     order_record = {
         "type": "store_purchase",
         "service_name": purchase.get("service_name", ""),
