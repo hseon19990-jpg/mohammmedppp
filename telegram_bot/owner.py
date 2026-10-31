@@ -660,6 +660,80 @@ async def handle_check_email_input(update: Update, context: ContextTypes.DEFAULT
         ]))
 
 
+# ==================== SEARCH ORDERS (OWNER — NEW) ====================
+async def search_orders_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يفتح شاشة البحث عن طلب."""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    context.user_data["step"] = "search_orders_input"
+    await query.edit_message_text(
+        "🔍 <b>البحث عن طلب</b>\n\n"
+        "أرسل أحد ما يلي:\n"
+        "• <b>كود الطلب</b> (مثال: <code>ORD-A1B2C3</code>)\n"
+        "• <b>معرف العضو</b> الرقمي\n"
+        "• <b>يوزر العضو</b> مع @\n"
+        "• <b>نوع الطلب</b> (tg_lion / master_balance / crypto_withdraw / store_purchase)\n"
+        "• <b>اسم الدولة</b> أو <b>اسم الخدمة</b>\n\n"
+        "أو أرسل «إلغاء» للعودة.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_single("🔙 لوحة المالك", "owner_panel"))
+
+
+async def handle_search_orders_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يستقبل نص البحث ويعرض النتائج."""
+    if update.effective_user.id != OWNER_ID:
+        return
+    text = (update.message.text or "").strip()
+    if text.casefold() in {"إلغاء", "الغاء", "cancel"}:
+        context.user_data.pop("step", None)
+        await update.message.reply_text(
+            "❌ تم الإلغاء.",
+            reply_markup=kb_single("🔙 لوحة المالك", "owner_panel"))
+        return
+
+    results = search_order_records(text, limit=30)
+    context.user_data.pop("step", None)
+
+    if not results:
+        await update.message.reply_text(
+            f"📭 <b>لا توجد نتائج</b>\n\n"
+            f"🔎 البحث: <code>{tg_html_escape(text)}</code>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_vertical([
+                ("🔍 بحث جديد", "search_orders_menu"),
+                ("🔙 لوحة المالك", "owner_panel"),
+            ]))
+        return
+
+    await update.message.reply_text(
+        f"🔍 <b>نتائج البحث</b>\n\n"
+        f"🔎 البحث: <code>{tg_html_escape(text)}</code>\n"
+        f"📊 عدد النتائج: <b>{len(results)}</b>\n\n"
+        f"سيتم إرسال كل طلب بتفاصيله الكاملة…",
+        parse_mode=ParseMode.HTML)
+
+    for i, order in enumerate(results, 1):
+        report = f"<b>━━━ نتيجة {i}/{len(results)} ━━━</b>\n\n"
+        report += format_order_details_html(order)
+        if len(report) > 4000:
+            report = report[:3900] + "\n\n<i>… (تم اقتصاص التقرير)</i>"
+        try:
+            await update.message.reply_text(report, parse_mode=ParseMode.HTML)
+        except Exception:
+            logger.exception("Failed to send order report")
+            plain = re.sub(r"<[^>]+>", "", report)
+            await update.message.reply_text(plain[:4000])
+
+    await update.message.reply_text(
+        "✅ تم عرض جميع النتائج.",
+        reply_markup=kb_vertical([
+            ("🔍 بحث جديد", "search_orders_menu"),
+            ("🔙 لوحة المالك", "owner_panel"),
+        ]))
+
+
 # ==================== OWNER PANEL ====================
 async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -683,6 +757,7 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ("🛒 حدود السحب", "withdraw_settings"),
         ("🎁 إعدادات الهدية اليومية", "daily_gift_settings"),
         ("📋 الطلبات", "approval_requests"),
+        ("🔍 البحث عن طلب", "search_orders_menu"),
         ("🎯 إدارة المسابقة", "contest_menu"),
         ("🏆 الأكثر بيعاً", "top_sellers_owner"),
         ("📹 قسم الفيديوهات", "videos_section"),
