@@ -23,7 +23,7 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
 
-    # ═══ 0. Crypto withdrawal flow (wallet / binance id / amount) ═══
+    # ═══ 0. Crypto withdrawal flow ═══
     crypto_state = context.user_data.get("crypto_withdraw")
     if crypto_state:
         stage = crypto_state.get("stage")
@@ -40,12 +40,18 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if await crypto_amount_input(update, context):
                 return
 
-    # ═══ 0b. Master & balances purchase (quantity input) ═══
+    # ═══ 0b. Master & balances purchase (quantity in units) ═══
     master_state = context.user_data.get("master_balance")
     if master_state and master_state.get("stage") == "awaiting_quantity":
         from telegram_bot.store import master_quantity_input
         if await master_quantity_input(update, context):
             return
+
+    # ═══ 0c. NEW: Master rate editing (owner only) ═══
+    mode = context.user_data.get("mode", "")
+    if mode.startswith("master_rate_"):
+        from telegram_bot.owner import handle_master_rate_input
+        await handle_master_rate_input(update, context); return
 
     # ═══ 1. API management input ═══
     if context.user_data.get("api_add_step") == "key":
@@ -282,6 +288,16 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await complete_order_callback(update, context)
     elif data.startswith("confirm_complete_order:"):
         await confirm_complete_order(update, context)
+
+    # ═══ NEW: Master rate settings (owner) ═══
+    elif data == "master_rate_settings":
+        await master_rate_settings(update, context)
+    elif data.startswith("master_edit_rate:"):
+        await master_edit_rate(update, context)
+
+    # ═══ NEW: Recompletion of rejected email ═══
+    elif data.startswith("owner_recomplete:"):
+        await owner_recomplete_rejected(update, context)
 
     elif data == "cancel":
         await add_account_cancel(update, context)
@@ -644,6 +660,8 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active_apis = [a for a in apis if a.get("status") == "active"]
     gift = get_daily_gift_config()
     limits = get_withdraw_limits()
+    master_cfg = get_master_balance_config()
+    master_rates_line = " | ".join(f"{k}={int(v['rate'])}" for k, v in master_cfg.items())
     await update.message.reply_text(
         f"🔎 *تشخيص*\n\n🆔 رقمك: `{user_id}`\n👑 المالك: `{OWNER_ID}`\n"
         f"✅ أنت المالك: {'نعم' if user_id == OWNER_ID else 'لا'}\n"
@@ -653,6 +671,7 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔑 APIs: `{len(apis)}` (نشطة: `{len(active_apis)}`)\n"
         f"🛒 حدود السحب العامة: min={limits['min']}, max={limits['max']}\n"
         f"🎁 الهدية: {'مفعلة' if gift['enabled'] else 'معطلة'} ({gift['emails_required']} إيميل → ${gift['reward']:.2f})\n"
+        f"💱 أسعار ماستر: `{master_rates_line}`\n"
         f"💾 عدد المستخدمين: `{len(load_json(USERS_DB))}`",
         parse_mode=ParseMode.MARKDOWN)
 
@@ -667,6 +686,7 @@ async def owner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                ("🔑 إدارة APIs", "apis_menu"),
                ("🚫 إدارة الحظر", "bans_menu"),
                ("💰 أسعار المستويات", "set_tier_prices"),
+               ("💱 أسعار ماستر/آسيا/أثير", "master_rate_settings"),
                ("🛒 حدود السحب", "withdraw_settings"),
                ("🎁 إعدادات الهدية اليومية", "daily_gift_settings"),
                ("📋 الطلبات", "approval_requests"),
