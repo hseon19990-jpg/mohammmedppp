@@ -707,7 +707,7 @@ async def crypto_amount_input(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 # ==================== MASTER & BALANCES (NEW RATE MODEL) ====================
 async def master_balances_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """قائمة ماستر وأرصدة (ماستر / آسيا / أثير) — 1500 وحدة = $1."""
+    """قائمة ماستر وأرصدة (ماستر / آسيا / أثير) — تعرض أسعاراً ديناميكية."""
     if not await check_forced_channel(update, context):
         return
     query = update.callback_query
@@ -724,20 +724,22 @@ async def master_balances_menu(update: Update, context: ContextTypes.DEFAULT_TYP
     for key, info in options.items():
         rate_int = int(info['rate'])
         min_units = MASTER_BALANCE_MIN_UNITS
+        # ✅ السعر الأساسي فقط (بدون ذكر العمولة في الزر)
         min_cost = round(min_units / info['rate'], 2)
-        if info["fee"] > 0:
-            label = f"{info['emoji']} {info['name']} — {rate_int} وحدة=$1 | حد ${min_cost:.2f} + ${info['fee']:.2f} عمولة"
-        else:
-            label = f"{info['emoji']} {info['name']} — {rate_int} وحدة=$1 | حد ${min_cost:.2f}"
+        label = f"{info['emoji']} {info['name']} — {rate_int} وحدة=$1 | حد ${min_cost:.2f}"
         buttons.append((label[:64], f"master_pick:{key}"))
     buttons.append(("🔙 قسم السحب", "withdraw_store"))
+    # ✅ عرض جميع الأسعار ديناميكياً
+    rates_lines = "\n".join(
+        f"   {info['emoji']} {info['name']}: <code>{int(info['rate'])} وحدة = $1</code>"
+        for info in options.values()
+    )
     await query.edit_message_text(
         f"🎖️ <b>ماستر وأرصدة</b>\n\n"
         f"💳 <b>رصيدك المتاح:</b> <code>${balance:.2f}</code>\n\n"
-        f"💱 <b>السعر:</b> <code>1500 وحدة = $1</code>\n"
-        f"📦 <b>الحد الأدنى:</b> <code>{MASTER_BALANCE_MIN_UNITS} وحدة = $1</code>\n\n"
-        f"اختر ما تريد شراءه:\n\n"
-        f"<i>💡 العمولة تُخصم مرة واحدة فقط لكل طلب (وليس لكل وحدة)</i>",
+        f"💱 <b>الأسعار:</b>\n{rates_lines}\n"
+        f"📦 <b>الحد الأدنى:</b> <code>{MASTER_BALANCE_MIN_UNITS} وحدة</code>\n\n"
+        f"اختر ما تريد شراءه:",
         parse_mode=ParseMode.HTML,
         reply_markup=kb_vertical(buttons))
 
@@ -809,7 +811,7 @@ async def master_quantity_input(update: Update, context: ContextTypes.DEFAULT_TY
 
     if quantity < MASTER_BALANCE_MIN_UNITS:
         await update.message.reply_text(
-            f"⚠️ <b>الحد الأدنى هو {MASTER_BALANCE_MIN_UNITS} وحدة (= $1)</b>\n\n"
+            f"⚠️ <b>الحد الأدنى هو {MASTER_BALANCE_MIN_UNITS} وحدة</b>\n\n"
             f"📌 أرسل عدداً أكبر من أو يساوي <code>{MASTER_BALANCE_MIN_UNITS}</code>.",
             parse_mode=ParseMode.HTML)
         return True
