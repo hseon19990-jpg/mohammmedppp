@@ -35,7 +35,6 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         (t(uid, "btn_wallet"), "my_wallet"),
     ]
 
-    # ✅ زر استئناف جلسات بيع الإيميل الجديد المحفوظة
     pending_sell = get_pending_sell_sessions(uid)
     if pending_sell:
         buttons.append((f"⏳ استئناف طلبك السابق ({len(pending_sell)})", "resume_sell_new"))
@@ -230,6 +229,8 @@ async def my_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if rejected:
         msg += t(uid, "accounts_rejected_header") + "\n"
         for idx, rej in enumerate(rejected, 1):
+            if rej.get("imap_auto_rejected"):
+                continue
             reason = rej.get('reject_reason', 'unknown')
             reason_text = REJECT_REASON_LABELS.get(reason, reason)
             msg += f"  {idx}. 📧 `{rej.get('email', '')}` ❌ - {reason_text}\n"
@@ -246,6 +247,8 @@ async def view_member_rejected_emails(update: Update, context: ContextTypes.DEFA
     uid = query.from_user.id
     user_data = get_user(uid)
     rejected = sort_records_newest_first(user_data.get("rejected_requests", []) or [])
+    # NEW: استثناء رفض IMAP التلقائي
+    rejected = [r for r in rejected if not r.get("imap_auto_rejected")]
     if not rejected:
         rejected = [{"email": email, "reject_reason": "unknown"}
                     for email in (user_data.get("rejected_emails", []) or [])]
@@ -424,13 +427,8 @@ async def handle_edit_field_input(update: Update, context: ContextTypes.DEFAULT_
         reply_markup=kb_single(t(uid, "edit_btn_back"), "edit_my_accounts"))
 
 
-# ==================== VERIFICATION WRAPPER (NEW email flow only) ====================
+# ==================== VERIFICATION WRAPPER ====================
 async def _verify_and_handle_failure(update: Update, context: ContextTypes.DEFAULT_TYPE, email: str) -> Tuple[str, Optional[bool], int, bool]:
-    """
-    Wrapper for strict existence check + 3-strike restriction.
-    Used ONLY in the NEW email flow (bot-generated).
-    Returns: (status, exists, remaining_attempts, restricted_now)
-    """
     uid = update.effective_user.id
     status, exists = await verify_gmail_account_exists_strict(email, context=context)
     if status == "available":
@@ -441,7 +439,7 @@ async def _verify_and_handle_failure(update: Update, context: ContextTypes.DEFAU
     return status, exists, VERIFICATION_FAILURES_THRESHOLD, False
 
 
-# ==================== ADD ACCOUNT FLOW (OLD EMAIL — NO API CHECK) ====================
+# ==================== ADD ACCOUNT FLOW (OLD EMAIL) ====================
 async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
@@ -580,6 +578,7 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             rejected_count = sum(
                 1 for r in user_data.get("rejected_requests", [])
                 if normalize_email(r.get("email", "")) == email
+                and not r.get("imap_auto_rejected")
             )
             if rejected_count >= 3:
                 await update.message.reply_text(
@@ -758,7 +757,7 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
 
 
-# ==================== SELL NEW EMAIL FLOW (API check preserved + persistent sessions) ====================
+# ==================== SELL NEW EMAIL FLOW ====================
 async def sell_new_email_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
@@ -803,14 +802,13 @@ async def sell_new_email_start(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     context.user_data["sell_new_email"] = creds
 
-    # ✅ حفظ دائم للجلسة حتى لو أغلق المستخدم التلجرام
     upsert_sell_session(uid, {
         "email": creds["email"],
         "password": creds["password"],
         "first_name": creds.get("first_name", ""),
         "totp": "",
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "status": "pending_creation",   # pending_creation → created_verified → totp_ready → (removed)
+        "status": "pending_creation",
         "step": "awaiting_creation",
     })
 
@@ -880,7 +878,6 @@ async def sell_new_email_complete(update: Update, context: ContextTypes.DEFAULT_
             ]))
         return
 
-    # ✅ تم التحقق من الإنشاء → حفظ دائم
     update_sell_session(uid, creds["email"],
                         status="created_verified", step="awaiting_totp")
 
@@ -984,6 +981,7 @@ async def sell_new_email_finish_confirm(update: Update, context: ContextTypes.DE
         "user_username": user.username or "لا يوجد",
         "first_name": creds.get("first_name", ""),
         "is_bot_generated": True,
+        "rejected_by_admins": [],
     }
     user_data.setdefault("pending_requests", []).append(pending_request)
     user_data["pending_balance"] = clamp_money(float(user_data.get("pending_balance", 0.0)) + amount)
@@ -991,7 +989,6 @@ async def sell_new_email_finish_confirm(update: Update, context: ContextTypes.DE
     mark_user_sold(user_data)
     save_user(uid, user_data)
 
-    # ✅ إزالة الجلسة (تم تسليمها)
     remove_sell_session(uid, creds["email"])
 
     context.user_data.pop("sell_new_email", None)
@@ -1096,6 +1093,7 @@ async def handle_sell_new_email_totp(update: Update, context: ContextTypes.DEFAU
         "user_name": user.full_name or "unknown",
         "user_username": user.username or "none",
         "first_name": creds.get("first_name", ""), "is_bot_generated": True,
+        "rejected_by_admins": [],
     }
     user_data.setdefault("pending_requests", []).append(pending_request)
     user_data["pending_balance"] = clamp_money(float(user_data.get("pending_balance", 0.0)) + amount)
@@ -1106,7 +1104,6 @@ async def handle_sell_new_email_totp(update: Update, context: ContextTypes.DEFAU
     context.user_data["sell_new_email"] = creds
     context.user_data["step"] = "sell_new_email_app_pass"
 
-    # ✅ حفظ دائم لحالة totp_ready
     update_sell_session(uid, creds["email"],
                         status="totp_ready", step="awaiting_app_pass", totp=cleaned)
 
@@ -1223,7 +1220,6 @@ async def handle_sell_new_email_app_pass(update: Update, context: ContextTypes.D
     context.user_data.pop("sell_new_email", None)
     context.user_data.pop("step", None)
 
-    # ✅ إزالة الجلسة (اكتمل التسليم)
     remove_sell_session(uid, creds["email"])
 
     try:
@@ -1249,7 +1245,6 @@ async def sell_new_email_finish(update: Update, context: ContextTypes.DEFAULT_TY
                                       parse_mode=ParseMode.HTML,
                                       reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
         return
-    # ✅ إزالة الجلسة (تم تسليمها بدون app_pass)
     remove_sell_session(uid, creds.get("email", ""))
     await query.edit_message_text(
         t(uid, "sell_new_finished", email=tg_html_escape(creds.get('email', ''))),
@@ -1259,7 +1254,6 @@ async def sell_new_email_finish(update: Update, context: ContextTypes.DEFAULT_TY
 
 # ==================== RESUME SAVED SELL-NEW SESSIONS ====================
 async def resume_sell_new_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """زر الاستئناف من القائمة الرئيسية — يعرض الجلسات المحفوظة."""
     query = update.callback_query
     uid = query.from_user.id
     sessions = get_pending_sell_sessions(uid)
@@ -1289,7 +1283,6 @@ async def resume_sell_new_session(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def resume_sell_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """اختيار جلسة محددة من قائمة الاستئناف."""
     query = update.callback_query
     uid = query.from_user.id
     email = query.data.split(":", 1)[1]
@@ -1302,13 +1295,11 @@ async def resume_sell_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _open_resume_session(update: Update, context: ContextTypes.DEFAULT_TYPE, session: dict):
-    """يفتح جلسة محفوظة ويوجّه المستخدم للخطوة المناسبة."""
     query = update.callback_query
     uid = query.from_user.id
     email = session.get("email", "")
     status = session.get("status", "pending_creation")
 
-    # إعادة تحميل الجلسة في context.user_data
     context.user_data["sell_new_email"] = {
         "email": email,
         "password": session.get("password", ""),
@@ -1348,7 +1339,6 @@ async def _open_resume_session(update: Update, context: ContextTypes.DEFAULT_TYP
             ]))
         return
 
-    # pending_creation → يحتاج التحقق من الإنشاء
     context.user_data.pop("step", None)
     prices = get_tier_prices("new")
     await query.edit_message_text(
@@ -1408,9 +1398,6 @@ async def schedule_leave_check(context: ContextTypes.DEFAULT_TYPE, user_id: int,
         name=job_name)
 
 
-# ─────────────────────────────────────────────────────────────
-# ═══ تحرير/إلغاء مكافأة الأدمن عند الفحص الثاني ═══
-# ─────────────────────────────────────────────────────────────
 async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
     job_data = context.job.data
     user_id = job_data["user_id"]
@@ -1449,6 +1436,7 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
         failed_account["rejected_at_24h"] = True
         failed_account["leave_confirmed"] = True
         failed_account["rejection_reason"] = f"IMAP recheck failed after {hold_hours}h"
+        failed_account["imap_auto_rejected"] = True  # NEW: استثناء من قائمة المرفوضة
         failed_account["verification_24h"] = {
             "level": recheck["level"], "badge": recheck["badge"],
             "message": recheck["message"], "imap_ok": recheck["imap_ok"],
@@ -1480,7 +1468,6 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    # ═══ Success — release points and trigger daily gift ═══
     user_data["hold_balance"] = clamp_money(float(user_data.get("hold_balance", 0.0)) - price)
     user_data["balance"] = clamp_money(float(user_data.get("balance", 0.0)) + price)
     account["leave_confirmed"] = True
@@ -1518,9 +1505,87 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Could not send auto-confirmation to {user_id}: {e}")
 
 
-# ─────────────────────────────────────────────────────────────
-# ═══ تنظيف المكافآت المعلقة القديمة عند الإقلاع ═══
-# ─────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════
+# ═══ NEW: Admin inactivity tracking jobs ═══
+# ═══════════════════════════════════════════════════════════════════
+async def admin_inactivity_check_job(context: ContextTypes.DEFAULT_TYPE):
+    """فحص دوري: تحذير عند 36 ساعة، إزالة عند 48 ساعة."""
+    admins = load_admins()
+    now = datetime.now(timezone.utc)
+    for admin_id in list(admins):
+        last_action = get_admin_last_action_at(admin_id)
+        if last_action is None:
+            continue
+        idle_hours = (now - last_action).total_seconds() / 3600.0
+
+        if idle_hours >= ADMIN_INACTIVITY_REMOVE_HOURS:
+            await _remove_inactive_admin(context, admin_id)
+            continue
+
+        if idle_hours >= ADMIN_INACTIVITY_WARN_HOURS:
+            last_warn = get_admin_last_warning_at(admin_id)
+            needs_warning = (
+                last_warn is None or
+                (now - last_warn).total_seconds() >= 12 * 3600
+            )
+            if needs_warning:
+                mark_admin_warned(admin_id)
+                remaining_hours = max(0, int(ADMIN_INACTIVITY_REMOVE_HOURS - idle_hours))
+                try:
+                    await context.bot.send_message(
+                        chat_id=admin_id,
+                        text=(f"⚠️ <b>تنبيه: عدم نشاط كأدمن</b>\n\n"
+                              f"مرت <b>{int(idle_hours)} ساعة</b> دون قبول أو رفض أي إيميل.\n\n"
+                              f"⏰ خلال <b>{remaining_hours} ساعة</b> من الآن سيتم إزالة صلاحياتك وخصم رصيد الأدمن "
+                              f"ما لم تقم بقبول إيميل جديد.\n\n"
+                              f"📌 افتح <code>/start</code> → الإدارية → الطلبات للمراجعة."),
+                        parse_mode=ParseMode.HTML)
+                except Exception:
+                    logger.exception("Failed to send inactivity warning to %s", admin_id)
+
+
+async def _remove_inactive_admin(context, admin_id: int):
+    admins = load_admins()
+    if admin_id not in admins:
+        clear_admin_activity(admin_id)
+        return
+    admins.discard(admin_id)
+    save_admins(admins)
+    admin_data = get_user(admin_id)
+    received = round(float(admin_data.get("admin_received_balance", 0.0) or 0), 2)
+    pending = round(float(admin_data.get("admin_pending_balance", 0.0) or 0), 2)
+    positive_received = max(0.0, received)
+    positive_pending = max(0.0, pending)
+    total_removed = positive_received + positive_pending
+    if total_removed > 0:
+        # نبقي الجزء السالب (الدين) كما هو، ونصفر الجزء الموجب
+        admin_data["admin_received_balance"] = received if received < 0 else 0.0
+        admin_data["admin_pending_balance"] = pending if pending < 0 else 0.0
+        add_transaction(admin_data, "admin_bonus_reversal", total_removed,
+                        "Admin removed due to 48h inactivity")
+        save_user(admin_id, admin_data)
+    clear_admin_activity(admin_id)
+    try:
+        await context.bot.send_message(
+            chat_id=admin_id,
+            text=(f"🚫 <b>تم إزالة صلاحياتك كأدمن</b>\n\n"
+                  f"السبب: مرور <b>48 ساعة</b> دون قبول/رفض أي إيميل.\n"
+                  f"💰 تم خصم رصيد الأدمن: <b>${total_removed:.2f}</b>"),
+            parse_mode=ParseMode.HTML)
+    except Exception:
+        pass
+    try:
+        await context.bot.send_message(
+            chat_id=OWNER_ID,
+            text=(f"🔔 *إزالة أدمن غير نشط*\n\n"
+                  f"👤 `{admin_id}`\n"
+                  f"💰 تم خصم: `${total_removed:.2f}`"),
+            parse_mode=ParseMode.MARKDOWN)
+    except Exception:
+        pass
+
+
+# ==================== CLEANUP STUCK ADMIN BONUSES ====================
 def _cleanup_stuck_admin_bonuses() -> bool:
     users = load_json(USERS_DB)
     changed = False
@@ -1620,13 +1685,16 @@ async def restore_leave_checks(application: Application):
                                         first=3600, name="daily_backup")
     application.job_queue.run_repeating(inactive_member_reminder_job, interval=24 * 3600,
                                         first=7200, name="inactive_reminder")
+    # NEW: فحص عدم نشاط الأدمن كل ساعة
+    application.job_queue.run_repeating(admin_inactivity_check_job, interval=3600,
+                                        first=600, name="admin_inactivity_check")
     logger.info("Restore complete.")
 
 
 async def daily_backup_job(context: ContextTypes.DEFAULT_TYPE):
     try:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        for source_name in ("users.json", "config.json", "admins.json"):
+        for source_name in ("users.json", "config.json", "admins.json", "admin_activity.json"):
             source = DATA_DIR / source_name
             if source.exists():
                 shutil.copy2(source, BACKUP_DIR / f"{source.stem}_{stamp}.json")
