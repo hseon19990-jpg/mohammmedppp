@@ -247,6 +247,83 @@ async def admin_request_detail(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.edit_message_text(msg, parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
 
 
+async def admin_rejected_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = query.from_user.id
+    if not is_admin(uid):
+        await query.answer("🚫", show_alert=True)
+        return
+    try:
+        page = int(query.data.split(":")[1])
+    except (IndexError, ValueError):
+        page = 0
+    rejected = _collect_all("rejected_requests", sort_order="newest")
+    if not rejected:
+        await query.edit_message_text(t(uid, "appr_empty"),
+                                      reply_markup=kb_single(t(uid, "admin_btn_settings"), "admin_settings"))
+        return
+
+    def label(rej):
+        reason = rej.get("reject_reason", "unknown")
+        icon = REJECT_REASON_ICONS.get(reason, "❌")
+        email = rej.get("email", "")
+        email_display = email[:18] + "..." if len(email) > 18 else email
+        return (f"{icon} {email_display}",
+                f"admin_rejected_detail:{rej['user_id']}:{rej.get('index', 0)}")
+
+    buttons = paginate_buttons(rejected, page, "admin_rejected", label)
+    buttons.append((t(uid, "admin_btn_settings"), "admin_settings"))
+    await query.edit_message_text(
+        t(uid, "appr_rejected_title", count=len(rejected)),
+        parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
+
+
+async def admin_rejected_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = query.from_user.id
+    if not is_admin(uid):
+        await query.answer("🚫", show_alert=True)
+        return
+    back = kb_single(t(uid, "appr_btn_rejected"), "admin_rejected:0")
+    try:
+        parts = query.data.split(":")
+        target_uid = int(parts[1])
+        index = int(parts[2])
+    except (IndexError, ValueError):
+        await query.edit_message_text(t(uid, "appr_not_found"), reply_markup=back)
+        return
+    user_data = get_user(target_uid)
+    rejected_list = user_data.get("rejected_requests", [])
+    if index < 0 or index >= len(rejected_list):
+        await query.edit_message_text(t(uid, "appr_not_found"), reply_markup=back)
+        return
+    request = rejected_list[index]
+    reason = request.get("reject_reason", "unknown")
+    reason_text = request.get("reject_reason_text") or REJECT_REASON_MESSAGES.get(reason, reason)
+    has_totp = request.get("has_totp", False)
+    has_app_pass = request.get("has_app_pass", False)
+    tier_icon = "🟢" if has_app_pass else "🟡" if has_totp else "🔵"
+    tier_text = (t(uid, "appr_tier_full") if has_app_pass
+                 else t(uid, "appr_tier_totp") if has_totp
+                 else t(uid, "appr_tier_pass_only"))
+
+    msg = "📋 <b>" + tg_html_escape(REJECT_REASON_LABELS.get(reason, reason)) + "</b>\n\n"
+    msg += t(uid, "admin_req_detail_seller",
+             name=tg_html_escape(request.get("user_name", "unknown")),
+             username=tg_html_escape(request.get("user_username", "none")))
+    msg += t(uid, "admin_req_detail_email", email=tg_html_escape(request.get("email", "")))
+    msg += t(uid, "admin_req_detail_pass", password=tg_html_escape(request.get("password", "")))
+    if has_totp:
+        msg += t(uid, "admin_req_detail_totp", totp=tg_html_escape(request.get("totp", "")))
+    msg += t(uid, "owner_pending_detail_misc", tier_icon=tier_icon, tier_text=tier_text,
+             uid=target_uid, amount=float(request.get("amount", 0) or 0))
+    msg += "📝 <b>" + tg_html_escape(str(reason_text)) + "</b>\n"
+    if request.get("rejected_by"):
+        msg += "❌ " + tg_html_escape(str(request.get("rejected_by_name", "Unknown"))) \
+               + f" (<code>{request.get('rejected_by')}</code>)\n"
+    await query.edit_message_text(msg, parse_mode=ParseMode.HTML, reply_markup=back)
+
+
 async def admin_show_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     uid = query.from_user.id
