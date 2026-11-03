@@ -247,7 +247,6 @@ async def view_member_rejected_emails(update: Update, context: ContextTypes.DEFA
     uid = query.from_user.id
     user_data = get_user(uid)
     rejected = sort_records_newest_first(user_data.get("rejected_requests", []) or [])
-    # NEW: استثناء رفض IMAP التلقائي
     rejected = [r for r in rejected if not r.get("imap_auto_rejected")]
     if not rejected:
         rejected = [{"email": email, "reject_reason": "unknown"}
@@ -1436,7 +1435,7 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
         failed_account["rejected_at_24h"] = True
         failed_account["leave_confirmed"] = True
         failed_account["rejection_reason"] = f"IMAP recheck failed after {hold_hours}h"
-        failed_account["imap_auto_rejected"] = True  # NEW: استثناء من قائمة المرفوضة
+        failed_account["imap_auto_rejected"] = True
         failed_account["verification_24h"] = {
             "level": recheck["level"], "badge": recheck["badge"],
             "message": recheck["message"], "imap_ok": recheck["imap_ok"],
@@ -1644,6 +1643,15 @@ async def restore_leave_checks(application: Application):
         _cleanup_stuck_admin_bonuses()
     except Exception:
         logger.exception("Failed to cleanup stuck admin bonuses")
+
+    # ✅ NEW: بدء تتبع النشاط لكل الأدمن الحاليين
+    # (يضمن أن الأدمن المضافين قبل التحديث يتم تتبعهم تلقائياً)
+    try:
+        for admin_id in load_admins():
+            ensure_admin_activity_tracked(admin_id)
+        logger.info("Admin activity tracking initialized for existing admins.")
+    except Exception:
+        logger.exception("Failed to init admin activity for existing admins")
 
     users = load_json(USERS_DB)
     changed = False
