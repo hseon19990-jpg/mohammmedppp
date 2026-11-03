@@ -1,5 +1,5 @@
 """
-Advanced Telegram Account Manager Bot - v6.6
+Advanced Telegram Account Manager Bot - v6.7
 """
 
 import asyncio
@@ -295,6 +295,14 @@ RESTRICTION_DURATION_HOURS = 1
 
 IRAQ_TZ_OFFSET_HOURS = 3
 SELL_NEW_SESSION_MAX_AGE_DAYS = 30
+
+# ═══ NEW: Multi-admin rejection system ═══
+REJECTIONS_REQUIRED_FOR_FINAL = 3
+
+# ═══ NEW: Admin inactivity tracking ═══
+ADMIN_ACTIVITY_FILE = DATA_DIR / "admin_activity.json"
+ADMIN_INACTIVITY_WARN_HOURS = 36
+ADMIN_INACTIVITY_REMOVE_HOURS = 48
 
 # ==================== SELL NEW EMAIL GENERATOR ====================
 FIRST_NAMES_EN = [
@@ -963,6 +971,75 @@ def is_admin_or_owner(user_id: int) -> bool:
     return user_id == OWNER_ID or is_admin(user_id)
 
 
+# ==================== ADMIN ACTIVITY TRACKING (NEW) ====================
+def _load_admin_activity() -> dict:
+    return load_json(ADMIN_ACTIVITY_FILE)
+
+
+def _save_admin_activity(data: dict):
+    save_json(ADMIN_ACTIVITY_FILE, data)
+
+
+def record_admin_activity(admin_id: int, action: str = "review") -> None:
+    """تسجيل نشاط الأدمن (قبول/رفض) لإلغاء عدّاد عدم النشاط."""
+    if not admin_id:
+        return
+    data = _load_admin_activity()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    entry = data.setdefault(str(admin_id), {})
+    entry["last_action_at"] = now_iso
+    entry["last_action"] = action
+    entry.setdefault("first_tracked_at", now_iso)
+    entry["last_warning_at"] = ""
+    _save_admin_activity(data)
+
+
+def get_admin_last_action_at(admin_id: int) -> Optional[datetime]:
+    data = _load_admin_activity()
+    entry = data.get(str(admin_id)) or {}
+    dt = parse_iso_datetime(entry.get("last_action_at"))
+    if dt is not None:
+        return dt
+    first = parse_iso_datetime(entry.get("first_tracked_at"))
+    if first is not None:
+        return first
+    return None
+
+
+def mark_admin_warned(admin_id: int) -> None:
+    data = _load_admin_activity()
+    entry = data.setdefault(str(admin_id), {})
+    entry["last_warning_at"] = datetime.now(timezone.utc).isoformat()
+    _save_admin_activity(data)
+
+
+def get_admin_last_warning_at(admin_id: int) -> Optional[datetime]:
+    data = _load_admin_activity()
+    entry = data.get(str(admin_id)) or {}
+    return parse_iso_datetime(entry.get("last_warning_at"))
+
+
+def clear_admin_activity(admin_id: int) -> None:
+    data = _load_admin_activity()
+    data.pop(str(admin_id), None)
+    _save_admin_activity(data)
+
+
+def ensure_admin_activity_tracked(admin_id: int) -> None:
+    """يسجل بداية التتبع إن لم يكن موجوداً (يُستدعى عند إضافة أدمن جديد)."""
+    data = _load_admin_activity()
+    key = str(admin_id)
+    if key not in data:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        data[key] = {
+            "first_tracked_at": now_iso,
+            "last_action_at": "",
+            "last_action": "",
+            "last_warning_at": "",
+        }
+        _save_admin_activity(data)
+
+
 # ==================== USER DATA ====================
 DEFAULT_USER_FIELDS = {
     "balance": 0.0, "pending_balance": 0.0, "hold_balance": 0.0,
@@ -989,14 +1066,22 @@ def get_user(user_id: int) -> dict:
     users = load_json(USERS_DB)
     raw = users.get(str(user_id), {})
     merged = {**DEFAULT_USER_FIELDS, **raw}
+    # حقول لا يمكن أن تكون سالبة
     merged["balance"] = clamp_money(merged.get("balance"))
     merged["pending_balance"] = clamp_money(merged.get("pending_balance"))
     merged["hold_balance"] = clamp_money(merged.get("hold_balance"))
-    merged["admin_pending_balance"] = clamp_money(merged.get("admin_pending_balance"))
-    merged["admin_received_balance"] = clamp_money(merged.get("admin_received_balance"))
     merged["total_credited_balance"] = clamp_money(merged.get("total_credited_balance"))
     merged["spent_balance"] = clamp_money(merged.get("spent_balance"))
     merged["referral_earnings"] = clamp_money(merged.get("referral_earnings"))
+    # NEW: حقول الأدمن يمكن أن تكون سالبة (عقوبات)
+    try:
+        merged["admin_pending_balance"] = round(float(merged.get("admin_pending_balance") or 0), 2)
+    except (TypeError, ValueError):
+        merged["admin_pending_balance"] = 0.0
+    try:
+        merged["admin_received_balance"] = round(float(merged.get("admin_received_balance") or 0), 2)
+    except (TypeError, ValueError):
+        merged["admin_received_balance"] = 0.0
     if not merged.get("created_at"):
         merged["created_at"] = datetime.now(timezone.utc).isoformat()
     return decrypt_user_data(merged)
@@ -1005,10 +1090,16 @@ def get_user(user_id: int) -> dict:
 def save_user(user_id: int, user_data: dict):
     users = load_json(USERS_DB)
     for field_name in ("balance", "pending_balance", "hold_balance",
-                       "admin_pending_balance", "admin_received_balance",
                        "total_credited_balance", "spent_balance", "referral_earnings"):
         if field_name in user_data:
             user_data[field_name] = clamp_money(user_data[field_name])
+    # NEW: admin fields can be negative
+    for field_name in ("admin_pending_balance", "admin_received_balance"):
+        if field_name in user_data:
+            try:
+                user_data[field_name] = round(float(user_data[field_name] or 0), 2)
+            except (TypeError, ValueError):
+                user_data[field_name] = 0.0
     if isinstance(user_data.get("transactions"), list) and len(user_data["transactions"]) > 200:
         user_data["transactions"] = user_data["transactions"][-200:]
     users[str(user_id)] = encrypt_user_data(user_data)
@@ -1021,6 +1112,36 @@ def add_transaction(user_data: dict, kind: str, amount: float, note: str = "", e
         "note": note[:200], "email": email,
         "at": datetime.now(timezone.utc).isoformat(),
     })
+
+
+# ==================== ADMIN PENALTY (NEW) ====================
+def deduct_from_admin_balance(admin_id: int, amount_cents: int,
+                               reason: str, email: str = "") -> bool:
+    """خصم عقوبة من رصيد الأدمن — يمكن أن يصبح سالباً."""
+    if admin_id == OWNER_ID or amount_cents <= 0:
+        return False
+    admin_data = get_user(admin_id)
+    remaining = amount_cents
+
+    # 1) من pending أولاً
+    pending_cents = money_to_cents(admin_data.get("admin_pending_balance", 0))
+    if pending_cents > 0:
+        from_pending = min(pending_cents, remaining)
+        admin_data["admin_pending_balance"] = cents_to_money(pending_cents - from_pending)
+        remaining -= from_pending
+
+    # 2) ثم من received (يمكن أن يصبح سالباً)
+    if remaining > 0:
+        received_cents = money_to_cents(admin_data.get("admin_received_balance", 0))
+        admin_data["admin_received_balance"] = cents_to_money(received_cents - remaining)
+        remaining = 0
+
+    add_transaction(admin_data, "admin_bonus_reversal",
+                    cents_to_money(amount_cents),
+                    f"عقوبة: {reason} | {email}" if email else f"عقوبة: {reason}",
+                    email)
+    save_user(admin_id, admin_data)
+    return True
 
 
 # ==================== SELL-NEW SESSIONS PERSISTENCE ====================
@@ -1119,7 +1240,7 @@ def settle_admin_bonus(account: dict, new_status: str,
         return False
     same_user = owner_id is not None and admin_id == owner_id and owner_data is not None
     admin_data = owner_data if same_user else get_user(admin_id)
-    pending_cents = max(0, money_to_cents(admin_data.get("admin_pending_balance", 0.0)) - bonus_cents)
+    pending_cents = money_to_cents(admin_data.get("admin_pending_balance", 0.0)) - bonus_cents
     admin_data["admin_pending_balance"] = cents_to_money(pending_cents)
     email = account.get("email", "")
     if new_status == "released":
@@ -1475,9 +1596,8 @@ def load_pending_purchases_from_disk():
     logger.info("Loaded %d pending purchases.", len(PENDING_PURCHASES))
 
 
-# ==================== ORDERS TRACKING (NEW) ====================
+# ==================== ORDERS TRACKING ====================
 def _generate_order_code() -> str:
-    """يولّد كود طلب فريد مثل ORD-A1B2C3."""
     orders = load_json(ORDERS_DB)
     for _ in range(50):
         code = "ORD-" + secrets.token_hex(3).upper()
@@ -1487,7 +1607,6 @@ def _generate_order_code() -> str:
 
 
 def save_order_record(order: dict) -> str:
-    """يحفظ طلباً جديداً في orders.json ويعيد كوده."""
     orders = load_json(ORDERS_DB)
     code = order.get("code")
     if not code or code in orders:
@@ -1499,7 +1618,6 @@ def save_order_record(order: dict) -> str:
 
 
 def update_order_record(code: str, **fields) -> bool:
-    """يحدّث حقول طلب موجود بالكود."""
     orders = load_json(ORDERS_DB)
     key = str(code).upper()
     if key not in orders:
@@ -1510,7 +1628,6 @@ def update_order_record(code: str, **fields) -> bool:
 
 
 def delete_order_record(code: str) -> bool:
-    """يحذف طلباً بالكود."""
     orders = load_json(ORDERS_DB)
     key = str(code).upper()
     if key not in orders:
@@ -1521,13 +1638,11 @@ def delete_order_record(code: str) -> bool:
 
 
 def get_order_record(code: str) -> Optional[dict]:
-    """يعيد طلباً بالكود."""
     orders = load_json(ORDERS_DB)
     return orders.get(str(code).upper())
 
 
 def search_order_records(query: str, limit: int = 30) -> List[dict]:
-    """يبحث في الطلبات بالكود/معرف العضو/اليوزر/النوع/الوصف."""
     q = str(query or "").strip().upper()
     if not q:
         return []
@@ -1552,7 +1667,6 @@ def search_order_records(query: str, limit: int = 30) -> List[dict]:
 
 
 def format_order_details_html(order: dict) -> str:
-    """يبني تقرير HTML شامل لتفاصيل الطلب."""
     status_map = {
         "pending": "⏳ قيد الانتظار",
         "completed": "✅ مكتمل",
@@ -1578,7 +1692,7 @@ def format_order_details_html(order: dict) -> str:
     if order.get("quantity"):
         lines.append(f"🔢 <b>العدد:</b> {order.get('quantity')}")
     if order.get("unit_price"):
-        lines.append(f"💵 <b>سعر الوحدة:</b> ${float(order.get('unit_price', 0)):.2f}")
+        lines.append(f"💵 <b>سعر الوحدة:</b> ${float(order.get('unit_price', 0)):.6f}")
     if order.get("unit_fee"):
         lines.append(f"💸 <b>عمولة الوحدة:</b> ${float(order.get('unit_fee', 0)):.2f}")
     if order.get("country_name"):
@@ -1848,6 +1962,19 @@ def has_active_account_password(password: str) -> bool:
                 if stored and stored == candidate:
                     return True
     return False
+
+
+# ==================== MULTI-ADMIN REJECTION HELPERS (NEW) ====================
+def request_rejection_count(request: dict) -> int:
+    rj = request.get("rejected_by_admins", [])
+    return len(rj) if isinstance(rj, list) else 0
+
+
+def admin_already_rejected(request: dict, admin_id: int) -> bool:
+    rj = request.get("rejected_by_admins", [])
+    if not isinstance(rj, list):
+        return False
+    return any(int(r.get("admin_id", 0)) == admin_id for r in rj)
 
 
 # ==================== IMAP VERIFICATION ====================
@@ -2579,12 +2706,37 @@ def crypto_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-# ==================== MASTER & BALANCES CONFIGURATION (NEW) ====================
-MASTER_BALANCE_OPTIONS: Dict[str, Dict[str, Any]] = {
-    "master": {"name": "ماستر", "emoji": "🎖️", "price": 0.75, "fee": 0.00},
-    "asia":   {"name": "آسيا",  "emoji": "🌏", "price": 0.75, "fee": 0.20},
-    "ather":  {"name": "أثير",  "emoji": "✨", "price": 0.75, "fee": 0.20},
+# ==================== MASTER & BALANCES CONFIGURATION (NEW RATE MODEL) ====================
+# 1500 وحدة = 1 دولار (افتراضي، قابل لتعديل المالك)
+MASTER_BALANCE_DEFAULTS: Dict[str, Dict[str, Any]] = {
+    "master": {"name": "ماستر", "emoji": "🎖️", "rate": 1500, "fee": 0.00},
+    "asia":   {"name": "آسيا",  "emoji": "🌏", "rate": 1500, "fee": 0.20},
+    "ather":  {"name": "أثير",  "emoji": "✨", "rate": 1500, "fee": 0.20},
 }
+
+MASTER_BALANCE_MIN_UNITS = 1500  # الحد الأدنى للطلب
+
+
+def get_master_balance_config() -> Dict[str, Dict[str, Any]]:
+    """تحميل إعدادات ماستر/آسيا/أثير مع دعم تعديل المالك للسعر."""
+    config = load_config()
+    overrides = config.get("master_balance_rates", {}) or {}
+    result = {}
+    for key, default in MASTER_BALANCE_DEFAULTS.items():
+        try:
+            rate = float(overrides.get(key, default["rate"]) or default["rate"])
+        except (TypeError, ValueError):
+            rate = float(default["rate"])
+        if rate <= 0:
+            rate = float(default["rate"])
+        result[key] = {
+            "name": default["name"],
+            "emoji": default["emoji"],
+            "rate": rate,
+            "fee": float(default["fee"]),
+            "price": round(1.0 / rate, 8),  # سعر الوحدة بالدولار
+        }
+    return result
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]
