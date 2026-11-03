@@ -218,7 +218,7 @@ def admin_balance_stats(user_data: dict, admin_id: Optional[int] = None) -> dict
             "completed_count": 0, "pending_count": 0, "released_count": 0,
         }
     )
-    # NEW: عرض رصيد الأدمن الفعلي (يمكن أن يكون سالباً)
+    # عرض رصيد الأدمن الفعلي (يمكن أن يكون سالباً)
     try:
         admin_pending = round(float(user_data.get("admin_pending_balance", 0.0) or 0), 2)
     except (TypeError, ValueError):
@@ -237,10 +237,10 @@ def admin_balance_stats(user_data: dict, admin_id: Optional[int] = None) -> dict
         "pending": pending,
         "hold": hold,
         "admin_pending": admin_pending,
-        "received": received,          # يمكن أن يكون سالباً (دين)
-        "received_ledger": admin_ledger["released"],  # المحسوب من السجلات
+        "received": received,
+        "received_ledger": admin_ledger["released"],
         "available_admin": available_admin,
-        "debt": debt,                  # NEW: الدين المستحق
+        "debt": debt,
         "completed_count": admin_ledger["completed_count"],
         "pending_count": admin_ledger["pending_count"],
         "released_count": admin_ledger["released_count"],
@@ -323,7 +323,6 @@ async def handle_member_check_input(update: Update, context: ContextTypes.DEFAUL
         f"🔒 رصيد معلّق للتحويل: <code>${balances['hold']:.2f}</code>"
     )
     if admin_balances is not None:
-        # NEW: عرض رصيد الأدمن مع مراعاة الدين
         if admin_balances['received'] < 0:
             received_line = f"🚨 إجمالي مكافآت الأدمن: دين <code>${admin_balances['debt']:.2f}</code>\n"
         else:
@@ -532,7 +531,6 @@ def _build_email_record_report(match: dict, position: int, total: int) -> str:
         if rec.get("rejected_at"):
             lines.append(f"  • وقت الرفض: <code>{tg_html_escape(_format_iso_time(rec.get('rejected_at')))}</code>")
 
-    # NEW: عرض سجل رفض المشرفين المتعدد
     rejected_by_admins = rec.get("rejected_by_admins", []) or []
     if rejected_by_admins:
         lines.append("")
@@ -783,7 +781,7 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ("🔑 إدارة APIs", "apis_menu"),
         ("🚫 إدارة الحظر", "bans_menu"),
         ("💰 أسعار المستويات", "set_tier_prices"),
-        ("💱 أسعار ماستر/آسيا/أثير", "master_rate_settings"),  # NEW
+        ("💱 أسعار ماستر/آسيا/أثير", "master_rate_settings"),
         ("🛒 حدود السحب", "withdraw_settings"),
         ("🎁 إعدادات الهدية اليومية", "daily_gift_settings"),
         ("📋 الطلبات", "approval_requests"),
@@ -819,7 +817,7 @@ async def toggle_maintenance(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await owner_panel(update, context)
 
 
-# ==================== MASTER RATE SETTINGS (NEW) ====================
+# ==================== MASTER RATE SETTINGS ====================
 async def master_rate_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
@@ -827,12 +825,10 @@ async def master_rate_settings(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     cfg = get_master_balance_config()
     lines = ["💱 <b>إعدادات أسعار ماستر/آسيا/أثير</b>", ""]
-    lines.append("📌 السعر الحالي: <b>1500 وحدة = $1</b> (افتراضي)")
-    lines.append("")
     for key, info in cfg.items():
         per_unit = info['price']
         min_units = MASTER_BALANCE_MIN_UNITS
-        min_cost = round(min_units * per_unit, 2)
+        min_cost = round(min_units / info['rate'], 2)  # ✅ السعر الديناميكي
         fee_text = f"+ ${info['fee']:.2f} عمولة" if info['fee'] > 0 else "بدون عمولة"
         lines.append(f"{info['emoji']} <b>{info['name']}</b>")
         lines.append(f"   • السعر: <code>{int(info['rate'])} وحدة = $1</code>")
@@ -900,8 +896,10 @@ async def handle_master_rate_input(update: Update, context: ContextTypes.DEFAULT
     save_config(config)
     context.user_data.pop("mode", None)
     per_unit = round(1.0 / rate, 8)
+    # ✅ عرض الاسم الحقيقي للخدمة بدلاً من الـ key
+    display_name = MASTER_BALANCE_DEFAULTS.get(key, {}).get("name", key)
     await update.message.reply_text(
-        f"✅ تم تحديث سعر <b>{key}</b>:\n\n"
+        f"✅ تم تحديث سعر <b>{display_name}</b>:\n\n"
         f"💰 <code>{rate}</code> وحدة = $1\n"
         f"💵 سعر الوحدة: <code>${per_unit:.8f}</code>\n"
         f"📦 الحد الأدنى: <code>{MASTER_BALANCE_MIN_UNITS}</code> وحدة",
@@ -1625,7 +1623,7 @@ async def unban_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("Failed to refresh bans menu")
 
 
-# ==================== OWNER RECOMPLETE REJECTED (NEW) ====================
+# ==================== OWNER RECOMPLETE REJECTED ====================
 async def owner_recomplete_rejected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """إعادة إيميل مرفوض إلى قائمة الانتظار للإكمال من جديد."""
     query = update.callback_query
@@ -1649,23 +1647,20 @@ async def owner_recomplete_rejected(update: Update, context: ContextTypes.DEFAUL
     if request.get("imap_auto_rejected"):
         await query.answer("🚫 لا يمكن إعادة إكمال حساب فشل IMAP.", show_alert=True)
         return
-    # نقل للسجل المعلق
     new_request = dict(request)
     for key in ("reject_reason", "reject_reason_text", "rejected_by",
                 "rejected_by_name", "rejected_by_username", "rejected_at",
                 "rejected_from_approved"):
         new_request.pop(key, None)
-    new_request["rejected_by_admins"] = []  # إعادة تصفير الرفضات
+    new_request["rejected_by_admins"] = []
     new_request["recompleted_at"] = datetime.now(timezone.utc).isoformat()
     new_request["recompleted_by"] = actor_id
     user_data["pending_requests"].append(new_request)
-    # إعادة المبلغ المعلق
     amount = float(new_request.get("amount", 0.0))
     user_data["pending_balance"] = clamp_money(
         float(user_data.get("pending_balance", 0.0)) + amount)
     rejected_list.pop(index)
     user_data["rejected_requests"] = rejected_list
-    # إزالة من rejected_emails
     email = normalize_email(new_request.get("email", ""))
     user_data["rejected_emails"] = [
         e for e in user_data.get("rejected_emails", [])
@@ -1682,11 +1677,9 @@ async def owner_recomplete_rejected(update: Update, context: ContextTypes.DEFAUL
             parse_mode=ParseMode.HTML)
     except Exception:
         pass
-    # عرض تفاصيل الطلب بعد الإرجاع
     token = account_callback_token(new_request.get("email", ""))
     try:
         if actor_id == OWNER_ID:
-            # إعادة تحميل query data للوصول لـ pending_detail
             query.data = f"pending_detail:{target_uid}:{token}"
             from telegram_bot.approvals import pending_detail
             await pending_detail(update, context)
@@ -2032,7 +2025,7 @@ async def handle_add_admin_input(update: Update, context: ContextTypes.DEFAULT_T
         return
     admins.add(new_admin_id)
     save_admins(admins)
-    ensure_admin_activity_tracked(new_admin_id)  # NEW
+    ensure_admin_activity_tracked(new_admin_id)
     context.user_data.pop("step", None)
     await update.message.reply_text(
         f"✅ تم إضافة الأدمن `{new_admin_id}` بنجاح.",
@@ -2075,7 +2068,7 @@ async def remove_admin_execute(update: Update, context: ContextTypes.DEFAULT_TYP
     if admin_id in admins:
         admins.discard(admin_id)
         save_admins(admins)
-        clear_admin_activity(admin_id)  # NEW
+        clear_admin_activity(admin_id)
         try:
             await context.bot.send_message(
                 chat_id=admin_id,
