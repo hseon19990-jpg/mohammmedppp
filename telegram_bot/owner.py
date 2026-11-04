@@ -1560,11 +1560,13 @@ async def bans_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("Failed to load banned users")
         banned = []
 
+    # نستخدم HTML بدل Markdown: الأسماء واسم المستخدم قد تحتوي على _ أو * أو `
+    # فيفشل تحليل Markdown ولا تظهر القائمة إطلاقاً.
     if not banned:
-        text = "✅ *لا يوجد أعضاء محظورون أو مقيدون حالياً.*"
+        text = "✅ <b>لا يوجد أعضاء محظورون أو مقيدون حالياً.</b>"
         markup = kb_single("🔙 إعدادات المالك", "owner_panel")
     else:
-        lines = [f"🚫 *الأعضاء المحظورون/المقيدون:* {len(banned)}", ""]
+        lines = [f"🚫 <b>الأعضاء المحظورون/المقيدون:</b> {len(banned)}", ""]
         buttons = []
         for idx, b in enumerate(banned[:15], 1):
             kind_icon = "🔴" if b["kind"] == "ban" else "🟠"
@@ -1573,21 +1575,30 @@ async def bans_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             name = b.get("name") or "غير معروف"
             username = b.get("username") or "لا يوجد"
             lines.append(
-                f"{idx}. {kind_icon} `{b['user_id']}` — {tg_html_escape(name)} (@{tg_html_escape(username)})\n"
-                f"   ⏳ {kind_label} حتى: {until_display}\n")
+                f"{idx}. {kind_icon} <code>{b['user_id']}</code> — {tg_html_escape(name)} "
+                f"(@{tg_html_escape(username)})\n"
+                f"   ⏳ {kind_label} حتى: {tg_html_escape(until_display)}\n")
             buttons.append((f"✅ إزالة القيد عن {b['user_id']}",
                             f"unban_member:{b['user_id']}"))
+        if len(banned) > 15:
+            lines.append(f"… و{len(banned) - 15} آخرين (تظهر أول 15 فقط).")
         buttons.append(("🔙 إعدادات المالك", "owner_panel"))
         text = "\n".join(lines)
         markup = kb_vertical(buttons)
 
     try:
-        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=markup)
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
     except Exception as exc:
         if "Message is not modified" in str(exc):
-            pass
-        else:
-            logger.exception("Failed to edit bans menu")
+            return
+        logger.exception("Failed to edit bans menu")
+        # احتياطي: أرسل القائمة كرسالة جديدة بدل الصمت.
+        try:
+            await context.bot.send_message(
+                chat_id=update.effective_user.id, text=text,
+                parse_mode=ParseMode.HTML, reply_markup=markup)
+        except Exception:
+            logger.exception("Failed to send bans menu fallback")
 
 
 async def unban_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1607,7 +1618,11 @@ async def unban_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("⚠️ فشل إزالة القيد. حاول مجدداً.", show_alert=True)
         return
     if changed:
-        await query.answer(f"✅ تم إزالة القيد عن {user_id}")
+        try:
+            await query.answer(f"✅ تم إزالة القيد عن {user_id}")
+        except Exception:
+            # الراوتر أجاب على الضغطة مسبقاً؛ لا نوقف العملية بسبب فشل الإشعار.
+            pass
         try:
             await context.bot.send_message(
                 chat_id=user_id,

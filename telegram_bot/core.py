@@ -290,8 +290,8 @@ MAX_APIS_TOTAL = 30
 MAX_APIS_PER_DAY_PER_ADMIN = 3
 API_ADD_BONUS = 0.05
 API_WARNING_THRESHOLD = 50
-VERIFICATION_FAILURES_THRESHOLD = 3
-RESTRICTION_DURATION_HOURS = 1
+VERIFICATION_FAILURES_THRESHOLD = 5
+RESTRICTION_DURATION_HOURS = 0.25  # 15 دقيقة
 
 IRAQ_TZ_OFFSET_HOURS = 3
 SELL_NEW_SESSION_MAX_AGE_DAYS = 30
@@ -685,22 +685,31 @@ async def check_email_via_rotation_api(email: str, context=None) -> Optional[boo
 
 # ==================== STRICT EMAIL EXISTENCE VERIFICATION ====================
 async def verify_gmail_account_exists_strict(email: str, context=None) -> Tuple[str, Optional[bool]]:
-    try:
-        result_api = await check_email_via_rotation_api(email, context=context)
-    except Exception:
-        logger.exception("Rotation API check failed")
-        result_api = None
-    if result_api is True:
-        return "exists", True
-    if result_api is False:
-        return "available", False
+    # AbstractAPI يعتمد على فحص SMTP عند Gmail وهو غير مستقر مع الحسابات الجديدة:
+    # قد يرد "undeliverable" لإيميل موجود فعلاً. لذلك لا نعتبر رده "غير موجود"
+    # حكماً نهائياً: نعيد المحاولة، ثم نطلب تأكيداً من المصدر الثاني (Google).
+    api_said_missing = False
+    for attempt in range(2):
+        try:
+            result_api = await check_email_via_rotation_api(email, context=context)
+        except Exception:
+            logger.exception("Rotation API check failed")
+            result_api = None
+        if result_api is True:
+            return "exists", True
+        if result_api is False:
+            api_said_missing = True
+            if attempt == 0:
+                await asyncio.sleep(3)
+                continue
+        break
     env_key = os.environ.get("ABSTRACT_API_KEY", "").strip()
     if env_key:
         result_env = await asyncio.to_thread(_call_abstractapi_key, env_key, email)
         if result_env is True:
             return "exists", True
         if result_env is False:
-            return "available", False
+            api_said_missing = True
     last_result: Optional[bool] = None
     for attempt in range(3):
         try:
@@ -715,6 +724,11 @@ async def verify_gmail_account_exists_strict(email: str, context=None) -> Tuple[
             return "exists", True
         if attempt < 2:
             await asyncio.sleep(2 + attempt)
+    if api_said_missing:
+        logger.warning(
+            "AbstractAPI said missing for %s but could not be confirmed; "
+            "returning unknown (no failure strike)", email,
+        )
     logger.warning(
         "Email existence verification unknown for %s after all attempts (last=%s)",
         email, last_result,
@@ -1376,7 +1390,7 @@ def get_active_restriction_message(user_data: dict) -> Optional[str]:
     seconds = remaining_seconds % 60
     return (f"🚫 <b>أنت مقيد مؤقتاً</b>\n"
             f"⏳ الوقت المتبقي: <b>{minutes} دقيقة و {seconds} ثانية</b>\n"
-            f"<i>السبب: 3 محاولات فاشلة لإرسال إيميل غير صحيح.</i>\n"
+            f"<i>السبب: {VERIFICATION_FAILURES_THRESHOLD} محاولات فاشلة لإرسال إيميل غير صحيح.</i>\n"
             f"<i>لا يمكنك إضافة إيميلات أو سحب الأرباح خلال هذه الفترة.</i>")
 
 

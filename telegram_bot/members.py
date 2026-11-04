@@ -630,12 +630,15 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         session.password = text
         session.has_password = True
-        session.step = "totp"
+        session.step = "choose_pass"
         save_sessions()
         await update.message.reply_text(
-            t(uid, "add_step3_totp"), parse_mode=ParseMode.HTML,
+            t(uid, "old_pass_received_choice", email=tg_html_escape(session.email),
+              p1=prices["tier_1"], p2=prices["tier_2"]),
+            parse_mode=ParseMode.HTML,
             reply_markup=kb_vertical([
-                (t(uid, "add_btn_video_totp"), "show_video:totp"),
+                (t(uid, "old_btn_continue"), "old_continue:totp"),
+                (t(uid, "old_btn_finish"), "old_finish:pass"),
                 (t(uid, "btn_cancel"), "cancel"),
             ]))
 
@@ -657,18 +660,22 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         session.totp = cleaned
         session.has_totp = True
-        session.step = "app_pass"
+        session.step = "choose_totp"
         save_sessions()
 
         await context.bot.send_message(
             chat_id=uid,
-            text=t(uid, "add_totp_received_with_code",
-                   code=code, price=prices["tier_3"]),
+            text=t(uid, "old_totp_received_choice", code=code,
+                   p2=prices["tier_2"], p3=prices["tier_3"]),
             parse_mode=ParseMode.HTML,
             reply_markup=kb_vertical([
-                (t(uid, "add_btn_video_app_pass"), "show_video:app_pass"),
+                (t(uid, "old_btn_continue"), "old_continue:app_pass"),
+                (t(uid, "old_btn_finish"), "old_finish:totp"),
                 (t(uid, "btn_cancel"), "cancel"),
             ]))
+
+    elif session.step in ("choose_pass", "choose_totp"):
+        await update.message.reply_text(t(uid, "old_use_buttons"))
 
     elif session.step == "app_pass":
         cleaned = text.replace(" ", "")
@@ -754,6 +761,161 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text=t(uid, "add_success", email=tg_html_escape(session.email), price=price),
             parse_mode=ParseMode.HTML,
             reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
+
+
+# ==================== OLD EMAIL: FINISH / CONTINUE CHOICES ====================
+async def old_email_continue(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """زر «إكمال»: ينقل العضو للخطوة التالية (2FA ثم كلمة مرور التطبيق)."""
+    query = update.callback_query
+    uid = query.from_user.id
+    stage = query.data.split(":", 1)[1] if ":" in query.data else ""
+    session = SESSIONS.get(uid)
+    prerequisites_ok = bool(
+        session and session.email and session.has_password
+        and (stage == "totp" or (stage == "app_pass" and session.has_totp))
+        and stage in ("totp", "app_pass")
+    )
+    if not prerequisites_ok:
+        await _safe_edit(query, t(uid, "old_session_expired"),
+                         reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
+        return
+
+    if stage == "totp":
+        session.step = "totp"
+        save_sessions()
+        await _safe_edit(
+            query, t(uid, "add_step3_totp"), parse_mode=ParseMode.HTML,
+            reply_markup=kb_vertical([
+                (t(uid, "add_btn_video_totp"), "show_video:totp"),
+                (t(uid, "btn_cancel"), "cancel"),
+            ]))
+    else:
+        session.step = "app_pass"
+        save_sessions()
+        await _safe_edit(
+            query, t(uid, "add_step4_app_pass"), parse_mode=ParseMode.HTML,
+            reply_markup=kb_vertical([
+                (t(uid, "add_btn_video_app_pass"), "show_video:app_pass"),
+                (t(uid, "btn_cancel"), "cancel"),
+            ]))
+
+
+async def old_email_finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    زر «إنهاء» بعد خطوتين (stage=pass) أو ثلاث (stage=totp):
+    تحقق من وجود الإيميل ثم إرسال الطلب للوحة الأدمن/المالك بسعر الخطوات المنجزة فقط.
+    """
+    query = update.callback_query
+    uid = query.from_user.id
+    stage = query.data.split(":", 1)[1] if ":" in query.data else ""
+    session = SESSIONS.get(uid)
+    has_totp = stage == "totp"
+    prerequisites_ok = bool(
+        session and session.email and session.has_password
+        and stage in ("pass", "totp") and (not has_totp or session.has_totp)
+    )
+    if not prerequisites_ok:
+        await _safe_edit(query, t(uid, "old_session_expired"),
+                         reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
+        return
+
+    email = session.email
+    user_data_check = get_user(uid)
+    restriction_msg = get_active_restriction_message(user_data_check)
+    if restriction_msg:
+        SESSIONS.pop(uid, None)
+        save_sessions()
+        await _safe_edit(query, restriction_msg, parse_mode=ParseMode.HTML,
+                         reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
+        return
+
+    await _safe_edit(query, t(uid, "add_checking_account"))
+
+    # تحقق من وجود الإيميل قبل وصوله للوحة الأدمن (خطوتان أو ثلاث).
+    status, _, remaining, restricted_now = await _verify_and_handle_failure(update, context, email)
+    retry_markup = kb_vertical([
+        (t(uid, "sell_new_btn_recheck"), f"old_finish:{stage}"),
+        (t(uid, "btn_cancel"), "cancel"),
+    ])
+
+    if restricted_now:
+        SESSIONS.pop(uid, None)
+        save_sessions()
+        fresh_msg = get_active_restriction_message(get_user(uid))
+        await _safe_edit(query, fresh_msg or "🚫 تم تقييدك مؤقتاً.", parse_mode=ParseMode.HTML,
+                         reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
+        return
+
+    if status == "unknown":
+        await _safe_edit(
+            query, t(uid, "sell_new_verify_unknown", email=tg_html_escape(email)),
+            parse_mode=ParseMode.HTML, reply_markup=retry_markup)
+        return
+
+    if status == "available":
+        await _safe_edit(
+            query, t(uid, "old_finish_not_found", email=tg_html_escape(email),
+                     remaining=remaining, limit=VERIFICATION_FAILURES_THRESHOLD),
+            parse_mode=ParseMode.HTML, reply_markup=retry_markup)
+        return
+
+    prices = get_tier_prices("old")
+    amount = prices["tier_2"] if has_totp else prices["tier_1"]
+    steps = 3 if has_totp else 2
+    user = update.effective_user
+    user_data = get_user(uid)
+    normalized = normalize_email(email)
+
+    pending = user_data.get("pending_requests", []) or []
+    replaced_amount = sum(float(r.get("amount", 0.0)) for r in pending
+                          if normalize_email(r.get("email", "")) == normalized)
+    pending = [r for r in pending if normalize_email(r.get("email", "")) != normalized]
+
+    pending.append({
+        "email": email,
+        "password": session.password,
+        "totp": session.totp if has_totp else "",
+        "app_pass": "",
+        "amount": amount,
+        "requested_amount": amount,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "has_totp": has_totp,
+        "has_app_pass": False,
+        "account_type": "old",
+        "user_name": user.full_name or "unknown",
+        "user_username": user.username or "none",
+        "rejected_by_admins": [],
+        "email_existence_verified": True,
+    })
+    user_data["pending_requests"] = pending
+    user_data["pending_balance"] = clamp_money(
+        float(user_data.get("pending_balance", 0.0)) - replaced_amount + amount)
+    add_transaction(user_data, "hold", amount,
+                    f"old email request ({steps} steps)", email)
+    mark_user_sold(user_data)
+    save_user(uid, user_data)
+
+    SESSIONS.pop(uid, None)
+    save_sessions()
+    context.user_data.pop("account_type", None)
+
+    await _safe_edit(
+        query, t(uid, "old_finished", email=tg_html_escape(email),
+                 amount=amount, steps=steps),
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
+    try:
+        await context.bot.send_message(
+            chat_id=OWNER_ID,
+            text=(f"📝 <b>طلب بيع إيميل قديم ({steps} خطوات)</b>\n\n"
+                  f"👤 {tg_html_escape(user.full_name or 'unknown')} "
+                  f"(@{tg_html_escape(user.username or 'none')})\n"
+                  f"🆔 <code>{uid}</code>\n"
+                  f"📧 <code>{tg_html_escape(email)}</code>\n"
+                  f"💰 <code>${amount:.2f}</code>"),
+            parse_mode=ParseMode.HTML)
+    except Exception:
+        pass
 
 
 # ==================== SELL NEW EMAIL FLOW ====================
@@ -845,7 +1007,7 @@ async def sell_new_email_complete(update: Update, context: ContextTypes.DEFAULT_
         fresh_user = get_user(uid)
         restriction_msg = get_active_restriction_message(fresh_user)
         await query.edit_message_text(
-            restriction_msg or "🚫 تم تقييدك لمدة ساعة.",
+            restriction_msg or "🚫 تم تقييدك لمدة 15 دقيقة.",
             parse_mode=ParseMode.HTML,
             reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
         return
@@ -864,7 +1026,7 @@ async def sell_new_email_complete(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text(
             f"❌ <b>لم تُنشئ الإيميل بعد!</b>\n\n"
             f"📧 <code>{tg_html_escape(creds['email'])}</code>\n\n"
-            f"⚠️ <b>الفرص المتبقية:</b> <code>{remaining}</code> من 3\n\n"
+            f"⚠️ <b>الفرص المتبقية:</b> <code>{remaining}</code> من {VERIFICATION_FAILURES_THRESHOLD}\n\n"
             f"📌 <b>الخطوات:</b>\n"
             f"1. اذهب إلى <a href=\"https://accounts.google.com/signup\">صفحة إنشاء حساب جوجل</a>\n"
             f"2. استخدم البريد والباسورد المعروضة\n"
@@ -928,7 +1090,7 @@ async def sell_new_email_finish_confirm(update: Update, context: ContextTypes.DE
         fresh_user = get_user(uid)
         restriction_msg = get_active_restriction_message(fresh_user)
         await query.edit_message_text(
-            restriction_msg or "🚫 تم تقييدك لمدة ساعة.",
+            restriction_msg or "🚫 تم تقييدك لمدة 15 دقيقة.",
             parse_mode=ParseMode.HTML,
             reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
         return
@@ -948,7 +1110,7 @@ async def sell_new_email_finish_confirm(update: Update, context: ContextTypes.DE
         await query.edit_message_text(
             f"❌ <b>لم تُنشئ الإيميل بعد!</b>\n\n"
             f"📧 <code>{tg_html_escape(creds['email'])}</code>\n\n"
-            f"⚠️ <b>الفرص المتبقية:</b> <code>{remaining}</code> من 3\n\n"
+            f"⚠️ <b>الفرص المتبقية:</b> <code>{remaining}</code> من {VERIFICATION_FAILURES_THRESHOLD}\n\n"
             f"📌 أكمل إنشاء الإيميل أولاً",
             parse_mode=ParseMode.HTML, disable_web_page_preview=True,
             reply_markup=kb_vertical([

@@ -299,6 +299,11 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("owner_recomplete:"):
         await owner_recomplete_rejected(update, context)
 
+    elif data.startswith("old_continue:"):
+        await old_email_continue(update, context)
+    elif data.startswith("old_finish:"):
+        await old_email_finish(update, context)
+
     elif data == "cancel":
         await add_account_cancel(update, context)
     elif data.startswith("complete_more:"):
