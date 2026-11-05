@@ -5,6 +5,7 @@ from telegram_bot.members import *
 from telegram_bot.owner import *
 from telegram_bot.approvals import *
 from telegram_bot.store import *
+from telegram_bot.volunteer import *
 from telegram_bot.locales import TRANSLATIONS
 
 from telegram_bot.members import restore_leave_checks
@@ -65,6 +66,10 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ═══ 3. Daily gift settings (owner) ═══
     if mode in ("daily_gift_set_emails", "daily_gift_set_reward"):
         await handle_daily_gift_input(update, context); return
+
+    # ═══ 3b. Admin volunteer conditions (owner) ═══
+    if mode == "volunteer_set_value":
+        await handle_volunteer_input(update, context); return
 
     # ═══ 4. Store flow (buy_flow / legacy) ═══
     if context.user_data.get("buy_flow"):
@@ -356,6 +361,22 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await daily_gift_set_emails(update, context)
     elif data == "daily_gift_set_reward":
         await daily_gift_set_reward(update, context)
+    elif data == "volunteer_menu":
+        await volunteer_menu(update, context)
+    elif data == "volunteer_benefits":
+        await volunteer_benefits(update, context)
+    elif data == "volunteer_request":
+        await volunteer_request(update, context)
+    elif data.startswith("volunteer_approve:"):
+        await volunteer_approve(update, context)
+    elif data.startswith("volunteer_reject:"):
+        await volunteer_reject(update, context)
+    elif data == "volunteer_pending_list":
+        await volunteer_pending_list(update, context)
+    elif data == "volunteer_settings":
+        await volunteer_settings(update, context)
+    elif data.startswith("volunteer_set:"):
+        await volunteer_set_start(update, context)
     elif data == "contest_menu":
         await contest_menu(update, context)
     elif data == "contest_create_start":
@@ -688,6 +709,7 @@ async def owner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = [maintenance_toggle_button(),
                ("🔗 رابط الدعم", "support_link_settings"),
                ("👥 الإدارية", "admin_management"),
+               ("🙋 التطوع للأدمن", "volunteer_settings"),
                ("🔑 إدارة APIs", "apis_menu"),
                ("🚫 إدارة الحظر", "bans_menu"),
                ("💰 أسعار المستويات", "set_tier_prices"),

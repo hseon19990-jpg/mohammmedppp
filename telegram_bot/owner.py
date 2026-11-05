@@ -778,6 +778,7 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         maintenance_toggle_button(),
         ("🔗 رابط الدعم", "support_link_settings"),
         ("👥 الإدارية", "admin_management"),
+        ("🙋 التطوع للأدمن", "volunteer_settings"),
         ("🔑 إدارة APIs", "apis_menu"),
         ("🚫 إدارة الحظر", "bans_menu"),
         ("💰 أسعار المستويات", "set_tier_prices"),
