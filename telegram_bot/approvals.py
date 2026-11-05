@@ -164,6 +164,8 @@ async def admin_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except (IndexError, ValueError):
         page = 0
     items = _collect_admin_requests()
+    # الإيميل الذي رفضه هذا الأدمن يختفي عنده ويبقى عند بقية الأدمنية
+    items = [r for r in items if not admin_already_rejected(r, uid)]
     if not items:
         await query.edit_message_text(t(uid, "appr_empty"),
                                       reply_markup=kb_single(t(uid, "admin_btn_settings"), "admin_settings"))
@@ -209,6 +211,10 @@ async def admin_request_detail(update: Update, context: ContextTypes.DEFAULT_TYP
                                       reply_markup=kb_single(t(uid, "appr_btn_requests"), "admin_requests:0"))
         return
     index, request = match
+    if admin_already_rejected(request, uid):
+        await query.edit_message_text(t(uid, "appr_not_found"),
+                                      reply_markup=kb_single(t(uid, "appr_btn_requests"), "admin_requests:0"))
+        return
     email = request.get("email", "")
     has_totp = request.get("has_totp", False)
     has_app_pass = request.get("has_app_pass", False)
@@ -2184,4 +2190,287 @@ async def export_unextracted(update: Update, context: ContextTypes.DEFAULT_TYPE,
     type_name = t(uid, "accounts_type_old") if acc_type == "old" else t(uid, "accounts_type_new")
     await send_accounts_export(context, unextracted, f"unextracted_{acc_type}.txt", type_name)
     for target_uid, encrypted_data in users.items():
-        dat
+        data = decrypt_user_data(encrypted_data)
+        changed = False
+        for acc in data.get("approved_accounts", []):
+            if not acc.get("extracted", False):
+                atype = acc.get("account_type", "old")
+                if acc_type == "all" or atype == acc_type:
+                    acc["extracted"] = True
+                    changed = True
+        if changed:
+            save_user(int(target_uid), data)
+    await query.edit_message_text(t(uid, "accounts_export_success", count=len(unextracted)),
+                                  reply_markup=kb_single(t(uid, "accounts_title_admin"), "all_accounts_section"))
+
+
+def can_reject_pending_request(actor_id: int, user_data: dict, index: int) -> bool:
+    if actor_id == OWNER_ID:
+        return True
+    if not is_admin(actor_id):
+        return False
+    pending = user_data.get("pending_requests", [])
+    return 0 <= index < len(pending)
+
+
+def rejection_list_callback(actor_id: int) -> str:
+    return "view_pending:0" if actor_id == OWNER_ID else "admin_requests:0"
+
+
+async def reject_request_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    actor_id = update.effective_user.id
+    if not is_admin_or_owner(actor_id):
+        await query.answer("🚫", show_alert=True)
+        return
+    parts = query.data.split(":")
+    target_uid = int(parts[1])
+    token = parts[2]
+    user_data = get_user(target_uid)
+    match = find_pending_request(user_data, token)
+    if match is None:
+        await query.edit_message_text(t(actor_id, "appr_not_found"),
+                                      reply_markup=kb_single(t(actor_id, "appr_btn_requests"), rejection_list_callback(actor_id)))
+        return
+    index, request = match
+    if not can_reject_pending_request(actor_id, user_data, index):
+        await query.answer("🚫", show_alert=True)
+        return
+    email = request.get("email", "")
+    request_token = account_callback_token(email)
+    display_email = tg_html_escape(email)
+    detail_callback = (
+        f"pending_detail:{target_uid}:{request_token}"
+        if actor_id == OWNER_ID
+        else f"admin_request_detail:{target_uid}:{request_token}"
+    )
+    context.user_data["reject_uid"] = target_uid
+    context.user_data["reject_index"] = index
+
+    buttons = [
+        (t(actor_id, "appr_reason_email"), f"reject_reason:email:{target_uid}:{request_token}"),
+        (t(actor_id, "appr_reason_password"), f"reject_reason:password:{target_uid}:{request_token}"),
+        (t(actor_id, "appr_reason_totp"), f"reject_reason:totp:{target_uid}:{request_token}"),
+        (t(actor_id, "appr_reason_app_pass"), f"reject_reason:app_pass:{target_uid}:{request_token}"),
+        (t(actor_id, "appr_reason_phone"), f"reject_reason:phone:{target_uid}:{request_token}"),
+        (t(actor_id, "appr_reason_other"), f"reject_reason:other:{target_uid}:{request_token}"),
+        (t(actor_id, "appr_btn_back_detail"), detail_callback),
+    ]
+    await query.edit_message_text(
+        t(actor_id, "appr_reject_reason", email=display_email),
+        parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
+
+
+async def execute_reject_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """رفض بسيط - يسجل في rejected_by_admins ويكون نهائياً فقط عند 3 رفضات."""
+    query = update.callback_query
+    actor_id = update.effective_user.id
+    try:
+        if not is_admin_or_owner(actor_id):
+            await query.answer("🚫", show_alert=True)
+            return
+        parts = query.data.split(":")
+        if len(parts) < 4:
+            await query.answer(t(actor_id, "msg_error"), show_alert=True)
+            return
+        reason_type = parts[1]
+        target_uid = int(parts[2])
+        token = parts[3]
+
+        user_data = get_user(target_uid)
+        match = find_pending_request(user_data, token)
+        if match is None:
+            await _safe_edit(query, t(actor_id, "appr_not_found"),
+                             reply_markup=kb_single(t(actor_id, "appr_btn_requests"), rejection_list_callback(actor_id)))
+            return
+        index, request = match
+        if not can_reject_pending_request(actor_id, user_data, index):
+            await query.answer("🚫", show_alert=True)
+            return
+
+        email = request.get("email", "")
+        request_token = account_callback_token(email)
+        display_email = tg_html_escape(email)
+        detail_callback = (
+            f"pending_detail:{target_uid}:{request_token}"
+            if actor_id == OWNER_ID
+            else f"admin_request_detail:{target_uid}:{request_token}"
+        )
+
+        if reason_type == "other":
+            context.user_data["reject_uid"] = target_uid
+            context.user_data["reject_index"] = index
+            context.user_data["reject_reason"] = "other"
+            context.user_data["step"] = "reject_reason_text"
+            await _safe_edit(
+                query,
+                t(actor_id, "appr_write_reason", email=display_email),
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb_single(t(actor_id, "btn_cancel"), detail_callback))
+            return
+
+        # ═══ NEW: تسجيل نشاط الأدمن ═══
+        record_admin_activity(actor_id, "reject")
+        await _apply_admin_rejection(
+            update, context, actor_id, target_uid, index, request,
+            reason_type, REJECT_REASON_MESSAGES.get(reason_type, "❌ تم الرفض"),
+            is_custom=False)
+
+    except Exception:
+        logger.exception("execute_reject_reason failed")
+        try:
+            await query.answer(t(actor_id, "msg_error"), show_alert=True)
+        except Exception:
+            pass
+
+
+async def handle_reject_reason_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    actor_id = update.effective_user.id
+    target_uid = context.user_data.get("reject_uid")
+    index = context.user_data.get("reject_index")
+    text = update.message.text.strip()
+    if not target_uid or index is None:
+        await update.message.reply_text(t(actor_id, "msg_error"))
+        return
+    user_data = get_user(target_uid)
+    pending = user_data.get("pending_requests", [])
+    if not can_reject_pending_request(actor_id, user_data, index):
+        await update.message.reply_text("🚫")
+        return
+    if index >= len(pending):
+        await update.message.reply_text(t(actor_id, "appr_not_found"))
+        return
+    request = pending[index]
+    record_admin_activity(actor_id, "reject")
+    for key in ("reject_uid", "reject_index", "reject_reason", "step"):
+        context.user_data.pop(key, None)
+    await _apply_admin_rejection(
+        update, context, actor_id, target_uid, index, request,
+        "other", text, is_custom=True)
+
+
+async def _apply_admin_rejection(update, context, actor_id, target_uid, index,
+                                  request, reason_type, reason_text, is_custom=False):
+    """تطبق رفض الأدمن مع نظام متعدد المشرفين (3 رفضات = نهائي)."""
+    email = request.get("email", "")
+    request_token = account_callback_token(email)
+    display_email = tg_html_escape(email)
+    user_data = get_user(target_uid)
+    pending = user_data.get("pending_requests", [])
+    if index >= len(pending):
+        target_msg = update.message if not update.callback_query else update.callback_query.message
+        await target_msg.reply_text(t(actor_id, "appr_not_found"))
+        return
+
+    actor = update.effective_user
+    rejected_by_admins = request.get("rejected_by_admins", [])
+    if not isinstance(rejected_by_admins, list):
+        rejected_by_admins = []
+    # استبدال تسجيل سابق لنفس الأدمن (تحديث السبب)
+    rejected_by_admins = [r for r in rejected_by_admins
+                          if int(r.get("admin_id", 0)) != actor_id]
+    rejected_by_admins.append({
+        "admin_id": actor_id,
+        "admin_name": actor.full_name or "Unknown",
+        "admin_username": actor.username or "",
+        "reason": reason_type,
+        "reason_text": reason_text,
+        "rejected_at": datetime.now(timezone.utc).isoformat(),
+    })
+    request["rejected_by_admins"] = rejected_by_admins
+    pending[index] = request
+    user_data["pending_requests"] = pending
+
+    count = len(rejected_by_admins)
+    is_final = count >= REJECTIONS_REQUIRED_FOR_FINAL
+
+    if is_final:
+        # ═══ الرفض نهائي ═══
+        pending.pop(index)
+        user_data["pending_requests"] = pending
+        move_request_to_rejected(user_data, request, reason_type,
+                                  reason_text if is_custom else "")
+        ban_result = register_rejection_and_maybe_ban(user_data)
+        if user_data.get("rejected_requests"):
+            user_data["rejected_requests"][-1]["rejected_by"] = actor_id
+            user_data["rejected_requests"][-1]["rejected_by_name"] = actor.full_name or "Unknown"
+            user_data["rejected_requests"][-1]["rejected_by_username"] = actor.username or ""
+            user_data["rejected_requests"][-1]["rejected_at"] = datetime.now(timezone.utc).isoformat()
+            user_data["rejected_requests"][-1]["rejected_by_admins"] = rejected_by_admins
+        save_user(target_uid, user_data)
+
+        # إشعار العضو + فيديو السبب
+        config = load_config()
+        video_key = REJECT_REASON_VIDEO_KEY.get(reason_type)
+        video_path = config.get(video_key) if video_key else None
+        if video_path and Path(video_path).exists():
+            try:
+                await context.bot.send_video(
+                    chat_id=target_uid, video=open(video_path, "rb"),
+                    caption=t(target_uid, "member_rejected_video", reason=reason_text),
+                    parse_mode=ParseMode.MARKDOWN, supports_streaming=True)
+            except Exception:
+                logger.exception("Failed to send rejection video")
+        ban_notice = ""
+        if ban_result:
+            _, duration_text = ban_result
+            ban_notice = t(target_uid, "appr_ban_notice", duration=duration_text)
+        try:
+            await context.bot.send_message(
+                chat_id=target_uid,
+                text=t(target_uid, "member_rejected_msg", reason=reason_text,
+                       email=email, ban=ban_notice),
+                parse_mode=ParseMode.MARKDOWN)
+        except Exception:
+            logger.exception("Failed to notify rejected user")
+
+        success_text = (f"✅ <b>تم الرفض النهائي</b> (3/3)\n\n"
+                        f"📧 <code>{display_email}</code>\n"
+                        f"📝 السبب: {REJECT_REASON_LABELS.get(reason_type, reason_type)}")
+        if ban_result:
+            success_text += t(actor_id, "appr_success_reject_ban", duration=ban_result[1])
+
+        target_msg = update.callback_query if update.callback_query else None
+        if target_msg:
+            await _safe_edit(query=target_msg, text=success_text,
+                             parse_mode=ParseMode.HTML,
+                             reply_markup=kb_single(t(actor_id, "appr_btn_requests"),
+                                                    rejection_list_callback(actor_id)))
+        else:
+            await update.message.reply_text(success_text, parse_mode=ParseMode.HTML,
+                                             reply_markup=kb_single(t(actor_id, "appr_btn_requests"),
+                                                                    rejection_list_callback(actor_id)))
+        return
+
+    # ═══ ليس نهائياً - يبقى في pending ═══
+    save_user(target_uid, user_data)
+    remaining = REJECTIONS_REQUIRED_FOR_FINAL - count
+    success_text = (f"⚠️ <b>تم تسجيل رفضك ({count}/{REJECTIONS_REQUIRED_FOR_FINAL})</b>\n\n"
+                    f"📧 <code>{display_email}</code>\n"
+                    f"📝 السبب: {REJECT_REASON_LABELS.get(reason_type, reason_type)}\n\n"
+                    f"📌 <i>يحتاج {remaining} رفض إضافي من مشرفين آخرين ليصبح نهائياً.</i>\n"
+                    f"<i>الإيميل الآن متاح لمشرف آخر للقبول أو الرفض.</i>")
+    detail_callback = (
+        f"pending_detail:{target_uid}:{request_token}"
+        if actor_id == OWNER_ID
+        else f"admin_request_detail:{target_uid}:{request_token}"
+    )
+    target_msg = update.callback_query if update.callback_query else None
+    if target_msg:
+        await _safe_edit(query=target_msg, text=success_text,
+                         parse_mode=ParseMode.HTML,
+                         reply_markup=kb_vertical([
+                             (t(actor_id, "appr_btn_back_detail"), detail_callback),
+                             (t(actor_id, "appr_btn_requests"),
+                              rejection_list_callback(actor_id)),
+                         ]))
+    else:
+        await update.message.reply_text(success_text, parse_mode=ParseMode.HTML,
+                                         reply_markup=kb_vertical([
+                                             (t(actor_id, "appr_btn_back_detail"), detail_callback),
+                                             (t(actor_id, "appr_btn_requests"),
+                                              rejection_list_callback(actor_id)),
+                                         ]))
+
+
+__all__ = [name for name in globals() if not name.startswith("__")]
