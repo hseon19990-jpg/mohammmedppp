@@ -2265,4 +2265,319 @@ async def store_edit_service(update: Update, context: ContextTypes.DEFAULT_TYPE)
     buttons = [(f"✏️ {s['name']} — ${float(s['price']):.2f}",
                 f"service_detail:{cat_id}:{s['id']}") for s in services]
     buttons.append(("🔙 الفئة", f"store_category:{cat_id}"))
-    await query.edit_message_text("✏️ *اختر الخدمة:*
+    await query.edit_message_text("✏️ *اختر الخدمة:*", parse_mode=ParseMode.MARKDOWN,
+                                  reply_markup=kb_vertical(buttons))
+
+
+async def store_delete_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫", show_alert=True)
+        return
+    cat_id = query.data.split(":", 1)[1]
+    config = load_config()
+    category = next((c for c in config.get("store_categories", []) if c["id"] == cat_id), None)
+    if not category:
+        await query.edit_message_text("⚠️ الفئة غير موجودة.")
+        return
+    services = category.get("services", [])
+    if not services:
+        await query.edit_message_text("📭 لا توجد خدمات.",
+                                      reply_markup=kb_single("🔙 الفئة", f"store_category:{cat_id}"))
+        return
+    buttons = [(f"❌ {s['name']} — ${float(s['price']):.2f}",
+                f"store_delete_service_confirm:{cat_id}:{s['id']}") for s in services]
+    buttons.append(("🔙 الفئة", f"store_category:{cat_id}"))
+    await query.edit_message_text("🗑️ *حذف خدمة*", parse_mode=ParseMode.MARKDOWN,
+                                  reply_markup=kb_vertical(buttons))
+
+
+async def store_delete_service_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫", show_alert=True)
+        return
+    parts = query.data.split(":")
+    cat_id = parts[1]
+    service_id = parts[2]
+    config = load_config()
+    service = None
+    for cat in config.get("store_categories", []):
+        if cat["id"] == cat_id:
+            for s in cat["services"]:
+                if s["id"] == service_id:
+                    service = s
+                    break
+            break
+    if not service:
+        await query.answer("⚠️ الخدمة غير موجودة.", show_alert=True)
+        return
+    await query.edit_message_text(
+        f"⚠️ <b>تأكيد حذف الخدمة</b>\n\n"
+        f"🛒 الاسم: {html.escape(service['name'])}\n\n"
+        f"سيتم الحذف نهائياً — لا يمكن التراجع.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_vertical([
+            ("✅ نعم، احذف", f"delete_service:{cat_id}:{service_id}"),
+            ("❌ إلغاء", f"service_detail:{cat_id}:{service_id}"),
+        ]))
+
+
+async def delete_service_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫", show_alert=True)
+        return
+    parts = query.data.split(":")
+    cat_id = parts[1]
+    service_id = parts[2]
+    config = load_config()
+    for cat in config.get("store_categories", []):
+        if cat["id"] == cat_id:
+            cat["services"] = [s for s in cat["services"] if s["id"] != service_id]
+            break
+    save_config(config)
+    await query.answer("✅ تم الحذف.")
+    await query.edit_message_text("✅ تم حذف الخدمة.",
+                                  reply_markup=kb_single("🔙 الفئة", f"store_category:{cat_id}"))
+
+
+async def service_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫", show_alert=True)
+        return
+    parts = query.data.split(":")
+    if len(parts) < 3:
+        await query.answer("⚠️", show_alert=True)
+        return
+    cat_id = parts[1]
+    service_id = parts[2]
+    config = load_config()
+    service = None
+    for cat in config.get("store_categories", []):
+        if cat["id"] == cat_id:
+            for s in cat["services"]:
+                if s["id"] == service_id:
+                    service = s
+                    break
+            break
+    if not service:
+        await query.answer("⚠️ الخدمة غير موجودة.", show_alert=True)
+        return
+    types = service.get("message_types") or []
+    types_str = " + ".join(MESSAGE_TYPE_LABELS[t][1] for t in types if t in MESSAGE_TYPE_LABELS) or "—"
+    msg = (f"🛒 *تفاصيل الخدمة*\n\n"
+           f"📝 الاسم: {html.escape(service['name'])}\n"
+           f"💰 السعر: ${float(service['price']):.2f}\n"
+           f"📋 المعلومات المطلوبة: {types_str}\n")
+    mn = service.get("min_qty")
+    mx = service.get("max_qty")
+    if mn is None and mx is None:
+        msg += "🔢 الكمية: 🔒 ثابتة = 1 (لا يظهر حقل العدد)\n"
+    else:
+        parts_qty = []
+        if mn is not None:
+            parts_qty.append(f"أدنى: {int(mn)}")
+        if mx is not None:
+            parts_qty.append(f"أعلى: {int(mx)}")
+        msg += "🔢 الكمية: " + " | ".join(parts_qty) + "\n"
+    msg += f"\n📝 رسالة الطلب:\n<code>{html.escape(service.get('message', ''))}</code>"
+
+    buttons = [
+        ("✏️ تعديل الاسم", f"store_edit_field:name:{cat_id}:{service_id}"),
+        ("💰 تعديل السعر", f"store_edit_field:price:{cat_id}:{service_id}"),
+        ("📋 تعديل المعلومات المطلوبة", f"service_edit_types:{cat_id}:{service_id}"),
+        ("🔢 تعديل الحد الأدنى", f"store_edit_field:qty_min:{cat_id}:{service_id}"),
+        ("🔢 تعديل الحد الأعلى", f"store_edit_field:qty_max:{cat_id}:{service_id}"),
+        ("📝 تعديل رسالة الطلب", f"store_edit_field:message:{cat_id}:{service_id}"),
+        ("🗑️ حذف الخدمة", f"store_delete_service_confirm:{cat_id}:{service_id}"),
+        ("🔙 الفئة", f"store_category:{cat_id}"),
+    ]
+    await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN,
+                                  reply_markup=kb_vertical(buttons))
+
+
+async def store_edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫", show_alert=True)
+        return
+    parts = query.data.split(":")
+    if len(parts) < 4:
+        await query.answer("⚠️", show_alert=True)
+        return
+    field = parts[1]
+    cat_id = parts[2]
+    service_id = parts[3]
+    config = load_config()
+    service = None
+    for cat in config.get("store_categories", []):
+        if cat["id"] != cat_id:
+            continue
+        for s in cat["services"]:
+            if s["id"] == service_id:
+                service = s
+                break
+        break
+    if not service:
+        await query.edit_message_text("⚠️ الخدمة غير موجودة.",
+                                      reply_markup=kb_single("🔙 الفئة", f"store_category:{cat_id}"))
+        return
+
+    context.user_data["store_action"] = f"edit_service_{field}"
+    context.user_data["edit_service_cat"] = cat_id
+    context.user_data["edit_service_id"] = service_id
+    field_labels = {"name": "الاسم الجديد", "price": "السعر الجديد",
+                    "message": "الرسالة الجديدة", "qty_min": "الحد الأدنى الجديد",
+                    "qty_max": "الحد الأعلى الجديد"}
+    extra_hint = ""
+    if field == "qty_min":
+        extra_hint = "\n\n⚠️ <i>أرسل 'تخطي' لجعل الكمية ثابتة = 1 (مع إلغاء الحد الأعلى أيضاً)</i>"
+    elif field == "qty_max":
+        extra_hint = "\n\n⚠️ <i>أرسل 'تخطي' لإلغاء السقف الأعلى</i>"
+    await query.edit_message_text(
+        f"✏️ *تعديل {field_labels.get(field, field)}*\n\n"
+        f"للخدمة: `{service['name']}`\n\n"
+        f"📌 أرسل القيمة الجديدة:{extra_hint}\n\n"
+        f"<i>أو 'إلغاء'</i>",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_single("🔙 إلغاء", f"service_detail:{cat_id}:{service_id}"))
+
+
+async def service_edit_types(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫", show_alert=True)
+        return
+    parts = query.data.split(":")
+    cat_id = parts[1]
+    service_id = parts[2]
+    config = load_config()
+    service = None
+    for cat in config.get("store_categories", []):
+        if cat["id"] == cat_id:
+            for s in cat["services"]:
+                if s["id"] == service_id:
+                    service = s
+                    break
+            break
+    if not service:
+        await query.answer("⚠️ الخدمة غير موجودة.", show_alert=True)
+        return
+    context.user_data["edit_types_cat"] = cat_id
+    context.user_data["edit_types_service"] = service_id
+    context.user_data["edit_types_selected"] = list(service.get("message_types") or [])
+    await query.edit_message_text(
+        "📋 *تعديل أنواع المعلومات المطلوبة*\n\n"
+        "<i>اضغط لتبديل التحديد ثم اضغط متابعة</i>",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=_service_edit_types_keyboard(context.user_data["edit_types_selected"]))
+
+
+def _service_edit_types_keyboard(selected: list) -> InlineKeyboardMarkup:
+    rows = []
+    for key, (label, _) in MESSAGE_TYPE_LABELS.items():
+        mark = "✅ " if key in selected else "☐ "
+        rows.append([InlineKeyboardButton(f"{mark}{label}", callback_data=f"service_edit_toggle:{key}")])
+    rows.append([InlineKeyboardButton("💾 حفظ", callback_data="service_edit_types_save")])
+    rows.append([InlineKeyboardButton("❌ إلغاء", callback_data="store_section")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def service_edit_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫", show_alert=True)
+        return
+    try:
+        key = query.data.split(":", 1)[1]
+    except (IndexError, ValueError):
+        await query.answer("⚠️", show_alert=True)
+        return
+    if key not in MESSAGE_TYPE_LABELS:
+        await query.answer("⚠️", show_alert=True)
+        return
+    selected = list(context.user_data.get("edit_types_selected") or [])
+    if key in selected:
+        selected.remove(key)
+    else:
+        selected.append(key)
+    context.user_data["edit_types_selected"] = selected
+    await query.answer()
+    await query.edit_message_text(
+        "📋 *تعديل أنواع المعلومات المطلوبة*",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=_service_edit_types_keyboard(selected))
+
+
+async def service_edit_types_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫", show_alert=True)
+        return
+    selected = list(context.user_data.get("edit_types_selected") or [])
+    if not selected:
+        await query.answer("⚠️ اختر نوعاً واحداً على الأقل.", show_alert=True)
+        return
+    cat_id = context.user_data.get("edit_types_cat")
+    service_id = context.user_data.get("edit_types_service")
+    config = load_config()
+    updated = False
+    for cat in config.get("store_categories", []):
+        if cat["id"] != cat_id:
+            continue
+        for s in cat["services"]:
+            if s["id"] == service_id:
+                s["message_types"] = selected
+                updated = True
+                break
+        break
+    if updated:
+        save_config(config)
+        context.user_data.pop("edit_types_cat", None)
+        context.user_data.pop("edit_types_service", None)
+        context.user_data.pop("edit_types_selected", None)
+        await query.answer("✅ تم الحفظ.")
+        await query.edit_message_text(
+            "✅ تم تحديث أنواع المعلومات.",
+            reply_markup=kb_single("🔙 تفاصيل الخدمة", f"service_detail:{cat_id}:{service_id}"))
+    else:
+        await query.answer("⚠️ لم يتم الحفظ.", show_alert=True)
+
+
+# ==================== REFERRAL HANDLER ====================
+async def handle_referral(update: Update, context: ContextTypes.DEFAULT_TYPE, referral_code: str):
+    user_id = update.effective_user.id
+    if context.user_data.get("my_referral_code") == referral_code:
+        await update.message.reply_text("⚠️ لا يمكنك استخدام رابطك!")
+        return
+    user_data = get_user(user_id)
+    if user_data.get("referred_by"):
+        await update.message.reply_text("ℹ️ أنت مشترك بالفعل.")
+        return
+    users = load_json(USERS_DB)
+    referrer_id = None
+    for uid, encrypted_data in users.items():
+        data = decrypt_user_data(encrypted_data)
+        if data.get("referral_code") == referral_code:
+            referrer_id = int(uid)
+            break
+    if not referrer_id:
+        await update.message.reply_text("❌ رابط غير صالح.")
+        return
+    user_data["referred_by"] = referrer_id
+    save_user(user_id, user_data)
+    await update.message.reply_text(
+        f"✅ *تم تفعيل الإحالة!*\n\n👤 بواسطة: {referrer_id}\nاستخدم /start للبدء.",
+        parse_mode=ParseMode.MARKDOWN)
+    try:
+        await context.bot.send_message(
+            chat_id=referrer_id,
+            text=f"🎉 *إحالة جديدة!*\n\n👤 المستخدم {user_id} انضم.",
+            parse_mode=ParseMode.MARKDOWN)
+    except Exception:
+        pass
+
+
+__all__ = [name for name in globals() if not name.startswith("__")]
