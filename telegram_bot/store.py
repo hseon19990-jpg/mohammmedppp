@@ -1860,6 +1860,8 @@ async def referral_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ==================== REFERRAL CONTEST (إحالة البوت الأول) ====================
+# مسابقة مفتوحة: جوائز مالية و/أو نصية، فائز بالترتيب أو معيَّن يدوياً، تسليم تلقائي
+# أو يدوي، وكل الإعدادات قابلة للتعديل في أي وقت أثناء المسابقة أو بعدها.
 def get_ref_contest() -> dict:
     contest = load_config().get("ref_contest")
     return contest if isinstance(contest, dict) else {}
@@ -1879,11 +1881,17 @@ def _parse_iso(value) -> Optional[datetime]:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
+def _md(text: str) -> str:
+    for ch in ("\\", "_", "*", "`", "["):
+        text = text.replace(ch, "\\" + ch)
+    return text
+
+
 def ref_contest_ranking(contest: dict) -> List[dict]:
     """ترتيب المحيلين: الأكثر إحالات مكتملة (النوع الثاني فقط) خلال مدة المسابقة.
 
-    الإحالة تُحتسب فقط إذا كانت «paid» أي أن المُحال كان جديداً في البوتين وانضم
-    للقنوات وفعّل البوت الأول. عند التعادل يفوز من وصل لعدده أولاً.
+    تُحتسب الإحالة فقط إذا كانت «paid»: المُحال جديد في البوتين وانضم للقنوات
+    وفعّل البوت الأول. عند التعادل يفوز من وصل لعدده أولاً.
     """
     start = _parse_iso(contest.get("started_at"))
     if not start:
@@ -1904,15 +1912,81 @@ def ref_contest_ranking(contest: dict) -> List[dict]:
     return sorted(stats.values(), key=lambda e: (-e["count"], e["last"]))
 
 
+def ref_contest_winners(contest: dict) -> List[dict]:
+    """الفائزون لكل مركز له جائزة: المعيَّنون يدوياً أولاً ثم الترتيب الطبيعي."""
+    prizes = contest.get("prizes", []) or []
+    ranking = ref_contest_ranking(contest)
+    counts = {e["user_id"]: e["count"] for e in ranking}
+    min_count = int(contest.get("min_count", 0) or 0)
+    overrides = {}
+    for key, value in (contest.get("overrides") or {}).items():
+        try:
+            overrides[int(key)] = int(value)
+        except (TypeError, ValueError):
+            continue
+    pool = [e for e in ranking if e["count"] >= max(min_count, 1) and e["user_id"] not in overrides.values()]
+    winners = []
+    for rank in range(1, len(prizes) + 1):
+        if rank in overrides:
+            uid, manual = overrides[rank], True
+        elif pool:
+            uid, manual = pool.pop(0)["user_id"], False
+        else:
+            continue
+        winners.append({"rank": rank, "user_id": uid, "count": counts.get(uid, 0),
+                        "manual": manual, "prize": prizes[rank - 1]})
+    return winners
+
+
 def _mask_uid(uid: int) -> str:
     text = str(uid)
     return f"{text[:2]}***{text[-3:]}" if len(text) > 5 else text
 
 
-def _fmt_prizes(prizes: List[float]) -> str:
+def _prize_label(prize: dict) -> str:
+    parts = []
+    if float(prize.get("money", 0) or 0) > 0:
+        parts.append(f"${float(prize['money']):.2f}")
+    if prize.get("text"):
+        parts.append(_md(str(prize["text"])))
+    return " + ".join(parts) or "—"
+
+
+def _fmt_prizes(prizes: List[dict]) -> str:
     medals = ["🥇", "🥈", "🥉"]
-    return "\n".join(f"{medals[i] if i < 3 else f'{i + 1}.'} المركز {i + 1}: ${amount:.2f}"
-                     for i, amount in enumerate(prizes))
+    if not prizes:
+        return "لا توجد جوائز محددة بعد."
+    return "\n".join(f"{medals[i] if i < 3 else f'{i + 1}.'} المركز {i + 1}: {_prize_label(p)}"
+                     for i, p in enumerate(prizes))
+
+
+def parse_prizes_input(text: str) -> List[dict]:
+    """كل سطر = مركز. رقم فقط = مبلغ بالدولار، نص = جائزة نصية، وبينهما + = الاثنان.
+
+    مثال: «10» أو «5$» أو «اشتراك شهر» أو «10 + اشتراك شهر».
+    """
+    prizes = []
+    raw_lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    if len(raw_lines) == 1 and re.fullmatch(r"[\d.\s$,]+", raw_lines[0]):
+        raw_lines = raw_lines[0].replace(",", ".").replace("$", "").split()  # «10 5 2»
+    for line in raw_lines[:20]:
+        money, texts = 0.0, []
+        for part in line.split("+"):
+            part = part.strip()
+            if not part:
+                continue
+            number = part.replace("$", "").replace(",", ".").strip()
+            try:
+                value = float(number)
+                if 0 < value <= 100000:
+                    money += value
+                    continue
+            except ValueError:
+                pass
+            texts.append(part[:200])
+        if money > 0 or texts:
+            prizes.append({"money": round(money, 2), "text": " + ".join(texts)})
+    return prizes
 
 
 def _contest_end_text(contest: dict) -> str:
@@ -1923,7 +1997,59 @@ def _contest_end_text(contest: dict) -> str:
     target = int(contest.get("target_count", 0) or 0)
     if target:
         parts.append(f"🎯 أو عند وصول أحدهم إلى {target} إحالة")
-    return "\n".join(parts) or "تنتهي بقرار المالك"
+    return "\n".join(parts) or "🔓 مفتوحة بلا موعد انتهاء (تنتهي بقرار المالك)"
+
+
+def _contest_summary(contest: dict) -> str:
+    lines = []
+    if contest.get("title"):
+        lines.append(f"*{_md(contest['title'])}*")
+    lines.append("🟢 نشطة" if contest.get("active") else "🔴 منتهية/متوقفة")
+    lines += ["", _fmt_prizes(contest.get("prizes", [])), "", _contest_end_text(contest)]
+    min_count = int(contest.get("min_count", 0) or 0)
+    if min_count:
+        lines.append(f"🔢 الحد الأدنى للفوز: {min_count} إحالة")
+    lines.append(f"🤖 التسليم التلقائي عند الانتهاء: {'مفعّل' if contest.get('auto_deliver') else 'متوقف (يدوي)'}")
+    if contest.get("description"):
+        lines += ["", _md(contest["description"])]
+    return "\n".join(lines)
+
+
+async def _deliver_rank(context: ContextTypes.DEFAULT_TYPE, rank: int) -> bool:
+    """يسلّم جائزة مركز واحد مرة واحدة: المال لرصيد الفائز، والنص بإشعار له وللمالك."""
+    contest = get_ref_contest()
+    paid = contest.setdefault("paid", {})
+    winner = next((w for w in ref_contest_winners(contest) if w["rank"] == rank), None)
+    if not winner or str(rank) in paid:
+        return False
+    prize = winner["prize"]
+    money = clamp_money(prize.get("money", 0))
+    paid[str(rank)] = {"user_id": winner["user_id"], "prize": prize,
+                       "at": datetime.now(timezone.utc).isoformat()}
+    save_ref_contest(contest)  # نسجّل أولاً لمنع التسليم المزدوج
+    if money > 0:
+        user = get_user(winner["user_id"])
+        user["balance"] = clamp_money(float(user.get("balance", 0.0)) + money)
+        user["total_credited_balance"] = clamp_money(float(user.get("total_credited_balance", 0.0) or 0.0) + money)
+        add_transaction(user, "credit", money, f"جائزة مسابقة الإحالات - المركز {rank}")
+        save_user(winner["user_id"], user)
+    message = f"🎉 *مبروك!* فزت بالمركز {rank} في مسابقة الإحالات.\n🎁 جائزتك: {_prize_label(prize)}"
+    if money > 0:
+        message += "\n💰 أُضيف المبلغ إلى رصيدك."
+    if prize.get("text"):
+        message += "\n📩 سيتواصل معك المالك لتسليم الجائزة."
+    try:
+        await context.bot.send_message(winner["user_id"], message, parse_mode=ParseMode.MARKDOWN)
+    except Exception:
+        pass
+    if prize.get("text"):
+        try:
+            await context.bot.send_message(
+                OWNER_ID, f"🎁 جائزة نصية تحتاج تسليماً يدوياً\nالمركز {rank} — المستخدم `{winner['user_id']}`\n{_prize_label(prize)}",
+                parse_mode=ParseMode.MARKDOWN)
+        except Exception:
+            pass
+    return True
 
 
 async def close_ref_contest(context: ContextTypes.DEFAULT_TYPE, reason: str) -> None:
@@ -1933,26 +2059,30 @@ async def close_ref_contest(context: ContextTypes.DEFAULT_TYPE, reason: str) -> 
     contest["active"] = False
     contest["ended_at"] = datetime.now(timezone.utc).isoformat()
     contest["end_reason"] = reason
-    ranking = ref_contest_ranking(contest)
-    contest["final_ranking"] = [{"user_id": e["user_id"], "count": e["count"]} for e in ranking[:30]]
-    contest.setdefault("paid", {})
     save_ref_contest(contest)
-    prizes = contest.get("prizes", [])
+    winners = ref_contest_winners(contest)
     lines = [f"🏁 *انتهت مسابقة الإحالات* ({reason})\n"]
-    for i, entry in enumerate(ranking[:len(prizes)]):
-        lines.append(f"{i + 1}. `{entry['user_id']}` — {entry['count']} إحالة — ${prizes[i]:.2f}")
-    if not ranking:
-        lines.append("لا توجد إحالات مكتملة.")
-    lines.append("\n💵 الدفع يدوي: افتح مسابقة الإحالات ثم «تسليم الجوائز».")
+    for w in winners:
+        lines.append(f"{w['rank']}. `{w['user_id']}` — {w['count']} إحالة — {_prize_label(w['prize'])}"
+                     + (" (معيَّن)" if w["manual"] else ""))
+    if not winners:
+        lines.append("لا يوجد فائزون.")
+    delivered = False
+    if contest.get("auto_deliver"):
+        for w in winners:
+            delivered = await _deliver_rank(context, w["rank"]) or delivered
+        lines.append("\n🤖 تم التسليم تلقائياً." if delivered else "")
+    else:
+        lines.append("\n💵 التسليم يدوي من «الترتيب والتسليم».")
     try:
         await context.bot.send_message(OWNER_ID, "\n".join(lines), parse_mode=ParseMode.MARKDOWN,
-                                       reply_markup=kb_single("🏆 تسليم الجوائز", "rc_board"))
+                                       reply_markup=kb_single("🏆 مسابقة الإحالات", "rc_menu"))
     except Exception:
         pass
 
 
 async def check_ref_contest_end(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """يغلق المسابقة عند انتهاء الوقت أو وصول أحدهم للعدد المحدد."""
+    """يغلق المسابقة عند انتهاء الوقت أو وصول أحدهم للعدد (إن حُدّدا)."""
     contest = get_ref_contest()
     if not contest or not contest.get("active"):
         return
@@ -1974,104 +2104,238 @@ async def ref_contest_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.exception("ref contest tick failed")
 
 
+def _owner_only(update: Update) -> bool:
+    return update.effective_user.id == OWNER_ID
+
+
 async def rc_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
+    if not _owner_only(update):
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
-    for key in ("rc_build", "rc_step"):
+    for key in ("rc_build", "rc_flow"):
         context.user_data.pop(key, None)
-    if context.user_data.get("mode", "").startswith("rc_"):
+    if str(context.user_data.get("mode", "")).startswith("rc_"):
         context.user_data.pop("mode", None)
     contest = get_ref_contest()
-    if contest.get("active"):
-        text = ("🏆 *مسابقة الإحالات (إحالة البوت الأول)*\n\n🟢 نشطة\n"
-                f"{_fmt_prizes(contest.get('prizes', []))}\n\n{_contest_end_text(contest)}")
-        buttons = [("📊 الترتيب الحالي", "rc_board"), ("🛑 إنهاء المسابقة الآن", "rc_stop")]
-    else:
-        text = "🏆 *مسابقة الإحالات (إحالة البوت الأول)*\n\n"
-        text += ("🔴 انتهت — يمكنك تسليم الجوائز من الترتيب." if contest else "📭 لا توجد مسابقة.")
-        buttons = [("🆕 إنشاء مسابقة جديدة", "rc_create")]
-        if contest:
-            buttons.insert(0, ("📊 الترتيب والتسليم", "rc_board"))
+    if not contest:
+        await query.edit_message_text(
+            "🏆 *مسابقة الإحالات (إحالة البوت الأول)*\n\n📭 لا توجد مسابقة.",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=kb_vertical([("🆕 إنشاء مسابقة جديدة", "rc_create"),
+                                      ("🔙 إعدادات الإحالة", "referral_settings")]))
+        return
+    active = bool(contest.get("active"))
+    buttons = [("📊 الترتيب والفائزون والتسليم", "rc_board"),
+               ("🎁 تعديل الجوائز", "rc_edit:prizes"),
+               ("➕ تمديد المسابقة", "rc_edit:extend"),
+               ("⏰ تعديل المدة", "rc_edit:days"),
+               ("🎯 تعديل عدد الإحالات المنهي", "rc_edit:target"),
+               ("🔢 الحد الأدنى للفوز", "rc_edit:min"),
+               ("📝 العنوان والوصف", "rc_edit:desc"),
+               (f"🤖 التسليم التلقائي: {'مفعّل ✅' if contest.get('auto_deliver') else 'متوقف ❌'}", "rc_toggle_auto"),
+               ("🛑 إنهاء المسابقة الآن" if active else "▶️ إعادة فتح المسابقة",
+                "rc_stop" if active else "rc_reopen")]
+    if not active:
+        buttons.append(("🆕 إنشاء مسابقة جديدة", "rc_create"))
     buttons.append(("🔙 إعدادات الإحالة", "referral_settings"))
-    await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
+    await query.edit_message_text("🏆 *مسابقة الإحالات (إحالة البوت الأول)*\n\n" + _contest_summary(contest),
+                                  parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
+
+
+PRIZES_HELP = ("أرسل الجوائز، *سطر لكل مركز*:\n"
+               "• رقم = مبلغ بالدولار: `10`\n"
+               "• نص = جائزة أخرى: `اشتراك شهر`\n"
+               "• الاثنان معاً: `10 + اشتراك شهر`\n"
+               "• مراكز مالية سريعة في سطر واحد: `10 5 2`")
 
 
 async def rc_create(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
+    if not _owner_only(update):
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
     if get_ref_contest().get("active"):
         await query.answer("أنهِ المسابقة الحالية أولاً.", show_alert=True)
         return
     context.user_data["rc_build"] = {}
+    context.user_data["rc_flow"] = "create"
     context.user_data["mode"] = "rc_prizes"
-    await query.edit_message_text(
-        "🆕 *مسابقة إحالات جديدة*\n\n*الخطوة 1:* أرسل مبلغ جائزة كل مركز بالدولار مفصولة بمسافة.\n"
-        "• جائزة للأول فقط: `10`\n• ثلاثة مراكز: `10 5 2`",
-        parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 إلغاء", "rc_menu"))
+    await query.edit_message_text("🆕 *مسابقة إحالات جديدة*\n\n*الخطوة 1/3* — " + PRIZES_HELP,
+                                  parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🔙 إلغاء", "rc_menu"))
+
+
+EDIT_PROMPTS = {
+    "prizes": "🎁 *تعديل الجوائز* — " + PRIZES_HELP,
+    "extend": "➕ أرسل عدد الأيام التي تريد *إضافتها* إلى موعد الانتهاء الحالي (يقبل كسراً مثل `0.5`). إن كانت المسابقة منتهية تُعاد فتحها.",
+    "days": "⏰ أرسل المدة بالأيام *من الآن* (يقبل كسراً مثل `0.5`)، أو `0` لجعلها مفتوحة بلا موعد انتهاء.",
+    "target": "🎯 أرسل عدد الإحالات الذي تنتهي المسابقة عند وصول أحدهم إليه، أو `0` لإلغاء هذا الشرط.",
+    "min": "🔢 أرسل الحد الأدنى للإحالات ليستحق العضو الفوز، أو `0` بلا حد أدنى.",
+    "desc": "📝 أرسل عنوان المسابقة في أول سطر، ووصفها (اختياري) في بقية الأسطر. أرسل `-` لحذفهما.",
+}
+
+
+async def rc_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not _owner_only(update):
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    field = (query.data or "").partition(":")[2]
+    if field not in EDIT_PROMPTS or not get_ref_contest():
+        await query.answer("⚠️ غير متاح.", show_alert=True)
+        return
+    context.user_data["rc_flow"] = "edit"
+    context.user_data["mode"] = {"prizes": "rc_prizes", "days": "rc_days", "extend": "rc_extend", "target": "rc_target",
+                                 "min": "rc_min", "desc": "rc_desc"}[field]
+    await query.edit_message_text(EDIT_PROMPTS[field], parse_mode=ParseMode.MARKDOWN,
+                                  reply_markup=kb_single("🔙 إلغاء", "rc_menu"))
 
 
 async def handle_rc_input(update: Update, context: ContextTypes.DEFAULT_TYPE, mode: str, text: str) -> bool:
-    if update.effective_user.id != OWNER_ID:
+    if not _owner_only(update):
         return True
-    build = context.user_data.setdefault("rc_build", {})
     cancel = kb_single("🔙 إلغاء", "rc_menu")
-    text = text.strip().replace(",", ".")
+    flow = context.user_data.get("rc_flow", "edit")
+    build = context.user_data.setdefault("rc_build", {})
+    text = (text or "").strip()
+
+    async def done(message: str):
+        context.user_data.pop("mode", None)
+        context.user_data.pop("rc_flow", None)
+        await update.message.reply_text(message, reply_markup=kb_single("🏆 مسابقة الإحالات", "rc_menu"))
+
+    if mode == "rc_assign":
+        rank = int(context.user_data.get("rc_assign_rank", 0) or 0)
+        contest = get_ref_contest()
+        if not text.lstrip("-").isdigit() or not rank or not contest:
+            await update.message.reply_text("⚠️ أرسل رقم معرّف المستخدم (أرقام فقط).", reply_markup=cancel)
+            return True
+        if str(rank) in (contest.get("paid") or {}):
+            await done("⚠️ جائزة هذا المركز سُلّمت مسبقاً ولا يمكن تغييرها.")
+            return True
+        contest.setdefault("overrides", {})[str(rank)] = int(text)
+        save_ref_contest(contest)
+        context.user_data.pop("rc_assign_rank", None)
+        await done(f"✅ عُيّن `{text}` فائزاً بالمركز {rank}.")
+        return True
+
     if mode == "rc_prizes":
-        try:
-            prizes = [round(float(part), 2) for part in text.split()]
-        except ValueError:
-            prizes = []
-        if not prizes or len(prizes) > 20 or any(p <= 0 or p > 10000 for p in prizes):
-            await update.message.reply_text("⚠️ أرسل أرقاماً موجبة مفصولة بمسافة، مثل: 10 5 2", reply_markup=cancel)
+        prizes = parse_prizes_input(text)
+        if not prizes:
+            await update.message.reply_text("⚠️ لم أفهم الجوائز. أرسل مثل: 10 5 2", reply_markup=cancel)
             return True
-        build["prizes"] = prizes
-        context.user_data["mode"] = "rc_days"
-        await update.message.reply_text(
-            "*الخطوة 2:* أرسل مدة المسابقة بالأيام (يقبل كسراً مثل `0.5`)، أو `0` بلا وقت محدد.",
-            parse_mode=ParseMode.MARKDOWN, reply_markup=cancel)
-        return True
-    if mode == "rc_days":
-        try:
-            days = float(text)
-        except ValueError:
-            days = -1
-        if days < 0 or days > 365:
-            await update.message.reply_text("⚠️ أرسل رقماً بين 0 و365.", reply_markup=cancel)
+        if flow == "create":
+            build["prizes"] = prizes
+            context.user_data["mode"] = "rc_days"
+            await update.message.reply_text(
+                "*الخطوة 2/3* — أرسل مدة المسابقة بالأيام، أو `0` لتكون مفتوحة بلا موعد انتهاء.",
+                parse_mode=ParseMode.MARKDOWN, reply_markup=cancel)
             return True
-        build["days"] = days
-        context.user_data["mode"] = "rc_target"
-        await update.message.reply_text(
-            "*الخطوة 3:* أرسل عدد الإحالات الذي تنتهي المسابقة عند وصول أحدهم إليه، أو `0` بلا عدد محدد.",
-            parse_mode=ParseMode.MARKDOWN, reply_markup=cancel)
+        contest = get_ref_contest()
+        contest["prizes"] = prizes
+        save_ref_contest(contest)
+        await done("✅ تم تحديث الجوائز.")
         return True
-    # rc_target
-    if not text.isdigit() or int(text) > 100000:
+
+    if mode == "rc_desc":
+        contest = get_ref_contest()
+        if text == "-":
+            contest["title"], contest["description"] = "", ""
+        else:
+            title, _, description = text.partition("\n")
+            contest["title"], contest["description"] = title.strip()[:100], description.strip()[:800]
+        save_ref_contest(contest)
+        await done("✅ تم التحديث.")
+        return True
+
+    number = text.replace(",", ".")
+    try:
+        value = float(number)
+    except ValueError:
+        value = -1
+    if value < 0 or value > 100000 or (mode != "rc_days" and value != int(value)):
         await update.message.reply_text("⚠️ أرسل رقماً صحيحاً (0 أو أكثر).", reply_markup=cancel)
         return True
-    now = datetime.now(timezone.utc)
-    days = float(build.get("days", 0))
-    contest = {
-        "active": True, "started_at": now.isoformat(),
-        "ends_at": (now + timedelta(days=days)).isoformat() if days > 0 else "",
-        "target_count": int(text), "prizes": build.get("prizes", []), "paid": {},
-    }
+
+    if mode == "rc_extend":
+        if value <= 0:
+            await update.message.reply_text("⚠️ أرسل عدداً أكبر من 0.", reply_markup=cancel)
+            return True
+        contest = get_ref_contest()
+        now = datetime.now(timezone.utc)
+        base = _parse_iso(contest.get("ends_at"))
+        base = base if base and base > now else now
+        contest["ends_at"] = (base + timedelta(days=value)).isoformat()
+        if not contest.get("active"):
+            contest["active"] = True
+            contest.pop("ended_at", None)
+            contest.pop("end_reason", None)
+        save_ref_contest(contest)
+        await done(f"✅ تم التمديد. تنتهي الآن: {_parse_iso(contest['ends_at']).astimezone().strftime('%Y-%m-%d %H:%M')}")
+        return True
+
+    if mode == "rc_days":
+        if flow == "create":
+            build["days"] = value
+            context.user_data["mode"] = "rc_target"
+            await update.message.reply_text(
+                "*الخطوة 3/3* — أرسل عدد الإحالات الذي تنتهي المسابقة عند وصول أحدهم إليه، أو `0` بلا عدد محدد.",
+                parse_mode=ParseMode.MARKDOWN, reply_markup=cancel)
+            return True
+        contest = get_ref_contest()
+        contest["ends_at"] = (datetime.now(timezone.utc) + timedelta(days=value)).isoformat() if value > 0 else ""
+        save_ref_contest(contest)
+        await done("✅ تم تحديث المدة." if value > 0 else "✅ أصبحت المسابقة مفتوحة بلا موعد انتهاء.")
+        return True
+
+    if mode == "rc_target":
+        if flow == "create":
+            now = datetime.now(timezone.utc)
+            days = float(build.get("days", 0))
+            old = get_ref_contest()
+            if old:
+                config = load_config()
+                history = config.get("ref_contest_history", [])
+                config["ref_contest_history"] = (history + [old])[-10:]
+                save_config(config)
+            save_ref_contest({
+                "active": True, "started_at": now.isoformat(),
+                "ends_at": (now + timedelta(days=days)).isoformat() if days > 0 else "",
+                "target_count": int(value), "min_count": 0, "auto_deliver": False,
+                "prizes": build.get("prizes", []), "paid": {}, "overrides": {},
+                "title": "", "description": "",
+            })
+            context.user_data.pop("rc_build", None)
+            await done("✅ بدأت المسابقة. يمكنك الآن تعديل أي شيء منها من القائمة (الحد الأدنى، "
+                       "التسليم التلقائي، العنوان والوصف، تعيين فائز...).\n"
+                       "يُحتسب فقط من أحاله العضو برابط البوت الأول وكان جديداً في البوتين.")
+            return True
+        contest = get_ref_contest()
+        contest["target_count"] = int(value)
+        save_ref_contest(contest)
+        await done("✅ تم التحديث.")
+        return True
+
+    contest = get_ref_contest()  # rc_min
+    contest["min_count"] = int(value)
     save_ref_contest(contest)
-    context.user_data.pop("mode", None)
-    context.user_data.pop("rc_build", None)
-    await update.message.reply_text(
-        "✅ *بدأت المسابقة*\n\n" + _fmt_prizes(contest["prizes"]) + "\n\n" + _contest_end_text(contest)
-        + "\n\nيُحتسب فقط من أحاله العضو عبر رابط البوت الأول وكان جديداً في البوتين.",
-        parse_mode=ParseMode.MARKDOWN, reply_markup=kb_single("🏆 مسابقة الإحالات", "rc_menu"))
+    await done("✅ تم تحديث الحد الأدنى.")
     return True
+
+
+async def rc_toggle_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _owner_only(update):
+        await update.callback_query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    contest = get_ref_contest()
+    contest["auto_deliver"] = not contest.get("auto_deliver")
+    save_ref_contest(contest)
+    await rc_menu(update, context)
 
 
 async def rc_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
+    if not _owner_only(update):
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
     await close_ref_contest(context, "أنهاها المالك")
@@ -2079,75 +2343,138 @@ async def rc_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await rc_menu(update, context)
 
 
-async def rc_board(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def rc_reopen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
+    if not _owner_only(update):
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
     contest = get_ref_contest()
     if not contest:
         await query.answer("لا توجد مسابقة.", show_alert=True)
         return
-    prizes = contest.get("prizes", [])
-    active = bool(contest.get("active"))
-    ranking = ref_contest_ranking(contest) if active else [
-        {"user_id": e["user_id"], "count": e["count"]} for e in contest.get("final_ranking", [])]
+    contest["active"] = True
+    contest.pop("ended_at", None)
+    contest.pop("end_reason", None)
+    ends_at = _parse_iso(contest.get("ends_at"))
+    if ends_at and ends_at <= datetime.now(timezone.utc):
+        contest["ends_at"] = ""  # الموعد القديم فات: تصبح مفتوحة
+    save_ref_contest(contest)
+    await query.answer("▶️ أُعيد فتح المسابقة")
+    await rc_menu(update, context)
+
+
+async def rc_board(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not _owner_only(update):
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    contest = get_ref_contest()
+    if not contest:
+        await query.answer("لا توجد مسابقة.", show_alert=True)
+        return
     paid = contest.get("paid", {}) or {}
-    lines = [f"📊 *ترتيب مسابقة الإحالات* ({'🟢 نشطة' if active else '🔴 منتهية'})\n"]
-    rows = []
-    for i, entry in enumerate(ranking[:max(len(prizes), 10)]):
-        prize = prizes[i] if i < len(prizes) else 0
-        done = str(i + 1) in paid
-        lines.append(f"{i + 1}. `{entry['user_id']}` — {entry['count']} إحالة"
-                     + (f" — ${prize:.2f}{' ✅ سُلّمت' if done else ''}" if prize else ""))
-        if not active and prize and not done:
-            rows.append([InlineKeyboardButton(
-                f"💵 تسليم المركز {i + 1} (${prize:.2f})", callback_data=f"rc_pay:{i + 1}")])
+    ranking = ref_contest_ranking(contest)
+    winners = ref_contest_winners(contest)
+    lines = [f"📊 *الترتيب* ({'🟢 نشطة' if contest.get('active') else '🔴 منتهية'})\n", "*🔝 المتصدرون:*"]
+    for i, entry in enumerate(ranking[:10], 1):
+        lines.append(f"{i}. `{entry['user_id']}` — {entry['count']} إحالة")
     if not ranking:
-        lines.append("لا توجد إحالات بعد.")
-    if active:
-        lines.append("\n⚠️ التسليم متاح بعد إنهاء المسابقة.")
+        lines.append("لا توجد إحالات مكتملة بعد.")
+    lines.append("\n*🏅 الفائزون:*")
+    rows = []
+    for w in winners:
+        done = str(w["rank"]) in paid
+        lines.append(f"{w['rank']}. `{w['user_id']}` — {w['count']} إحالة — {_prize_label(w['prize'])}"
+                     + (" 👤معيَّن" if w["manual"] else "") + (" ✅ سُلّمت" if done else ""))
+        if not done:
+            rows.append([InlineKeyboardButton(f"🎁 تسليم المركز {w['rank']}", callback_data=f"rc_pay:{w['rank']}")])
+    if not winners:
+        lines.append("لا يوجد فائزون بعد.")
+    if any(str(w["rank"]) not in paid for w in winners):
+        rows.append([InlineKeyboardButton("🎁 تسليم الكل", callback_data="rc_payall")])
+    rows.append([InlineKeyboardButton("👤 تعيين/تغيير فائز يدوياً", callback_data="rc_assign")])
     rows.append([InlineKeyboardButton("🔙 مسابقة الإحالات", callback_data="rc_menu")])
     await query.edit_message_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN,
                                   reply_markup=InlineKeyboardMarkup(rows))
 
 
 async def rc_pay(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """تسليم يدوي لجائزة مركز واحد: يضيف المبلغ لرصيد الفائز مرة واحدة فقط."""
     query = update.callback_query
-    if update.effective_user.id != OWNER_ID:
+    if not _owner_only(update):
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    rank_text = (query.data or "").partition(":")[2]
+    if not rank_text.isdigit() or not await _deliver_rank(context, int(rank_text)):
+        await query.answer("⚠️ غير متاح أو سُلّمت مسبقاً.", show_alert=True)
+        return
+    await query.answer("✅ تم التسليم")
+    await rc_board(update, context)
+
+
+async def rc_payall(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not _owner_only(update):
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    count = 0
+    for w in ref_contest_winners(get_ref_contest()):
+        count += 1 if await _deliver_rank(context, w["rank"]) else 0
+    await query.answer(f"✅ سُلّمت {count} جائزة")
+    await rc_board(update, context)
+
+
+async def rc_assign(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يعرض المراكز لاختيار مركز تعيّن له فائزاً، أو يلغي التعيين اليدوي."""
+    query = update.callback_query
+    if not _owner_only(update):
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
     contest = get_ref_contest()
+    prizes = contest.get("prizes", []) or []
+    if not prizes:
+        await query.answer("أضف جوائز أولاً.", show_alert=True)
+        return
+    overrides = contest.get("overrides", {}) or {}
+    paid = contest.get("paid", {}) or {}
+    rows = []
+    for rank in range(1, len(prizes) + 1):
+        if str(rank) in paid:
+            continue
+        current = overrides.get(str(rank))
+        label = f"المركز {rank}" + (f" (معيَّن: {current})" if current else "")
+        rows.append([InlineKeyboardButton(f"👤 {label}", callback_data=f"rc_assign_rank:{rank}")])
+        if current:
+            rows.append([InlineKeyboardButton(f"❌ إلغاء تعيين المركز {rank}", callback_data=f"rc_unassign:{rank}")])
+    rows.append([InlineKeyboardButton("🔙 الترتيب", callback_data="rc_board")])
+    await query.edit_message_text("👤 اختر المركز الذي تريد تعيين فائزه يدوياً (يتجاوز الترتيب):",
+                                  reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def rc_assign_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not _owner_only(update):
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
     rank_text = (query.data or "").partition(":")[2]
-    prizes = contest.get("prizes", [])
-    ranking = contest.get("final_ranking", [])
-    if contest.get("active") or not rank_text.isdigit():
-        await query.answer("⚠️ غير متاح.", show_alert=True)
+    if not rank_text.isdigit():
         return
-    rank = int(rank_text)
-    paid = contest.setdefault("paid", {})
-    if rank < 1 or rank > min(len(prizes), len(ranking)) or str(rank) in paid:
-        await query.answer("⚠️ غير متاح أو سُلّمت مسبقاً.", show_alert=True)
+    context.user_data["rc_assign_rank"] = int(rank_text)
+    context.user_data["mode"] = "rc_assign"
+    await query.edit_message_text(f"👤 أرسل رقم معرّف (ID) المستخدم الفائز بالمركز {rank_text}:",
+                                  reply_markup=kb_single("🔙 إلغاء", "rc_assign"))
+
+
+async def rc_unassign(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not _owner_only(update):
+        await query.answer("🚫 مالك فقط.", show_alert=True)
         return
-    winner_id = int(ranking[rank - 1]["user_id"])
-    amount = clamp_money(prizes[rank - 1])
-    paid[str(rank)] = {"user_id": winner_id, "amount": amount,
-                       "at": datetime.now(timezone.utc).isoformat()}
-    save_ref_contest(contest)  # نسجّل التسليم أولاً لمنع التكرار
-    winner = get_user(winner_id)
-    winner["balance"] = clamp_money(float(winner.get("balance", 0.0)) + amount)
-    winner["total_credited_balance"] = clamp_money(float(winner.get("total_credited_balance", 0.0) or 0.0) + amount)
-    add_transaction(winner, "credit", amount, f"جائزة مسابقة الإحالات - المركز {rank}")
-    save_user(winner_id, winner)
-    try:
-        await context.bot.send_message(
-            winner_id, f"🎉 *مبروك!* فزت بالمركز {rank} في مسابقة الإحالات.\n💰 أُضيف ${amount:.2f} إلى رصيدك.",
-            parse_mode=ParseMode.MARKDOWN)
-    except Exception:
-        pass
-    await query.answer("✅ تم التسليم")
-    await rc_board(update, context)
+    rank_text = (query.data or "").partition(":")[2]
+    contest = get_ref_contest()
+    if contest.get("overrides", {}).pop(rank_text, None) is not None:
+        save_ref_contest(contest)
+    await query.answer("تم إلغاء التعيين")
+    await rc_assign(update, context)
 
 
 async def rc_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2163,9 +2490,15 @@ async def rc_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ranking = ref_contest_ranking(contest)
     uid = update.effective_user.id
     mine = next(((i + 1, e["count"]) for i, e in enumerate(ranking) if e["user_id"] == uid), None)
-    lines = ["🏆 *مسابقة الإحالات*\nالأكثر إحالات عبر *رابط البوت الأول* يفوز.\n",
-             _fmt_prizes(contest.get("prizes", [])), "", _contest_end_text(contest), "",
-             "🔝 *المتصدرون:*"]
+    head = f"🏆 *{_md(contest['title'])}*" if contest.get("title") else "🏆 *مسابقة الإحالات*"
+    lines = [head, "الأكثر إحالات عبر *رابط البوت الأول* يفوز.\n"]
+    if contest.get("description"):
+        lines += [_md(contest["description"]), ""]
+    lines += [_fmt_prizes(contest.get("prizes", [])), "", _contest_end_text(contest)]
+    min_count = int(contest.get("min_count", 0) or 0)
+    if min_count:
+        lines.append(f"🔢 الحد الأدنى للفوز: {min_count} إحالة")
+    lines += ["", "🔝 *المتصدرون:*"]
     for i, entry in enumerate(ranking[:10], 1):
         lines.append(f"{i}. {_mask_uid(entry['user_id'])} — {entry['count']}")
     if not ranking:

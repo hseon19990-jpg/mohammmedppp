@@ -206,7 +206,7 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ═══ 16c. مسابقة الإحالات ═══
-    if mode in {"rc_prizes", "rc_days", "rc_target"}:
+    if mode in {"rc_prizes", "rc_days", "rc_extend", "rc_target", "rc_min", "rc_desc", "rc_assign"}:
         await handle_rc_input(update, context, mode, text)
         return
 
@@ -642,10 +642,24 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await rc_create(update, context)
     elif data == "rc_stop":
         await rc_stop(update, context)
+    elif data == "rc_reopen":
+        await rc_reopen(update, context)
+    elif data == "rc_toggle_auto":
+        await rc_toggle_auto(update, context)
+    elif data.startswith("rc_edit:"):
+        await rc_edit(update, context)
     elif data == "rc_board":
         await rc_board(update, context)
     elif data.startswith("rc_pay:"):
         await rc_pay(update, context)
+    elif data == "rc_payall":
+        await rc_payall(update, context)
+    elif data == "rc_assign":
+        await rc_assign(update, context)
+    elif data.startswith("rc_assign_rank:"):
+        await rc_assign_rank(update, context)
+    elif data.startswith("rc_unassign:"):
+        await rc_unassign(update, context)
     elif data == "rc_view":
         await rc_view(update, context)
     elif data == "referral_settings":
