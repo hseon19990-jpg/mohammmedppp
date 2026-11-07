@@ -205,6 +205,11 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_ref2_setting_input(update, context, mode, text)
         return
 
+    # ═══ 16c. مسابقة الإحالات ═══
+    if mode in {"rc_prizes", "rc_days", "rc_target"}:
+        await handle_rc_input(update, context, mode, text)
+        return
+
     # ═══ 17. Fallback: session step ═══
     if session and session.step:
         await add_account_step(update, context)
@@ -631,6 +636,18 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await set_ref2_setting(update, context)
     elif data == "ref2_verify":
         await ref2_verify(update, context)
+    elif data == "rc_menu":
+        await rc_menu(update, context)
+    elif data == "rc_create":
+        await rc_create(update, context)
+    elif data == "rc_stop":
+        await rc_stop(update, context)
+    elif data == "rc_board":
+        await rc_board(update, context)
+    elif data.startswith("rc_pay:"):
+        await rc_pay(update, context)
+    elif data == "rc_view":
+        await rc_view(update, context)
     elif data == "referral_settings":
         await referral_settings(update, context)
     elif data == "set_referral_bonus":
@@ -767,6 +784,8 @@ async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==================== MAIN ====================
 async def initialize_application(application: Application):
     await restore_leave_checks(application)
+    if application.job_queue:
+        application.job_queue.run_repeating(ref_contest_tick, interval=60, first=30)
     await application.bot.set_my_commands(
         [
             BotCommand("start", "check your account status"),
