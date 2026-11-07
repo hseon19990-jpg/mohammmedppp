@@ -567,6 +567,13 @@ async def add_account_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(t(uid, "add_fake_email"))
             return
 
+        if is_email_blocked(email):
+            await update.message.reply_text(
+                "🚫 هذا الإيميل مرفوض نهائياً (فشل الفحص الثاني) ولا يمكن إدخاله.",
+                reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
+            SESSIONS.pop(uid, None); save_sessions()
+            return
+
         active_status = get_active_account_status(email)
         if active_status == "approved":
             await update.message.reply_text(
@@ -1615,6 +1622,9 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
             logger.exception("Failed to reject admin bonus on leave recheck failure")
         move_approved_account_to_rejected(user_data, failed_account, "imap_failed_24h",
                                           f"Second check failed: {recheck['message'][:150]}")
+        # رفض نهائي: لا يُسمح بإدخاله مجدداً ويُحذف من قائمة الإيميلات المرفوضة.
+        block_email_permanently(email, user_id)
+        hide_from_rejected_emails(user_data, email)
         add_transaction(user_data, "debit", price, f"rejected after {hold_hours}h check", email)
         save_user(user_id, user_data)
         try:

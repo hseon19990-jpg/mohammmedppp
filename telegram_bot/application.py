@@ -798,8 +798,15 @@ async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==================== MAIN ====================
 async def initialize_application(application: Application):
     await restore_leave_checks(application)
+    try:
+        migrated = migrate_second_check_blocks()
+        if migrated:
+            logger.info("Blocked %s emails that previously failed the second check.", migrated)
+    except Exception:
+        logger.exception("migrate_second_check_blocks failed")
     if application.job_queue:
         application.job_queue.run_repeating(ref_contest_tick, interval=60, first=30)
+        application.job_queue.run_repeating(finalize_stale_rejections_job, interval=600, first=60)
     await application.bot.set_my_commands(
         [
             BotCommand("start", "check your account status"),

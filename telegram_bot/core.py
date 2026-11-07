@@ -1858,6 +1858,62 @@ def clear_rejected_email_records(user_data: dict, email: str):
     ]
 
 
+# ═══ إيميلات مرفوضة نهائياً (فشل الفحص الثاني IMAP بعد 24 ساعة) ═══
+BLOCKED_EMAILS_DB = DATA_DIR / "blocked_emails.json"
+
+
+def is_email_blocked(email: Any) -> bool:
+    normalized = normalize_email(email)
+    return bool(normalized) and normalized in load_json(BLOCKED_EMAILS_DB)
+
+
+def block_email_permanently(email: Any, user_id: Any = 0, reason: str = "imap_failed_24h") -> None:
+    """يمنع إدخال هذا الإيميل نهائياً من أي عضو."""
+    normalized = normalize_email(email)
+    if not normalized:
+        return
+    blocked = load_json(BLOCKED_EMAILS_DB)
+    if normalized not in blocked:
+        blocked[normalized] = {"user_id": user_id, "reason": reason,
+                               "at": datetime.now(timezone.utc).isoformat()}
+        save_json(BLOCKED_EMAILS_DB, blocked)
+
+
+def hide_from_rejected_emails(user_data: dict, email: Any) -> None:
+    """يحذف الإيميل من قائمة «الإيميلات المرفوضة» التي يراها العضو."""
+    normalized = normalize_email(email)
+    user_data["rejected_emails"] = [
+        item for item in (user_data.get("rejected_emails", []) or [])
+        if normalize_email(item) != normalized
+    ]
+
+
+def migrate_second_check_blocks() -> int:
+    """مرة واحدة: يحظر الإيميلات التي فشلت سابقاً في الفحص الثاني ويخفيها من القوائم."""
+    config = load_config()
+    if config.get("second_check_blocks_migrated"):
+        return 0
+    users = load_json(USERS_DB)
+    count = 0
+    for uid, encrypted in users.items():
+        user_data = decrypt_user_data(encrypted)
+        changed = False
+        for record in user_data.get("rejected_requests", []) or []:
+            if record.get("reject_reason") == "imap_failed_24h" or record.get("rejected_at_24h"):
+                email = dec(record.get("email", ""))
+                if email:
+                    block_email_permanently(email, uid)
+                    hide_from_rejected_emails(user_data, email)
+                    count += 1
+                    changed = True
+        if changed:
+            save_user(int(uid), user_data)
+    config = load_config()
+    config["second_check_blocks_migrated"] = True
+    save_config(config)
+    return count
+
+
 def move_request_to_rejected(user_data: dict, request: dict, reason: str, reason_text: str = ""):
     rejected_request = dict(request)
     rejected_request["reject_reason"] = reason
