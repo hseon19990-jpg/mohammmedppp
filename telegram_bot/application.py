@@ -200,6 +200,11 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ أرسل رقماً.")
         return
 
+    # ═══ 16b. إعدادات إحالة البوت الأول ═══
+    if mode in {"set_ref2_bonus", "set_ref2_link", "set_ref2_api"}:
+        await handle_ref2_setting_input(update, context, mode, text)
+        return
+
     # ═══ 17. Fallback: session step ═══
     if session and session.step:
         await add_account_step(update, context)
@@ -209,20 +214,18 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await maintenance_access_allowed(update):
         return
+    # نسجّل المستخدم والإحالة قبل بوابة القنوات حتى لا يضيع الكود.
+    payload = context.args[0] if context.args and context.args[0] else ""
+    notice = register_start(update.effective_user.id, payload)
     if not await check_forced_channel(update, context):
         return
     clear_edit_state(context)
     SESSIONS.pop(update.effective_user.id, None)
     save_sessions()
-    args = context.args
-    if args and args[0]:
-        referral_code = args[0]
-        if len(referral_code) == 8 and referral_code.isalnum():
-            context.user_data["referral_code"] = referral_code
-            user_data = get_user(update.effective_user.id)
-            context.user_data["my_referral_code"] = user_data.get("referral_code", "")
-            await handle_referral(update, context, referral_code)
-            return
+    if notice:
+        await update.message.reply_text(notice)
+    if await process_pending_referrals(update, context):
+        return
     await main_menu(update, context)
 
 
@@ -525,8 +528,10 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await forced_channel(update, context)
     elif data == "check_forced_channel":
         await check_forced_channel_callback(update, context)
-    elif data == "remove_channel":
+    elif data == "remove_channel" or data.startswith("remove_channel:"):
         await remove_channel(update, context)
+    elif data == "add_forced_channel":
+        await add_forced_channel(update, context)
     elif data == "purchase_channels":
         await purchase_channels(update, context)
     elif data == "set_purchase_channel_1":
@@ -620,8 +625,12 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await mark_extracted(update, context)
     elif data == "referral_menu":
         await referral_menu(update, context)
-    elif data.startswith("copy_referral:"):
+    elif data.startswith("copy_referral:") or data.startswith("copy_referral2:"):
         await copy_referral(update, context)
+    elif data in {"set_ref2_bonus", "set_ref2_link", "set_ref2_api"}:
+        await set_ref2_setting(update, context)
+    elif data == "ref2_verify":
+        await ref2_verify(update, context)
     elif data == "referral_settings":
         await referral_settings(update, context)
     elif data == "set_referral_bonus":
@@ -721,7 +730,7 @@ async def owner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                ("🏆 الأكثر بيعاً", "top_sellers_owner"),
                ("📹 قسم الفيديوهات", "videos_section"),
                ("🛒 المبيعات", "store_section"),
-               ("➕ إضافة قناة إجبارية", "forced_channel"),
+               ("📢 القنوات الإجبارية", "forced_channel"),
                ("📊 جميع الحسابات المقبولة", "all_accounts_section"),
                ("📈 إحصائيات المستخدمين", "owner_stats"),
                ("🔎 فحص عضو", "check_member"),

@@ -2305,25 +2305,76 @@ def forced_channel_keyboard(channel: str, configured_link: str = "") -> InlineKe
     return InlineKeyboardMarkup(rows)
 
 
+MAX_FORCED_CHANNELS = 15
+
+
+def get_forced_channels(config: Optional[dict] = None) -> List[dict]:
+    """قائمة القنوات الإجبارية [{"channel": ..., "link": ...}].
+
+    تدعم الإعداد القديم (قناة واحدة في forced_channel) كي لا تضيع القناة
+    المضبوطة مسبقاً؛ أي حفظ جديد يكتب القائمة الجديدة ويحذف القديم.
+    """
+    config = load_config() if config is None else config
+    raw = config.get("forced_channels")
+    result: List[dict] = []
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, dict) and str(item.get("channel", "")).strip():
+                result.append({
+                    "channel": normalize_forced_channel(str(item["channel"])),
+                    "link": str(item.get("link") or ""),
+                })
+    elif str(config.get("forced_channel", "")).strip():
+        result.append({
+            "channel": normalize_forced_channel(str(config["forced_channel"])),
+            "link": str(config.get("forced_channel_link") or ""),
+        })
+    return result
+
+
+def set_forced_channels(config: dict, channels: List[dict]) -> None:
+    config["forced_channels"] = channels
+    config.pop("forced_channel", None)
+    config.pop("forced_channel_link", None)
+
+
+def forced_channels_keyboard(missing: List[dict]) -> InlineKeyboardMarkup:
+    rows = []
+    for item in missing:
+        join_link = forced_channel_link(item["channel"], item.get("link", ""))
+        if join_link:
+            rows.append([InlineKeyboardButton(f"📢 انضم: {item['channel']}", url=join_link)])
+    rows.append([InlineKeyboardButton("✅ تحققت من الاشتراك", callback_data="check_forced_channel")])
+    return InlineKeyboardMarkup(rows)
+
+
 async def check_forced_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    config = load_config()
-    forced_channel = normalize_forced_channel(str(config.get("forced_channel", "")))
-    if not forced_channel:
+    channels = get_forced_channels()
+    if not channels:
         return True
     user_id = update.effective_user.id
     if user_id == OWNER_ID:
         return True
     if context.user_data.get("_forced_channel_checked_update_id") == update.update_id:
         return True
-    try:
-        member = await context.bot.get_chat_member(forced_channel, user_id)
-        if member.status in {"member", "administrator", "creator"} or (member.status == "restricted" and getattr(member, "is_member", False)):
-            context.user_data["_forced_channel_checked_update_id"] = update.update_id
-            return True
-    except Exception as exc:
-        logger.warning("Forced-channel check failed for %s: %s", user_id, exc)
-    text = f"📢 *يرجى الانضمام إلى القناة أولاً:*\n{forced_channel}\n\nبعد الانضمام اضغط على زر «تحققت من الاشتراك»."
-    reply_markup = forced_channel_keyboard(forced_channel, str(config.get("forced_channel_link", "")))
+    missing = []
+    for item in channels:
+        joined = False
+        try:
+            member = await context.bot.get_chat_member(item["channel"], user_id)
+            joined = member.status in {"member", "administrator", "creator"} or (
+                member.status == "restricted" and getattr(member, "is_member", False))
+        except Exception as exc:
+            logger.warning("Forced-channel check failed for %s on %s: %s", user_id, item["channel"], exc)
+        if not joined:
+            missing.append(item)
+    if not missing:
+        context.user_data["_forced_channel_checked_update_id"] = update.update_id
+        return True
+    names = "\n".join(f"• {item['channel']}" for item in missing)
+    text = (f"📢 *يجب الانضمام إلى القنوات التالية أولاً:*\n{names}\n\n"
+            "بعد الانضمام لكل القنوات اضغط على زر «تحققت من الاشتراك».")
+    reply_markup = forced_channels_keyboard(missing)
     if update.callback_query:
         try:
             await update.callback_query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
@@ -2336,7 +2387,10 @@ async def check_forced_channel(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def check_forced_channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from telegram_bot.members import main_menu
+    from telegram_bot.store import process_pending_referrals
     if await check_forced_channel(update, context):
+        if await process_pending_referrals(update, context):
+            return
         await main_menu(update, context)
 
 

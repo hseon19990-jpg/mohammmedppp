@@ -32,21 +32,51 @@ async def set_purchase_channel(update: Update, context: ContextTypes.DEFAULT_TYP
                                   reply_markup=purchase_channels_keyboard())
 
 
+def forced_channels_panel_text(channels: List[dict]) -> str:
+    if channels:
+        listing = "\n".join(f"{i}. `{item['channel']}`" for i, item in enumerate(channels, 1))
+    else:
+        listing = "لا توجد قنوات."
+    return (f"📢 *القنوات الإجبارية* ({len(channels)}/{MAX_FORCED_CHANNELS})\n\n{listing}\n\n"
+            "كل الأعضاء (عدا المالك) يجب أن ينضموا لكل هذه القنوات.")
+
+
+def forced_channels_panel_keyboard(channels: List[dict]) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(f"🗑 حذف {item['channel']}", callback_data=f"remove_channel:{i}")]
+            for i, item in enumerate(channels)]
+    rows.append([InlineKeyboardButton("➕ إضافة قناة", callback_data="add_forced_channel")])
+    rows.append([InlineKeyboardButton("🔙 إعدادات المالك", callback_data="owner_panel")])
+    return InlineKeyboardMarkup(rows)
+
+
 async def forced_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
-    config = load_config()
-    current_channel = config.get("forced_channel", "")
-    buttons = [("🗑️ إلغاء القناة", "remove_channel"), ("🔙 إعدادات المالك", "owner_panel")]
+    context.user_data.pop("store_action", None)
+    channels = get_forced_channels()
     await query.edit_message_text(
-        f"📢 *القناة الإجبارية*\n\n📌 الحالية: `{current_channel or 'لا توجد'}`\n\n"
+        forced_channels_panel_text(channels), parse_mode=ParseMode.MARKDOWN,
+        reply_markup=forced_channels_panel_keyboard(channels))
+
+
+async def add_forced_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    if len(get_forced_channels()) >= MAX_FORCED_CHANNELS:
+        await query.answer("وصلت للحد الأقصى من القنوات.", show_alert=True)
+        return
+    context.user_data["store_action"] = "set_channel"
+    await query.edit_message_text(
         "أرسل معرف قناة عامة مثل `@channel` أو رابطها.\n"
         "للقناة الخاصة أرسل المعرف الرقمي ورابط الدعوة بهذا الشكل:\n"
-        "`-1001234567890 | https://t.me/+invite`",
-        parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
-    context.user_data["store_action"] = "set_channel"
+        "`-1001234567890 | https://t.me/+invite`\n\n"
+        "⚠️ يجب أن يكون البوت مشرفاً في القناة.",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_single("🔙 رجوع", "forced_channel"))
 
 
 async def remove_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -55,12 +85,19 @@ async def remove_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
     config = load_config()
-    config["forced_channel"] = ""
-    config.pop("forced_channel_link", None)
+    channels = get_forced_channels(config)
+    _, _, raw_index = (query.data or "").partition(":")
+    if raw_index.isdigit() and int(raw_index) < len(channels):
+        channels.pop(int(raw_index))
+    elif not raw_index:
+        channels = []  # زر قديم: إلغاء كل القنوات
+    set_forced_channels(config, channels)
     save_config(config)
     context.user_data.pop("store_action", None)
-    await query.edit_message_text("✅ تم إلغاء القناة.",
-                                  reply_markup=kb_single("🔙 إعدادات المالك", "owner_panel"))
+    await query.answer("✅ تم الحذف.")
+    await query.edit_message_text(
+        forced_channels_panel_text(channels), parse_mode=ParseMode.MARKDOWN,
+        reply_markup=forced_channels_panel_keyboard(channels))
 
 
 # ==================== TG-LION CATALOG ====================
@@ -1609,6 +1646,11 @@ def generate_referral_code():
     return secrets.token_hex(4).upper()
 
 
+def referral_links(bot_username: str, code: str) -> Tuple[str, str]:
+    return (f"https://t.me/{bot_username}?start={code}",
+            f"https://t.me/{bot_username}?start=B2_{code}")
+
+
 async def referral_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
@@ -1621,12 +1663,17 @@ async def referral_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data["referral_code"] = referral_code
         save_user(user_id, user_data)
     bot_username = (await context.bot.get_me()).username
-    referral_link = f"https://t.me/{bot_username}?start={referral_code}"
-    msg = (f"🔗 *نظام الإحالة*\n\n📌 *رابطك:*\n`{referral_link}`\n\n"
+    link1, link2 = referral_links(bot_username, referral_code)
+    config = load_config()
+    bonus2 = float(config.get("ref2_bonus", 0.0) or 0.0)
+    msg = (f"🔗 *نظام الإحالة*\n\n"
            f"📊 *إحصائياتك:*\n💰 المكافآت: ${float(user_data.get('referral_earnings', 0.0)):.2f}\n"
            f"👥 عدد الإحالات: {user_data.get('total_referrals', 0)}\n\n"
-           f"📝 *كيف يعمل؟*\n1️⃣ شارك الرابط\n2️⃣ عند قبول حساب صديقك\n3️⃣ ستحصل على مكافأة")
-    buttons = [("📋 نسخ الرابط", f"copy_referral:{referral_code}"),
+           f"1️⃣ *الإحالة العادية* — ينضم صديقك للقنوات فقط، وتحصل على مكافأة عند قبول إيميله:\n`{link1}`\n\n"
+           f"2️⃣ *إحالة البوت الأول* — ينضم صديقك للقنوات ويفعّل البوت الأول، "
+           f"ويجب أن يكون جديداً في البوتين. تحصل على *${bonus2:.2f}* مرة واحدة فقط عن كل شخص:\n`{link2}`")
+    buttons = [("📋 نسخ الرابط العادي", f"copy_referral:{referral_code}"),
+               ("📋 نسخ رابط البوت الأول", f"copy_referral2:{referral_code}"),
                ("🔙 القائمة الرئيسية", "main_menu")]
     await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
 
@@ -1635,10 +1682,11 @@ async def copy_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
     query = update.callback_query
-    code = query.data.split(":")[1]
+    kind, _, code = (query.data or "").partition(":")
     bot_username = (await context.bot.get_me()).username
-    link = f"https://t.me/{bot_username}?start={code}"
-    buttons = [("🔗 عرض رابط الإحالة", "referral_menu"),
+    link1, link2 = referral_links(bot_username, code)
+    link = link2 if kind == "copy_referral2" else link1
+    buttons = [("🔗 عرض روابط الإحالة", "referral_menu"),
                ("🔙 القائمة الرئيسية", "main_menu")]
     await query.edit_message_text(f"📋 *رابطك:*\n\n`{link}`", parse_mode=ParseMode.MARKDOWN,
                                   reply_markup=kb_vertical(buttons))
@@ -1650,12 +1698,24 @@ async def referral_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
     config = load_config()
-    referral_bonus = config.get("referral_bonus", 0.0)
-    buttons = [("💲 تغيير المكافأة", "set_referral_bonus"),
+    referral_bonus = float(config.get("referral_bonus", 0.0) or 0.0)
+    ref2_bonus = float(config.get("ref2_bonus", 0.0) or 0.0)
+    ref2_link = config.get("ref2_partner_link") or "غير مضبوط"
+    ref2_api = config.get("ref2_api_url") or "غير مضبوط"
+    key_state = "✅ موجود" if os.environ.get("PARTNER_API_KEY", "").strip() else "❌ غير مضبوط"
+    buttons = [("💲 مكافأة الإحالة العادية", "set_referral_bonus"),
+               ("💲 مكافأة إحالة البوت الأول", "set_ref2_bonus"),
+               ("🔗 رابط البوت الأول", "set_ref2_link"),
+               ("🌐 رابط API للبوت الأول", "set_ref2_api"),
                ("📊 إحصائيات", "referral_stats"),
                ("🔙 إعدادات المالك", "owner_panel")]
     await query.edit_message_text(
-        f"🔗 *إعدادات الإحالة*\n\n💰 المكافأة الحالية: ${referral_bonus:.2f}",
+        "🔗 *إعدادات الإحالة*\n\n"
+        f"💰 مكافأة الإحالة العادية (لكل إيميل مقبول): ${referral_bonus:.2f}\n"
+        f"💰 مكافأة إحالة البوت الأول (مرة واحدة): ${ref2_bonus:.2f}\n"
+        f"🔗 رابط البوت الأول: `{ref2_link}`\n"
+        f"🌐 رابط API: `{ref2_api}`\n"
+        f"🔑 مفتاح PARTNER\\_API\\_KEY: {key_state}",
         parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
 
 
@@ -1670,6 +1730,91 @@ async def set_referral_bonus(update: Update, context: ContextTypes.DEFAULT_TYPE)
     context.user_data["mode"] = "set_referral_bonus"
 
 
+async def set_ref2_setting(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يبدأ إدخال إعدادات إحالة البوت الأول: set_ref2_bonus | set_ref2_link | set_ref2_api."""
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    prompts = {
+        "set_ref2_bonus": "💰 أرسل مكافأة إحالة البوت الأول بالدولار (تُدفع مرة واحدة):",
+        "set_ref2_link": ("🔗 أرسل رابط البوت الأول كما تريد أن يظهر للأعضاء، مثل `https://t.me/BotName?start=xxx`.\n"
+                          "سيظهر نفسه لكل الأعضاء دون أي تغيير."),
+        "set_ref2_api": ("🌐 أرسل رابط خادم البوت الأول، مثل `https://your-bot.up.railway.app`.\n"
+                         "المفتاح السري يوضع في متغير البيئة `PARTNER_API_KEY` في البوتين بنفس القيمة."),
+    }
+    mode = query.data
+    if mode not in prompts:
+        return
+    await query.edit_message_text(prompts[mode], parse_mode=ParseMode.MARKDOWN,
+                                  reply_markup=kb_single("🔙 إلغاء", "referral_settings"))
+    context.user_data["mode"] = mode
+
+
+def normalize_partner_link(value: str) -> str:
+    """يقبل رابط تيليجرام كما كتبه المالك ويُرجعه دون أي تغيير.
+
+    الصيغة @BotName فقط تتحول إلى https://t.me/BotName. يعيد سلسلة فارغة
+    إن لم يكن الرابط رابط تيليجرام صالحاً.
+    """
+    value = (value or "").strip()
+    if re.fullmatch(r"@[A-Za-z0-9_]{5,32}", value):
+        return f"https://t.me/{value[1:]}"
+    if len(value) > 500 or any(ch.isspace() for ch in value):
+        return ""
+    parts = urlsplit(value)
+    if parts.scheme != "https" or (parts.hostname or "").lower() not in {"t.me", "telegram.me"}:
+        return ""
+    if not parts.path.strip("/"):
+        return ""
+    return value
+
+
+def normalize_partner_api_url(value: str) -> str:
+    value = (value or "").strip().rstrip("/")
+    parts = urlsplit(value)
+    if parts.scheme not in {"http", "https"} or not parts.hostname:
+        return ""
+    return f"{parts.scheme}://{parts.netloc}"
+
+
+async def handle_ref2_setting_input(update: Update, context: ContextTypes.DEFAULT_TYPE, mode: str, text: str) -> bool:
+    """يعالج نص المالك لإعدادات إحالة البوت الأول. يعيد True إن عالج الرسالة."""
+    if update.effective_user.id != OWNER_ID:
+        return True
+    config = load_config()
+    if mode == "set_ref2_bonus":
+        try:
+            bonus = float(text.replace(",", "."))
+        except ValueError:
+            await update.message.reply_text("⚠️ أرسل رقماً.")
+            return True
+        if bonus < 0 or bonus > 1000:
+            await update.message.reply_text("⚠️ المبلغ يجب أن يكون بين 0 و1000.")
+            return True
+        config["ref2_bonus"] = round(bonus, 2)
+        reply = f"✅ مكافأة إحالة البوت الأول: ${bonus:.2f}"
+    elif mode == "set_ref2_link":
+        link = normalize_partner_link(text)
+        if not link:
+            await update.message.reply_text("⚠️ رابط غير صالح. أرسل رابط تيليجرام يبدأ بـ https://t.me/")
+            return True
+        config["ref2_partner_link"] = link
+        reply = f"✅ تم حفظ رابط البوت الأول: {link}"
+    else:
+        api = normalize_partner_api_url(text)
+        if not api:
+            await update.message.reply_text("⚠️ رابط غير صالح. أرسل مثل https://your-bot.up.railway.app")
+            return True
+        config["ref2_api_url"] = api
+        reply = f"✅ تم حفظ رابط API: {api}"
+    save_config(config)
+    context.user_data.pop("mode", None)
+    await update.message.reply_text(
+        reply, reply_markup=kb_single("🔙 إعدادات الإحالة", "referral_settings"))
+    return True
+
+
 async def referral_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
@@ -1678,6 +1823,8 @@ async def referral_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     users = load_json(USERS_DB)
     total_referrals = 0
     total_earnings = 0.0
+    ref2_paid = 0
+    ref2_pending = 0
     top = []
     for uid, encrypted_data in users.items():
         data = decrypt_user_data(encrypted_data)
@@ -1686,9 +1833,17 @@ async def referral_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             total_earnings += float(data.get("referral_earnings", 0.0))
             top.append({"user_id": uid, "count": data["total_referrals"],
                         "earnings": float(data.get("referral_earnings", 0.0))})
+        ref2 = data.get("ref2")
+        if isinstance(ref2, dict):
+            if ref2.get("status") == "paid":
+                ref2_paid += 1
+            elif ref2.get("status") == "pending":
+                ref2_pending += 1
     top.sort(key=lambda x: x["count"], reverse=True)
     msg = (f"📊 *إحصائيات الإحالة*\n\n👥 الإجمالي: {total_referrals}\n"
-           f"💰 المكافآت: ${total_earnings:.2f}\n\n")
+           f"💰 المكافآت: ${total_earnings:.2f}\n"
+           f"🤝 إحالات البوت الأول المدفوعة: {ref2_paid}\n"
+           f"⏳ بانتظار التفعيل: {ref2_pending}\n\n")
     if top:
         msg += "🏆 *أفضل المحالين:*\n"
         for idx, ref in enumerate(top[:5], 1):
@@ -1746,12 +1901,22 @@ async def handle_store_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await update.message.reply_text("⚠️ قناة خاصة: أرسل المعرف الرقمي مع رابط الدعوة مفصولين بـ |.")
             return
         config = load_config()
-        config["forced_channel"] = str(chat.id)
-        config["forced_channel_link"] = join_link
+        channels = get_forced_channels(config)
+        if any(item["channel"] == str(chat.id) for item in channels):
+            await update.message.reply_text("ℹ️ هذه القناة مضافة مسبقاً.")
+            return
+        if len(channels) >= MAX_FORCED_CHANNELS:
+            await update.message.reply_text("⚠️ وصلت للحد الأقصى من القنوات.")
+            return
+        channels.append({"channel": str(chat.id), "link": join_link})
+        set_forced_channels(config, channels)
         save_config(config)
-        await update.message.reply_text(f"✅ تمت إضافة القناة الإجبارية: {chat.title}")
         context.user_data.pop("store_action", None)
-        await main_menu(update, context)
+        await update.message.reply_text(
+            f"✅ تمت إضافة القناة الإجبارية: {chat.title}\n\n"
+            + forced_channels_panel_text(channels),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=forced_channels_panel_keyboard(channels))
         return
 
     if action in {"set_purchase_channel_1", "set_purchase_channel_2"}:
@@ -2547,14 +2712,74 @@ async def service_edit_types_save(update: Update, context: ContextTypes.DEFAULT_
 
 
 # ==================== REFERRAL HANDLER ====================
-async def handle_referral(update: Update, context: ContextTypes.DEFAULT_TYPE, referral_code: str):
-    user_id = update.effective_user.id
-    if context.user_data.get("my_referral_code") == referral_code:
-        await update.message.reply_text("⚠️ لا يمكنك استخدام رابطك!")
-        return
+def parse_referral_payload(arg: str) -> Tuple[int, str]:
+    """(النوع، الكود): 1 = إحالة عادية، 2 = إحالة البوت الأول، 0 = غير صالح."""
+    arg = (arg or "").strip()
+    if arg.upper().startswith("B2_"):
+        code, kind = arg[3:], 2
+    else:
+        code, kind = arg, 1
+    if len(code) == 8 and code.isalnum():
+        return kind, code
+    return 0, ""
+
+
+def register_start(user_id: int, payload: str) -> str:
+    """يسجّل المستخدم عند أول /start ويحفظ الإحالة قبل بوابة الاشتراك.
+
+    كان الكود يضيع سابقاً عند ظهور بوابة القنوات؛ الحفظ هنا يبقيه حتى ينضم
+    العضو. «الجديد في هذا البوت» = لا يوجد له سجل قبل هذا الـ /start.
+    يعيد رسالة تنبيه (أو نصاً فارغاً).
+    """
+    existed = str(user_id) in load_json(USERS_DB)
     user_data = get_user(user_id)
+    changed = not existed
+    notice = ""
+    kind, code = parse_referral_payload(payload)
+    if kind and user_id != OWNER_ID:
+        if kind == 1:
+            if not user_data.get("referred_by") and not user_data.get("pending_ref1"):
+                user_data["pending_ref1"] = code
+                changed = True
+        elif existed:
+            if not user_data.get("ref2"):
+                notice = "⚠️ رابط إحالة البوت الأول للأعضاء الجدد فقط، ولا تُحتسب الإحالة لك."
+        elif not user_data.get("ref2"):
+            user_data["ref2"] = {"code": code, "status": "pending", "new_in_bot2": True,
+                                 "started_at": datetime.now(timezone.utc).isoformat()}
+            changed = True
+    if changed:
+        save_user(user_id, user_data)
+    return notice
+
+
+async def _send_or_edit(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, reply_markup=None):
+    if update.callback_query:
+        try:
+            await update.callback_query.edit_message_text(
+                text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
+            return
+        except Exception:
+            pass
+    await context.bot.send_message(update.effective_chat.id, text,
+                                   parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
+
+
+def build_partner_link(config: dict, user_id: int = 0) -> str:
+    """رابط البوت الأول كما ضبطه المالك، نفسه لكل الأعضاء."""
+    return str(config.get("ref2_partner_link") or "").strip()
+
+
+async def handle_referral(update: Update, context: ContextTypes.DEFAULT_TYPE, referral_code: str):
+    """الإحالة العادية (النوع 1)."""
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    user_data = get_user(user_id)
+    if user_data.get("referral_code") == referral_code:
+        await context.bot.send_message(chat_id, "⚠️ لا يمكنك استخدام رابطك!")
+        return
     if user_data.get("referred_by"):
-        await update.message.reply_text("ℹ️ أنت مشترك بالفعل.")
+        await context.bot.send_message(chat_id, "ℹ️ أنت مشترك بالفعل.")
         return
     users = load_json(USERS_DB)
     referrer_id = None
@@ -2563,13 +2788,13 @@ async def handle_referral(update: Update, context: ContextTypes.DEFAULT_TYPE, re
         if data.get("referral_code") == referral_code:
             referrer_id = int(uid)
             break
-    if not referrer_id:
-        await update.message.reply_text("❌ رابط غير صالح.")
+    if not referrer_id or referrer_id == user_id:
+        await context.bot.send_message(chat_id, "❌ رابط غير صالح.")
         return
     user_data["referred_by"] = referrer_id
     save_user(user_id, user_data)
-    await update.message.reply_text(
-        f"✅ *تم تفعيل الإحالة!*\n\n👤 بواسطة: {referrer_id}\nاستخدم /start للبدء.",
+    await context.bot.send_message(
+        chat_id, f"✅ *تم تفعيل الإحالة!*\n\n👤 بواسطة: {referrer_id}",
         parse_mode=ParseMode.MARKDOWN)
     try:
         await context.bot.send_message(
@@ -2578,6 +2803,151 @@ async def handle_referral(update: Update, context: ContextTypes.DEFAULT_TYPE, re
             parse_mode=ParseMode.MARKDOWN)
     except Exception:
         pass
+
+
+async def show_ref2_activation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    link = build_partner_link(load_config(), update.effective_user.id)
+    rows = []
+    text = ("🎁 *إحالة البوت الأول*\n\n"
+            "لتُحتسب الإحالة لصديقك الذي دعاك:\n"
+            "1️⃣ اضغط «تفعيل البوت الأول» ثم اضغط Start هناك\n"
+            "2️⃣ ارجع إلى هنا واضغط «تحققت من التفعيل»\n\n"
+            "⚠️ يجب أن تكون جديداً في البوتين.")
+    if link:
+        rows.append([InlineKeyboardButton("🚀 تفعيل البوت الأول", url=link)])
+    else:
+        text += "\n\n⚠️ رابط البوت الأول غير متوفر حالياً."
+    rows.append([InlineKeyboardButton("✅ تحققت من التفعيل", callback_data="ref2_verify")])
+    rows.append([InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="main_menu")])
+    await _send_or_edit(update, context, text, InlineKeyboardMarkup(rows))
+
+
+async def process_pending_referrals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """يُستدعى بعد اجتياز بوابة القنوات. يعيد True إن عرض شاشة بدل القائمة الرئيسية."""
+    user_id = update.effective_user.id
+    user_data = get_user(user_id)
+    code1 = user_data.get("pending_ref1")
+    if code1:
+        user_data["pending_ref1"] = ""
+        save_user(user_id, user_data)
+        await handle_referral(update, context, code1)
+        user_data = get_user(user_id)
+    ref2 = user_data.get("ref2")
+    if isinstance(ref2, dict) and ref2.get("status") == "pending":
+        await show_ref2_activation(update, context)
+        return True
+    return False
+
+
+def _fetch_partner_status_sync(user_id: int) -> Optional[dict]:
+    api = normalize_partner_api_url(str(load_config().get("ref2_api_url") or ""))
+    key = os.environ.get("PARTNER_API_KEY", "").strip()
+    if not api or not key:
+        return None
+    request = urllib.request.Request(
+        f"{api}/partner/ref-status?uid={int(user_id)}",
+        headers={"X-Partner-Key": key, "Accept": "application/json",
+                 "User-Agent": "mohammmedppp-bot"})
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            payload = json.loads(response.read(65536).decode("utf-8"))
+    except Exception as exc:
+        logger.warning("Partner status request failed (%s)", type(exc).__name__)
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _is_new_in_partner(status: dict, ref2: dict) -> bool:
+    """جديد في البوت الأول = أول /start له هناك جاء بعد دخوله هذا البوت بالرابط.
+
+    المستخدم القديم (بلا وقت مسجّل) أو من فتح البوت الأول قبل دخوله هنا لا
+    يُعدّ جديداً. نسمح بفارق دقيقتين بين ساعتي الخادمين.
+    """
+    try:
+        first_seen = datetime.fromisoformat(str(status.get("first_seen")))
+        started_at = datetime.fromisoformat(str(ref2.get("started_at")))
+    except (TypeError, ValueError):
+        return False
+    return first_seen >= started_at - timedelta(minutes=2)
+
+
+async def _credit_ref2_referrer(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> str:
+    """يدفع المكافأة مرة واحدة. يعيد: paid | invalid | already."""
+    user_data = get_user(user_id)
+    ref2 = user_data.get("ref2")
+    if not isinstance(ref2, dict) or ref2.get("status") != "pending":
+        return "already"
+    referrer_id = None
+    for uid, encrypted_data in load_json(USERS_DB).items():
+        if decrypt_user_data(encrypted_data).get("referral_code") == ref2.get("code"):
+            referrer_id = int(uid)
+            break
+    if not referrer_id or referrer_id == user_id:
+        ref2["status"] = "invalid"
+        user_data["ref2"] = ref2
+        save_user(user_id, user_data)
+        return "invalid"
+    # نحفظ حالة «مدفوع» قبل أي انتظار آخر حتى لا تُدفع المكافأة مرتين.
+    ref2.update({"status": "paid", "referrer": referrer_id,
+                 "paid_at": datetime.now(timezone.utc).isoformat()})
+    user_data["ref2"] = ref2
+    save_user(user_id, user_data)
+    bonus = clamp_money(float(load_config().get("ref2_bonus", 0.0) or 0.0))
+    referrer = get_user(referrer_id)
+    referrer["total_referrals"] = int(referrer.get("total_referrals", 0)) + 1
+    referrer["ref2_count"] = int(referrer.get("ref2_count", 0)) + 1
+    if bonus > 0:
+        referrer["referral_earnings"] = clamp_money(float(referrer.get("referral_earnings", 0.0)) + bonus)
+        referrer["balance"] = clamp_money(float(referrer.get("balance", 0.0)) + bonus)
+        referrer["total_credited_balance"] = clamp_money(
+            float(referrer.get("total_credited_balance", 0.0) or 0.0) + bonus)
+        add_transaction(referrer, "referral", bonus, f"Bot-1 referral for user {user_id}")
+    save_user(referrer_id, referrer)
+    try:
+        await context.bot.send_message(
+            chat_id=referrer_id,
+            text=(f"🎉 *إحالة جديدة مكتملة!*\n\nفعّل المستخدم `{user_id}` البوت الأول وانضم للقنوات."
+                  + (f"\n💰 حصلت على ${bonus:.2f}" if bonus > 0 else "")),
+            parse_mode=ParseMode.MARKDOWN)
+    except Exception:
+        pass
+    return "paid"
+
+
+async def ref2_verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not await check_forced_channel(update, context):
+        return
+    user_id = update.effective_user.id
+    ref2 = get_user(user_id).get("ref2")
+    back = kb_single("🏠 القائمة الرئيسية", "main_menu")
+    if not isinstance(ref2, dict) or ref2.get("status") != "pending":
+        await query.answer("لا توجد إحالة قيد التحقق.", show_alert=True)
+        return
+    await query.answer("⏳ جاري التحقق...")
+    status = await asyncio.to_thread(_fetch_partner_status_sync, user_id)
+    if status is None:
+        await query.answer("⚠️ تعذر الاتصال بالبوت الأول الآن، حاول بعد قليل.", show_alert=True)
+        return
+    if not status.get("started"):
+        await query.answer("لم نجد تفعيلاً بعد. افتح البوت الأول من الزر واضغط Start ثم عد.", show_alert=True)
+        return
+    if not _is_new_in_partner(status, ref2):
+        user_data = get_user(user_id)
+        if isinstance(user_data.get("ref2"), dict) and user_data["ref2"].get("status") == "pending":
+            user_data["ref2"]["status"] = "invalid"
+            save_user(user_id, user_data)
+        await _send_or_edit(update, context,
+                            "⚠️ كنت مسجلاً في البوت الأول من قبل، لذلك لا تُحتسب هذه الإحالة.", back)
+        return
+    result = await _credit_ref2_referrer(context, user_id)
+    if result == "paid":
+        text = "✅ تم التحقق من تفعيل البوت الأول واحتُسبت الإحالة لصديقك. أهلاً بك!"
+    elif result == "invalid":
+        text = "⚠️ رابط الإحالة غير صالح."
+    else:
+        text = "ℹ️ هذه الإحالة محتسبة مسبقاً."
+    await _send_or_edit(update, context, text, back)
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]

@@ -791,7 +791,7 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ("🏆 الأكثر بيعاً", "top_sellers_owner"),
         ("📹 قسم الفيديوهات", "videos_section"),
         ("🛒 المبيعات", "store_section"),
-        ("➕ إضافة قناة إجبارية", "forced_channel"),
+        ("📢 القنوات الإجبارية", "forced_channel"),
         ("📨 كروبات إشعارات الشراء", "purchase_channels"),
         ("📊 جميع الحسابات المقبولة", "all_accounts_section"),
         ("📈 إحصائيات المستخدمين", "owner_stats"),
