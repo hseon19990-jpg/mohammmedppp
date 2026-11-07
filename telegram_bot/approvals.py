@@ -2473,4 +2473,90 @@ async def _apply_admin_rejection(update, context, actor_id, target_uid, index,
                                          ]))
 
 
+# ==================== AUTO-FINAL REJECTION AFTER 24H ====================
+STALE_REJECTION_HOURS = 24
+
+
+async def finalize_stale_rejections_job(context: ContextTypes.DEFAULT_TYPE):
+    """إيميل رفضه مشرف ولم يُرفض ولم يُقبل خلال 24 ساعة من آخر رفض يُرفض نهائياً.
+
+    يحمل الرفض نفس آثار الرفض النهائي العادي (نقله إلى المرفوضة، إشعار العضو،
+    وعدّاد الرفض المتتالي). للعضو أن يُدخل الإيميل مرة أخرى متى شاء.
+    """
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=STALE_REJECTION_HOURS)
+    stale: List[Tuple[str, str]] = []  # (user_id, email)
+    for uid, encrypted in load_json(USERS_DB).items():
+        user_data = decrypt_user_data(encrypted)
+        for req in user_data.get("pending_requests", []) or []:
+            rejections = req.get("rejected_by_admins")
+            if not isinstance(rejections, list) or not rejections:
+                continue
+            times = []
+            for rj in rejections:
+                try:
+                    moment = datetime.fromisoformat(str(rj.get("rejected_at")))
+                except (TypeError, ValueError):
+                    continue
+                times.append(moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc))
+            if times and max(times) <= cutoff:
+                stale.append((uid, req.get("email", "")))
+    for uid, email in stale:
+        try:
+            await _finalize_stale_request(context, int(uid), email)
+        except Exception:
+            logger.exception("Auto-final rejection failed for %s", uid)
+
+
+async def _finalize_stale_request(context: ContextTypes.DEFAULT_TYPE, target_uid: int, email: str):
+    user_data = get_user(target_uid)
+    pending = user_data.get("pending_requests", []) or []
+    index = next((i for i, r in enumerate(pending) if r.get("email") == email
+                  and r.get("rejected_by_admins")), None)
+    if index is None:
+        return
+    request = pending[index]
+    rejections = request.get("rejected_by_admins", [])
+    last = rejections[-1]
+    reason_type = last.get("reason", "other")
+    reason_text = last.get("reason_text") or REJECT_REASON_MESSAGES.get(reason_type, "❌ تم الرفض")
+    is_custom = reason_type == "other"
+
+    pending.pop(index)
+    user_data["pending_requests"] = pending
+    move_request_to_rejected(user_data, request, reason_type, reason_text if is_custom else "")
+    ban_result = register_rejection_and_maybe_ban(user_data)
+    if user_data.get("rejected_requests"):
+        record = user_data["rejected_requests"][-1]
+        record["rejected_by"] = 0
+        record["rejected_by_name"] = f"تلقائي ({STALE_REJECTION_HOURS} ساعة)"
+        record["rejected_at"] = datetime.now(timezone.utc).isoformat()
+        record["rejected_by_admins"] = rejections
+        record["auto_rejected_stale"] = True
+    save_user(target_uid, user_data)
+
+    config = load_config()
+    video_key = REJECT_REASON_VIDEO_KEY.get(reason_type)
+    video_path = config.get(video_key) if video_key else None
+    if video_path and Path(video_path).exists():
+        try:
+            with open(video_path, "rb") as video_file:
+                await context.bot.send_video(
+                    chat_id=target_uid, video=video_file,
+                    caption=t(target_uid, "member_rejected_video", reason=reason_text),
+                    parse_mode=ParseMode.MARKDOWN, supports_streaming=True)
+        except Exception:
+            logger.exception("Failed to send rejection video")
+    ban_notice = ""
+    if ban_result:
+        ban_notice = t(target_uid, "appr_ban_notice", duration=ban_result[1])
+    try:
+        await context.bot.send_message(
+            chat_id=target_uid,
+            text=t(target_uid, "member_rejected_msg", reason=reason_text, email=email, ban=ban_notice),
+            parse_mode=ParseMode.MARKDOWN)
+    except Exception:
+        logger.exception("Failed to notify rejected user")
+
+
 __all__ = [name for name in globals() if not name.startswith("__")]
