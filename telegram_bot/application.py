@@ -485,6 +485,10 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await recovery_offer_yes(update, context)
     elif data == "recovery_extract":
         await recovery_extract(update, context)
+    elif data == "recovery_extract_all":
+        await recovery_extract_all(update, context)
+    elif data == "recovery_extract_new":
+        await recovery_extract_new(update, context)
     elif data == "extraction_remove_start":
         await extraction_remove_start(update, context)
     elif data.startswith("reject_reason:"):

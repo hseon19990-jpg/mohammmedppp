@@ -1940,7 +1940,7 @@ async def all_accounts_section(update: Update, context: ContextTypes.DEFAULT_TYP
     if uid != OWNER_ID:
         await query.answer("🚫", show_alert=True)
         return
-    buttons = [
+    buttons = [[b] for b in [
         (t(uid, "accounts_btn_all_general"), "all_general"),
         (t(uid, "accounts_btn_all_old"), "all_old"),
         (t(uid, "accounts_btn_all_new"), "all_new"),
@@ -1950,7 +1950,7 @@ async def all_accounts_section(update: Update, context: ContextTypes.DEFAULT_TYP
         ("📧 استخراج حسابات مع ايميل اضافي", "recovery_extract"),
         ("🗑 ازالة الايميل من الاستخراج", "extraction_remove_start"),
         (t(uid, "owner_btn_back_panel"), "owner_panel")
-    ]
+    ]]
     await query.edit_message_text(t(uid, "accounts_title_admin"), parse_mode=ParseMode.MARKDOWN,
                                   reply_markup=kb_vertical(buttons))
 
@@ -2786,40 +2786,83 @@ def build_recovery_export(accounts: list) -> bytes:
     return "\n".join(lines).encode("utf-8")
 
 
-async def recovery_extract(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """المالك: استخراج الحسابات التي لها ايميل استرداد (غير المستخرجة) بصيغة ايميل:باسورد:ايميل استرداد."""
-    query = update.callback_query
-    uid = query.from_user.id
-    if uid != OWNER_ID:
-        await query.answer("🚫", show_alert=True)
-        return
-    back = kb_single(t(uid, "accounts_title_admin"), "all_accounts_section")
+def _collect_recovery_accounts(only_unextracted: bool) -> tuple:
+    """يرجع (users, found): كل الحسابات التي لها ايميل استرداد وغير محذوفة من الاستخراج."""
     users = load_json(USERS_DB)
     found = []
     for target_uid, encrypted_data in users.items():
         data = decrypt_user_data(encrypted_data)
         for acc in data.get("approved_accounts", []):
-            if (acc.get("recovery_email") and not acc.get("extracted", False)
-                    and not acc.get("removed_from_extraction")):
-                found.append(acc)
+            if not acc.get("recovery_email") or acc.get("removed_from_extraction"):
+                continue
+            if only_unextracted and acc.get("extracted", False):
+                continue
+            found.append(acc)
+    return users, found
+
+
+async def recovery_extract(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """المالك: قائمة استخراج الحسابات التي لها ايميل استرداد (قسمان، أزرار طولية)."""
+    query = update.callback_query
+    uid = query.from_user.id
+    if uid != OWNER_ID:
+        await query.answer("🚫", show_alert=True)
+        return
+    _, all_found = _collect_recovery_accounts(False)
+    _, new_found = _collect_recovery_accounts(True)
+    buttons = [
+        [(f"📋 جميع الايميلات التي تحتوي ايميل استرداد ({len(all_found)})", "recovery_extract_all")],
+        [(f"🆕 الايميلات التي تحتوي ايميل استرداد غير المستخرجة ({len(new_found)})", "recovery_extract_new")],
+        [(t(uid, "accounts_title_admin"), "all_accounts_section")],
+    ]
+    await query.edit_message_text(
+        "📧 <b>استخراج حسابات مع ايميل اضافي</b>\n\nاختر القسم:\n"
+        "📋 <b>جميع الايميلات</b>: كل الحسابات التي لها ايميل استرداد (حتى المستخرجة سابقاً).\n"
+        "🆕 <b>غير المستخرجة</b>: الحسابات الجديدة فقط، وتُعتبر مستخرجة بعد الاستخراج.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_vertical(buttons))
+
+
+async def _recovery_extract_run(update: Update, context: ContextTypes.DEFAULT_TYPE, only_unextracted: bool):
+    query = update.callback_query
+    uid = query.from_user.id
+    if uid != OWNER_ID:
+        await query.answer("🚫", show_alert=True)
+        return
+    back = kb_vertical([[("🔙 رجوع لقائمة الاستخراج", "recovery_extract")],
+                        [(t(uid, "accounts_title_admin"), "all_accounts_section")]])
+    users, found = _collect_recovery_accounts(only_unextracted)
     if not found:
-        await query.edit_message_text("✅ لا توجد حسابات مع ايميل اضافي غير مستخرجة.", reply_markup=back)
+        msg = ("✅ لا توجد حسابات مع ايميل اضافي غير مستخرجة." if only_unextracted
+               else "✅ لا توجد حسابات مع ايميل اضافي.")
+        await query.edit_message_text(msg, reply_markup=back)
         return
     document = io.BytesIO(build_recovery_export(found))
+    label = "غير المستخرجة" if only_unextracted else "الكل"
     await context.bot.send_document(
-        chat_id=OWNER_ID, document=document, filename="accounts_with_recovery.txt",
-        caption=f"📧 حسابات مع ايميل اضافي: {len(found)}\nالصيغة: ايميل:باسورد:ايميل استرداد")
-    for target_uid, encrypted_data in users.items():
-        data = decrypt_user_data(encrypted_data)
-        changed = False
-        for acc in data.get("approved_accounts", []):
-            if (acc.get("recovery_email") and not acc.get("extracted", False)
-                    and not acc.get("removed_from_extraction")):
-                acc["extracted"] = True
-                changed = True
-        if changed:
-            save_user(int(target_uid), data)
-    await query.edit_message_text(f"✅ تم استخراج {len(found)} حساب مع ايميل اضافي.", reply_markup=back)
+        chat_id=OWNER_ID, document=document,
+        filename="accounts_with_recovery_new.txt" if only_unextracted else "accounts_with_recovery_all.txt",
+        caption=f"📧 حسابات مع ايميل اضافي ({label}): {len(found)}\nالصيغة: ايميل:باسورد:ايميل استرداد")
+    if only_unextracted:
+        for target_uid, encrypted_data in users.items():
+            data = decrypt_user_data(encrypted_data)
+            changed = False
+            for acc in data.get("approved_accounts", []):
+                if (acc.get("recovery_email") and not acc.get("extracted", False)
+                        and not acc.get("removed_from_extraction")):
+                    acc["extracted"] = True
+                    changed = True
+            if changed:
+                save_user(int(target_uid), data)
+    await query.edit_message_text(f"✅ تم استخراج {len(found)} حساب مع ايميل اضافي ({label}).", reply_markup=back)
+
+
+async def recovery_extract_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _recovery_extract_run(update, context, only_unextracted=False)
+
+
+async def recovery_extract_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _recovery_extract_run(update, context, only_unextracted=True)
 
 
 async def extraction_remove_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
