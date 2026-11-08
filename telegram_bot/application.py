@@ -135,6 +135,10 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_check_email_input(update, context); return
     if step == "reject_reason_text":
         await handle_reject_reason_text(update, context); return
+    if step == "recovery_email_input":
+        await handle_recovery_email_input(update, context); return
+    if step == "extraction_remove_input":
+        await handle_extraction_remove_input(update, context); return
     if step == "reject_approved_reason_text":
         await handle_reject_approved_reason_text(update, context); return
     if step == "deduct_points_input":
@@ -475,8 +479,14 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await deduct_points_by_id(update, context)
     elif data.startswith("approve_request:"):
         await approve_request_owner(update, context)
-    elif data.startswith("reject_request:"):
+    elif data.startswith("reject_request:") or data.startswith("reject_continue:"):
         await reject_request_reason(update, context)
+    elif data.startswith("recovery_yes:"):
+        await recovery_offer_yes(update, context)
+    elif data == "recovery_extract":
+        await recovery_extract(update, context)
+    elif data == "extraction_remove_start":
+        await extraction_remove_start(update, context)
     elif data.startswith("reject_reason:"):
         await execute_reject_reason(update, context)
     elif data == "videos_section":

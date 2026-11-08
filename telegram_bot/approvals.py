@@ -1947,6 +1947,8 @@ async def all_accounts_section(update: Update, context: ContextTypes.DEFAULT_TYP
         (t(uid, "accounts_btn_unextracted_new"), "unextracted_new"),
         (t(uid, "accounts_btn_unextracted_old"), "unextracted_old"),
         (t(uid, "accounts_btn_hold"), "hold_accounts"),
+        ("📧 استخراج حسابات مع ايميل اضافي", "recovery_extract"),
+        ("🗑 ازالة الايميل من الاستخراج", "extraction_remove_start"),
         (t(uid, "owner_btn_back_panel"), "owner_panel")
     ]
     await query.edit_message_text(t(uid, "accounts_title_admin"), parse_mode=ParseMode.MARKDOWN,
@@ -2047,7 +2049,7 @@ async def unextracted_accounts(update: Update, context: ContextTypes.DEFAULT_TYP
     for target_uid, encrypted_data in users.items():
         data = decrypt_user_data(encrypted_data)
         for idx, acc in enumerate(data.get("approved_accounts", [])):
-            if not acc.get("extracted", False):
+            if not acc.get("extracted", False) and _normal_extractable(acc):
                 atype = acc.get("account_type", "old")
                 if acc_type == "all" or atype == acc_type:
                     copy = dict(acc)
@@ -2090,7 +2092,7 @@ async def mark_extracted_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
     for target_uid, encrypted_data in users.items():
         data = decrypt_user_data(encrypted_data)
         for idx, acc in enumerate(data.get("approved_accounts", [])):
-            if not acc.get("extracted", False):
+            if not acc.get("extracted", False) and _normal_extractable(acc):
                 unextracted.append({"user_id": target_uid, "index": idx, "email": acc.get("email", "")})
     if not unextracted:
         await query.edit_message_text(t(uid, "accounts_none_unextracted", type="all"),
@@ -2157,6 +2159,8 @@ async def export_all_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE
     for encrypted_data in users.values():
         data = decrypt_user_data(encrypted_data)
         for acc in data.get("approved_accounts", []):
+            if acc.get("removed_from_extraction"):
+                continue
             atype = acc.get("account_type", "old")
             if acc_type == "all" or atype == acc_type:
                 all_accs.append(acc)
@@ -2180,7 +2184,7 @@ async def export_unextracted(update: Update, context: ContextTypes.DEFAULT_TYPE,
     for target_uid, encrypted_data in users.items():
         data = decrypt_user_data(encrypted_data)
         for acc in data.get("approved_accounts", []):
-            if not acc.get("extracted", False):
+            if not acc.get("extracted", False) and _normal_extractable(acc):
                 atype = acc.get("account_type", "old")
                 if acc_type == "all" or atype == acc_type:
                     unextracted.append(acc)
@@ -2193,7 +2197,7 @@ async def export_unextracted(update: Update, context: ContextTypes.DEFAULT_TYPE,
         data = decrypt_user_data(encrypted_data)
         changed = False
         for acc in data.get("approved_accounts", []):
-            if not acc.get("extracted", False):
+            if not acc.get("extracted", False) and _normal_extractable(acc):
                 atype = acc.get("account_type", "old")
                 if acc_type == "all" or atype == acc_type:
                     acc["extracted"] = True
@@ -2244,6 +2248,21 @@ async def reject_request_reason(update: Update, context: ContextTypes.DEFAULT_TY
         if actor_id == OWNER_ID
         else f"admin_request_detail:{target_uid}:{request_token}"
     )
+
+    # ═══ الأدمن: عرض خيار "ايميل استرداد" بدل الرفض ═══
+    if query.data.startswith("reject_request:") and actor_id != OWNER_ID:
+        await query.edit_message_text(
+            f"📧 <code>{display_email}</code>\n\n"
+            f"هل تريد وضع <b>ايميل استرداد</b> بدل الرفض وإنهاء العملية بـ <b>قبول</b>؟\n\n"
+            f"💰 ستحصل على <b>${RECOVERY_ADMIN_BONUS:.2f}</b> ويحصل العضو على المكافأة المحددة.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_vertical([
+                ("✅ نعم، أضع ايميل استرداد", f"recovery_yes:{target_uid}:{request_token}"),
+                ("❌ لا، متابعة الرفض", f"reject_continue:{target_uid}:{request_token}"),
+                (t(actor_id, "appr_btn_back_detail"), detail_callback),
+            ]))
+        return
+
     context.user_data["reject_uid"] = target_uid
     context.user_data["reject_index"] = index
 
@@ -2557,6 +2576,293 @@ async def _finalize_stale_request(context: ContextTypes.DEFAULT_TYPE, target_uid
             parse_mode=ParseMode.MARKDOWN)
     except Exception:
         logger.exception("Failed to notify rejected user")
+
+
+# ==================== RECOVERY EMAIL (قبول بدل الرفض) + EXTRA-EMAIL EXTRACTION ====================
+RECOVERY_ADMIN_BONUS = 0.02
+_EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-']+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
+
+
+def _normal_extractable(acc: dict) -> bool:
+    """يظهر في الاستخراج العادي: ليس محذوفاً من الاستخراج وليس له ايميل استرداد."""
+    return not acc.get("removed_from_extraction") and not acc.get("recovery_email")
+
+
+async def recovery_offer_yes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    actor_id = update.effective_user.id
+    if not is_admin(actor_id):
+        await query.answer("🚫", show_alert=True)
+        return
+    parts = query.data.split(":")
+    target_uid = int(parts[1])
+    token = parts[2]
+    match = find_pending_request(get_user(target_uid), token)
+    if match is None:
+        await query.edit_message_text(t(actor_id, "appr_not_found"),
+                                      reply_markup=kb_single(t(actor_id, "appr_btn_requests"), "admin_requests:0"))
+        return
+    _, request = match
+    context.user_data["step"] = "recovery_email_input"
+    context.user_data["recovery_uid"] = target_uid
+    context.user_data["recovery_token"] = token
+    await query.edit_message_text(
+        f"📧 <code>{tg_html_escape(request.get('email', ''))}</code>\n\n"
+        f"✍️ أرسل الآن <b>ايميل الاسترداد</b>:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_single(t(actor_id, "btn_cancel"), f"admin_request_detail:{target_uid}:{token}"))
+
+
+async def handle_recovery_email_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    admin_id = update.effective_user.id
+    text = (update.message.text or "").strip()
+    target_uid = context.user_data.get("recovery_uid")
+    token = context.user_data.get("recovery_token")
+    if text.casefold() in {"إلغاء", "الغاء", "cancel", "отмена"}:
+        for k in ("step", "recovery_uid", "recovery_token"):
+            context.user_data.pop(k, None)
+        await update.message.reply_text(t(admin_id, "msg_cancelled"),
+                                        reply_markup=kb_single(t(admin_id, "appr_btn_requests"), "admin_requests:0"))
+        return
+    if not is_admin(admin_id) or target_uid is None or not token:
+        for k in ("step", "recovery_uid", "recovery_token"):
+            context.user_data.pop(k, None)
+        await update.message.reply_text(t(admin_id, "msg_error"))
+        return
+    if not _EMAIL_RE.match(text):
+        await update.message.reply_text("⚠️ صيغة الايميل غير صحيحة. أرسل ايميل الاسترداد مرة أخرى (أو اكتب: إلغاء).")
+        return
+    for k in ("step", "recovery_uid", "recovery_token"):
+        context.user_data.pop(k, None)
+    await admin_accept_with_recovery(update, context, int(target_uid), token, text)
+
+
+async def admin_accept_with_recovery(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                     target_uid: int, token: str, recovery_email: str):
+    """قبول الطلب مع ايميل استرداد: الأدمن +0.02$ والعضو المكافأة المحددة (مع فترة الانتظار المعتادة)."""
+    from telegram_bot.members import schedule_leave_check
+    admin_id = update.effective_user.id
+    reply_target = update.effective_message
+    user_data = get_user(target_uid)
+    match = find_pending_request(user_data, token)
+    if match is None:
+        await reply_target.reply_text(t(admin_id, "appr_not_found"),
+                                      reply_markup=kb_single(t(admin_id, "appr_btn_requests"), "admin_requests:0"))
+        return
+    index, request = match
+    pending = user_data.get("pending_requests", [])
+    email = request.get("email", "")
+    if normalize_email(recovery_email) == normalize_email(email):
+        await reply_target.reply_text("⚠️ ايميل الاسترداد يجب أن يختلف عن ايميل الحساب.")
+        context.user_data["step"] = "recovery_email_input"
+        context.user_data["recovery_uid"] = target_uid
+        context.user_data["recovery_token"] = token
+        return
+
+    acc_type = request.get("account_type", "old")
+    original_amount_cents = money_to_cents(request.get("amount", 0.0))
+    original_amount = cents_to_money(original_amount_cents)
+    admin_bonus = cents_to_money(money_to_cents(RECOVERY_ADMIN_BONUS)) if admin_id != OWNER_ID else 0.0
+    hold_seconds = LEAVE_HOLD_SECONDS
+    hold_hours = hold_seconds // 3600
+    app_pass = request.get("app_pass", "")
+
+    record_admin_activity(admin_id, "accept")
+
+    admin_user = update.effective_user
+    admin_name_str = admin_user.full_name or "Unknown"
+    admin_username = admin_user.username or "None"
+    approval_time = datetime.now(timezone.utc)
+    account_record = {
+        "email": email, "password": request.get("password", ""),
+        "totp": request.get("totp", ""), "app_pass": app_pass,
+        "recovery_email": recovery_email,
+        "amount": original_amount, "admin_bonus": admin_bonus,
+        "completed_by_admin": admin_id, "completed_by_admin_name": admin_name_str,
+        "completed_by_admin_username": admin_username, "completed_at": approval_time.isoformat(),
+        "timestamp": approval_time.isoformat(), "approval_time": approval_time.isoformat(),
+        "release_at": (approval_time + timedelta(seconds=hold_seconds)).isoformat(),
+        "hold_seconds": hold_seconds, "acceptance_mode": "recovery_email",
+        "admin_bonus_status": ("pending" if admin_bonus > 0 else "not_applicable"),
+        "extracted": False,
+        "has_totp": bool(request.get("totp")), "has_app_pass": bool(app_pass),
+        "user_name": request.get("user_name", "Unknown"),
+        "user_username": request.get("user_username", "None"),
+        "approved_with_leave": True, "leave_confirmed": False,
+        "auto_verified": False, "account_type": acc_type,
+        # بدون كلمة مرور تطبيق لا يمكن إعادة الفحص عبر IMAP بعد 24 ساعة
+        "skip_recheck": not bool(app_pass),
+    }
+
+    user_data.setdefault("approved_accounts", []).append(account_record)
+    user_data["pending_balance"] = clamp_money(float(user_data.get("pending_balance", 0.0)) - original_amount)
+    user_data["hold_balance"] = clamp_money(float(user_data.get("hold_balance", 0.0)) + original_amount)
+    user_data["total_credited_balance"] = clamp_money(float(user_data.get("total_credited_balance", 0.0) or 0.0) + original_amount)
+    user_data["total_approved_emails"] = int(user_data.get("total_approved_emails", 0)) + 1
+    pending.pop(index)
+    user_data["pending_requests"] = pending
+    add_transaction(user_data, "hold", original_amount,
+                    f"Accepted with recovery email by admin {admin_id} - hold {hold_hours}h", email)
+    register_approval_reset(user_data)
+    save_user(target_uid, user_data)
+
+    try:
+        await check_contest_award(context, target_uid)
+    except Exception:
+        logger.exception("Contest check failed")
+
+    if admin_bonus > 0:
+        admin_data = get_user(admin_id)
+        admin_data["admin_pending_balance"] = round(
+            float(admin_data.get("admin_pending_balance", 0.0)) + admin_bonus, 2)
+        add_transaction(admin_data, "admin_bonus_pending", admin_bonus, f"Pending bonus for {email}", email)
+        save_user(admin_id, admin_data)
+        try:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=t(admin_id, "admin_bonus_pending_msg", email=email, bonus=admin_bonus),
+                parse_mode=ParseMode.MARKDOWN)
+        except Exception:
+            pass
+
+    await schedule_leave_check(context, target_uid, email, account_record["release_at"])
+
+    referred_by = user_data.get("referred_by")
+    if referred_by:
+        config_ref = load_config()
+        referral_bonus = float(config_ref.get("referral_bonus", 0.0))
+        if referral_bonus > 0:
+            referrer_data = get_user(referred_by)
+            referrer_data["referral_earnings"] = clamp_money(float(referrer_data.get("referral_earnings", 0.0)) + referral_bonus)
+            referrer_data["balance"] = clamp_money(float(referrer_data.get("balance", 0.0)) + referral_bonus)
+            referrer_data["total_credited_balance"] = clamp_money(float(referrer_data.get("total_credited_balance", 0.0) or 0.0) + referral_bonus)
+            referrer_data["total_referrals"] = int(referrer_data.get("total_referrals", 0)) + 1
+            add_transaction(referrer_data, "referral", referral_bonus, f"Referral bonus for user {target_uid}", email)
+            save_user(referred_by, referrer_data)
+            try:
+                await context.bot.send_message(
+                    chat_id=referred_by,
+                    text=t(referred_by, "referral_bonus_received", bonus=referral_bonus),
+                    parse_mode=ParseMode.MARKDOWN)
+            except Exception:
+                pass
+        try:
+            await context.bot.send_message(
+                chat_id=referred_by,
+                text=t(referred_by, "referral_approved_msg", uid=target_uid, email=email),
+                parse_mode=ParseMode.MARKDOWN)
+        except Exception:
+            pass
+
+    try:
+        await context.bot.send_message(
+            chat_id=OWNER_ID,
+            text=(f"📧 <b>قبول مع ايميل استرداد</b>\n\n"
+                  f"👮 الأدمن: <code>{admin_id}</code> (@{tg_html_escape(admin_username)})\n"
+                  f"👤 العضو: <code>{target_uid}</code>\n"
+                  f"📧 الايميل: <code>{tg_html_escape(email)}</code>\n"
+                  f"🔁 ايميل الاسترداد: <code>{tg_html_escape(recovery_email)}</code>\n"
+                  f"💰 مكافأة الأدمن: ${admin_bonus:.2f}"),
+            parse_mode=ParseMode.HTML)
+    except Exception:
+        pass
+
+    try:
+        await context.bot.send_message(
+            chat_id=target_uid,
+            text=t(target_uid, "member_account_verified_msg", email=email, amount=original_amount, hours=hold_hours),
+            parse_mode=ParseMode.MARKDOWN)
+    except Exception:
+        pass
+
+    await reply_target.reply_text(
+        t(admin_id, "admin_account_accepted_msg", email=email, amount=original_amount, bonus=admin_bonus),
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_single(t(admin_id, "appr_btn_requests"), "admin_requests:0"))
+
+
+def build_recovery_export(accounts: list) -> bytes:
+    lines = [f"{a.get('email', '')}:{a.get('password', '')}:{a.get('recovery_email', '')}" for a in accounts]
+    return "\n".join(lines).encode("utf-8")
+
+
+async def recovery_extract(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """المالك: استخراج الحسابات التي لها ايميل استرداد (غير المستخرجة) بصيغة ايميل:باسورد:ايميل استرداد."""
+    query = update.callback_query
+    uid = query.from_user.id
+    if uid != OWNER_ID:
+        await query.answer("🚫", show_alert=True)
+        return
+    back = kb_single(t(uid, "accounts_title_admin"), "all_accounts_section")
+    users = load_json(USERS_DB)
+    found = []
+    for target_uid, encrypted_data in users.items():
+        data = decrypt_user_data(encrypted_data)
+        for acc in data.get("approved_accounts", []):
+            if (acc.get("recovery_email") and not acc.get("extracted", False)
+                    and not acc.get("removed_from_extraction")):
+                found.append(acc)
+    if not found:
+        await query.edit_message_text("✅ لا توجد حسابات مع ايميل اضافي غير مستخرجة.", reply_markup=back)
+        return
+    document = io.BytesIO(build_recovery_export(found))
+    await context.bot.send_document(
+        chat_id=OWNER_ID, document=document, filename="accounts_with_recovery.txt",
+        caption=f"📧 حسابات مع ايميل اضافي: {len(found)}\nالصيغة: ايميل:باسورد:ايميل استرداد")
+    for target_uid, encrypted_data in users.items():
+        data = decrypt_user_data(encrypted_data)
+        changed = False
+        for acc in data.get("approved_accounts", []):
+            if (acc.get("recovery_email") and not acc.get("extracted", False)
+                    and not acc.get("removed_from_extraction")):
+                acc["extracted"] = True
+                changed = True
+        if changed:
+            save_user(int(target_uid), data)
+    await query.edit_message_text(f"✅ تم استخراج {len(found)} حساب مع ايميل اضافي.", reply_markup=back)
+
+
+async def extraction_remove_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = query.from_user.id
+    if uid != OWNER_ID:
+        await query.answer("🚫", show_alert=True)
+        return
+    context.user_data["step"] = "extraction_remove_input"
+    await query.edit_message_text(
+        "🗑 أرسل الايميل (أو عدة ايميلات، كل واحد في سطر) لإزالته من الاستخراج.",
+        reply_markup=kb_single(t(uid, "btn_cancel"), "all_accounts_section"))
+
+
+async def handle_extraction_remove_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if uid != OWNER_ID:
+        return
+    context.user_data.pop("step", None)
+    wanted = {normalize_email(e) for e in re.split(r"[\s,;]+", update.message.text or "") if "@" in e}
+    back = kb_single(t(uid, "accounts_title_admin"), "all_accounts_section")
+    if not wanted:
+        await update.message.reply_text("⚠️ لم أجد ايميلاً في رسالتك.", reply_markup=back)
+        return
+    removed = {}
+    users = load_json(USERS_DB)
+    for target_uid, encrypted_data in users.items():
+        data = decrypt_user_data(encrypted_data)
+        changed = False
+        for acc in data.get("approved_accounts", []):
+            key = normalize_email(acc.get("email", ""))
+            if key in wanted:
+                acc["removed_from_extraction"] = True
+                acc["extracted"] = True
+                removed[key] = removed.get(key, 0) + 1
+                changed = True
+        if changed:
+            save_user(int(target_uid), data)
+    lines = []
+    for e in sorted(wanted):
+        lines.append(f"{'✅' if e in removed else '❌ غير موجود:'} {e}")
+    await update.message.reply_text(
+        "🗑 نتيجة الإزالة من الاستخراج:\n\n" + "\n".join(lines), reply_markup=back)
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]
