@@ -314,7 +314,8 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ═══ NEW: Recompletion of rejected email ═══
     elif data.startswith("owner_recomplete:"):
-        await owner_recomplete_rejected(update, context)
+        query.data = "rej_requeue:" + data.split(":", 1)[1]
+        await rej_requeue(update, context)
 
     elif data.startswith("old_continue:"):
         await old_email_continue(update, context)
@@ -421,8 +422,22 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await admin_requests(update, context)
     elif data.startswith("admin_request_detail:"):
         await admin_request_detail(update, context)
-    elif data.startswith("admin_rejected_detail:"):
-        await admin_rejected_detail(update, context)
+    elif data.startswith("rej_view:") or data.startswith("admin_rejected_detail:") or data.startswith("rejected_detail:"):
+        await rejected_detail(update, context)
+    elif data.startswith("rej_complete:"):
+        await rej_complete(update, context)
+    elif data.startswith("rej_accept:"):
+        await rej_accept(update, context)
+    elif data.startswith("rej_reject:"):
+        await rej_reject(update, context)
+    elif data.startswith("rej_recovery:"):
+        await rej_recovery(update, context)
+    elif data.startswith("rej_final:"):
+        await rej_final(update, context)
+    elif data.startswith("rej_requeue:"):
+        await rej_requeue(update, context)
+    elif data.startswith("rej_delete:"):
+        await rej_delete(update, context)
     elif data.startswith("admin_rejected:"):
         await admin_rejected_requests(update, context)
     elif data.startswith("admin_complete_start:"):
@@ -465,8 +480,6 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await execute_reject_approved_reason(update, context)
     elif data.startswith("new_totp_code:"):
         await new_totp_code(update, context)
-    elif data.startswith("rejected_detail:"):
-        await rejected_detail(update, context)
     elif data.startswith("deduct_points:"):
         await deduct_points(update, context)
     elif data.startswith("give_points:"):
@@ -479,7 +492,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await deduct_points_by_id(update, context)
     elif data.startswith("approve_request:"):
         await approve_request_owner(update, context)
-    elif data.startswith("reject_request:") or data.startswith("reject_continue:"):
+    elif data.startswith("reject_request:") or data.startswith("reject_continue:") or data.startswith("reject_final_now:"):
         await reject_request_reason(update, context)
     elif data.startswith("recovery_yes:"):
         await recovery_offer_yes(update, context)

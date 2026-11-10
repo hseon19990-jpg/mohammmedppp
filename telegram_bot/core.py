@@ -7,6 +7,7 @@ import hashlib
 import html
 import imaplib
 import io
+import copy
 import json
 import logging
 import os
@@ -875,7 +876,7 @@ def save_json(path: Path, data: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = path.with_name(f".{path.name}.tmp")
     backup_path = path.with_name(f"{path.name}.bak")
-    payload = json.dumps(data, indent=2, ensure_ascii=False)
+    payload = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
     with temporary_path.open("w", encoding="utf-8") as temporary_file:
         temporary_file.write(payload)
         temporary_file.flush()
@@ -886,6 +887,27 @@ def save_json(path: Path, data: dict):
         except OSError:
             pass
     os.replace(temporary_path, path)
+    _READONLY_CACHE.pop(str(path), None)
+
+
+# ==================== READ-ONLY CACHE ====================
+# نسخة مخزّنة للقراءة فقط (لا تعدّل الناتج ولا تحفظه). تتجدد تلقائياً عند تغيّر الملف.
+_READONLY_CACHE: Dict[str, Any] = {}
+
+
+def load_json_readonly(path: Path) -> dict:
+    key = str(path)
+    try:
+        st = path.stat()
+        stamp = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return load_json(path)
+    cached = _READONLY_CACHE.get(key)
+    if cached and cached[0] == stamp:
+        return cached[1]
+    data = load_json(path)
+    _READONLY_CACHE[key] = (stamp, data)
+    return data
 
 
 # ==================== CONFIG CACHE ====================
@@ -1077,9 +1099,10 @@ DEFAULT_USER_FIELDS = {
 
 
 def get_user(user_id: int) -> dict:
-    users = load_json(USERS_DB)
-    raw = users.get(str(user_id), {})
-    merged = {**DEFAULT_USER_FIELDS, **raw}
+    users = load_json_readonly(USERS_DB)
+    # نسخة عميقة لهذا المستخدم فقط (رخيصة) حتى لا يتلوّث الكاش عند التعديل
+    raw = copy.deepcopy(users.get(str(user_id), {}))
+    merged = {**copy.deepcopy(DEFAULT_USER_FIELDS), **raw}
     # حقول لا يمكن أن تكون سالبة
     merged["balance"] = clamp_money(merged.get("balance"))
     merged["pending_balance"] = clamp_money(merged.get("pending_balance"))
@@ -1118,6 +1141,7 @@ def save_user(user_id: int, user_data: dict):
         user_data["transactions"] = user_data["transactions"][-200:]
     users[str(user_id)] = encrypt_user_data(user_data)
     save_json(USERS_DB, users)
+    _LANG_CACHE.pop(user_id, None)
 
 
 def add_transaction(user_data: dict, kind: str, amount: float, note: str = "", email: str = ""):
@@ -1274,11 +1298,18 @@ def settle_admin_bonus(account: dict, new_status: str,
 SUPPORTED_LANGUAGES = ("ar", "en", "ru")
 
 
+_LANG_CACHE: Dict[int, str] = {}
+
+
 def get_user_language(user_id: int) -> str:
-    user_data = get_user(user_id)
-    lang = str(user_data.get("language", "ar") or "ar").lower()
+    cached = _LANG_CACHE.get(user_id)
+    if cached:
+        return cached
+    raw = load_json_readonly(USERS_DB).get(str(user_id), {})
+    lang = str((raw.get("language") if isinstance(raw, dict) else None) or "ar").lower()
     if lang not in SUPPORTED_LANGUAGES:
-        return "ar"
+        lang = "ar"
+    _LANG_CACHE[user_id] = lang
     return lang
 
 
@@ -1288,6 +1319,7 @@ def set_user_language(user_id: int, lang: str):
     user_data = get_user(user_id)
     user_data["language"] = lang
     save_user(user_id, user_data)
+    _LANG_CACHE[user_id] = lang
 
 
 def t(user_id: int, key: str, **kwargs) -> str:
@@ -1856,6 +1888,28 @@ def clear_rejected_email_records(user_data: dict, email: str):
         stored_email for stored_email in user_data.get("rejected_emails", [])
         if normalize_email(stored_email) != normalized_email
     ]
+
+
+def supersede_rejected_records(user_data: dict, email: str) -> bool:
+    """عند إعادة بيع إيميل مرفوض: يختفي من قسم المرفوض (مع بقاء السجل لعدّاد المحاولات)."""
+    normalized_email = normalize_email(email)
+    if not normalized_email:
+        return False
+    changed = False
+    for rec in user_data.get("rejected_requests", []) or []:
+        if normalize_email(rec.get("email", "")) == normalized_email and not rec.get("superseded"):
+            rec["superseded"] = True
+            changed = True
+    before = user_data.get("rejected_emails", []) or []
+    after = [e for e in before if normalize_email(e) != normalized_email]
+    if len(after) != len(before):
+        user_data["rejected_emails"] = after
+        changed = True
+    return changed
+
+
+def is_visible_rejected(rec: dict) -> bool:
+    return not rec.get("imap_auto_rejected") and not rec.get("superseded")
 
 
 # ═══ إيميلات مرفوضة نهائياً (فشل الفحص الثاني IMAP بعد 24 ساعة) ═══

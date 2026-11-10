@@ -205,7 +205,8 @@ async def my_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data = get_user(uid)
     approved = sort_records_newest_first(user_data.get("approved_accounts", []) or [])
     pending = sort_records_oldest_first(user_data.get("pending_requests", []) or [])
-    rejected = sort_records_newest_first(user_data.get("rejected_requests", []) or [])
+    rejected = [r for r in sort_records_newest_first(user_data.get("rejected_requests", []) or [])
+                if not r.get("superseded")]
     if not approved and not pending and not rejected:
         await query.edit_message_text(t(uid, "accounts_empty"),
                                       reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
@@ -249,8 +250,9 @@ async def view_member_rejected_emails(update: Update, context: ContextTypes.DEFA
     uid = query.from_user.id
     user_data = get_user(uid)
     rejected = sort_records_newest_first(user_data.get("rejected_requests", []) or [])
-    rejected = [r for r in rejected if not r.get("imap_auto_rejected")]
-    if not rejected:
+    rejected = [r for r in rejected if is_visible_rejected(r)]
+    if not rejected and not any(r.get("imap_auto_rejected") or r.get("superseded")
+                                for r in user_data.get("rejected_requests", []) or []):
         rejected = [{"email": email, "reject_reason": "unknown"}
                     for email in (user_data.get("rejected_emails", []) or [])]
     if not rejected:
@@ -880,6 +882,7 @@ async def old_email_finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
     replaced_amount = sum(float(r.get("amount", 0.0)) for r in pending
                           if normalize_email(r.get("email", "")) == normalized)
     pending = [r for r in pending if normalize_email(r.get("email", "")) != normalized]
+    supersede_rejected_records(user_data, email)
 
     pending.append({
         "email": email,
@@ -1154,6 +1157,7 @@ async def sell_new_email_finish_confirm(update: Update, context: ContextTypes.DE
         "is_bot_generated": True,
         "rejected_by_admins": [],
     }
+    supersede_rejected_records(user_data, creds["email"])
     user_data.setdefault("pending_requests", []).append(pending_request)
     user_data["pending_balance"] = clamp_money(float(user_data.get("pending_balance", 0.0)) + amount)
     add_transaction(user_data, "hold", amount, "طلب بيع إيميل جديد (بدون 2FA)", creds["email"])
@@ -1266,6 +1270,7 @@ async def handle_sell_new_email_totp(update: Update, context: ContextTypes.DEFAU
         "first_name": creds.get("first_name", ""), "is_bot_generated": True,
         "rejected_by_admins": [],
     }
+    supersede_rejected_records(user_data, creds["email"])
     user_data.setdefault("pending_requests", []).append(pending_request)
     user_data["pending_balance"] = clamp_money(float(user_data.get("pending_balance", 0.0)) + amount)
     add_transaction(user_data, "hold", amount, "new email request (totp)", creds["email"])

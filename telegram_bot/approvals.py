@@ -137,11 +137,11 @@ async def handle_video_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 # ==================== ADMIN REQUESTS ====================
 def _collect_admin_requests() -> List[dict]:
-    users = load_json(USERS_DB)
+    # للقراءة فقط: الحقول السرّية غير مستخدمة في القوائم، لذلك لا حاجة لفك التشفير (أسرع بكثير)
+    users = load_json_readonly(USERS_DB)
     items = []
-    for uid, encrypted_data in users.items():
-        user_data = decrypt_user_data(encrypted_data)
-        for idx, req in enumerate(user_data.get("pending_requests", [])):
+    for uid, user_data in users.items():
+        for idx, req in enumerate(user_data.get("pending_requests", []) or []):
             copy = dict(req)
             copy["user_id"] = uid
             copy["index"] = idx
@@ -260,92 +260,8 @@ async def admin_request_detail(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.edit_message_text(msg, parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
 
 
-async def admin_rejected_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    uid = query.from_user.id
-    if not is_admin(uid):
-        await query.answer("🚫", show_alert=True)
-        return
-    try:
-        page = int(query.data.split(":")[1])
-    except (IndexError, ValueError):
-        page = 0
-    rejected = _collect_all("rejected_requests", sort_order="newest")
-    # ═══ NEW: استثناء الرفض التلقائي بسبب IMAP ═══
-    rejected = [r for r in rejected if not r.get("imap_auto_rejected")]
-    if not rejected:
-        await query.edit_message_text(t(uid, "appr_empty"),
-                                      reply_markup=kb_single(t(uid, "admin_btn_settings"), "admin_settings"))
-        return
-
-    def label(rej):
-        reason = rej.get("reject_reason", "unknown")
-        icon = REJECT_REASON_ICONS.get(reason, "❌")
-        email = rej.get("email", "")
-        email_display = email[:18] + "..." if len(email) > 18 else email
-        return (f"{icon} {email_display}",
-                f"admin_rejected_detail:{rej['user_id']}:{rej.get('index', 0)}")
-
-    buttons = paginate_buttons(rejected, page, "admin_rejected", label)
-    buttons.append((t(uid, "admin_btn_settings"), "admin_settings"))
-    await query.edit_message_text(
-        t(uid, "appr_rejected_title", count=len(rejected)),
-        parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
 
 
-async def admin_rejected_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    uid = query.from_user.id
-    if not is_admin(uid):
-        await query.answer("🚫", show_alert=True)
-        return
-    back = kb_single(t(uid, "appr_btn_rejected"), "admin_rejected:0")
-    try:
-        parts = query.data.split(":")
-        target_uid = int(parts[1])
-        index = int(parts[2])
-    except (IndexError, ValueError):
-        await query.edit_message_text(t(uid, "appr_not_found"), reply_markup=back)
-        return
-    user_data = get_user(target_uid)
-    rejected_list = user_data.get("rejected_requests", [])
-    if index < 0 or index >= len(rejected_list):
-        await query.edit_message_text(t(uid, "appr_not_found"), reply_markup=back)
-        return
-    request = rejected_list[index]
-    if request.get("imap_auto_rejected"):
-        await query.answer("🚫 لا يمكن عرض هذا السجل — رفض تلقائي بسبب IMAP.", show_alert=True)
-        return
-    reason = request.get("reject_reason", "unknown")
-    reason_text = request.get("reject_reason_text") or REJECT_REASON_MESSAGES.get(reason, reason)
-    has_totp = request.get("has_totp", False)
-    has_app_pass = request.get("has_app_pass", False)
-    tier_icon = "🟢" if has_app_pass else "🟡" if has_totp else "🔵"
-    tier_text = (t(uid, "appr_tier_full") if has_app_pass
-                 else t(uid, "appr_tier_totp") if has_totp
-                 else t(uid, "appr_tier_pass_only"))
-
-    msg = "📋 <b>" + tg_html_escape(REJECT_REASON_LABELS.get(reason, reason)) + "</b>\n\n"
-    msg += t(uid, "admin_req_detail_seller",
-             name=tg_html_escape(request.get("user_name", "unknown")),
-             username=tg_html_escape(request.get("user_username", "none")))
-    msg += t(uid, "admin_req_detail_email", email=tg_html_escape(request.get("email", "")))
-    msg += t(uid, "admin_req_detail_pass", password=tg_html_escape(request.get("password", "")))
-    if has_totp:
-        msg += t(uid, "admin_req_detail_totp", totp=tg_html_escape(request.get("totp", "")))
-    msg += t(uid, "owner_pending_detail_misc", tier_icon=tier_icon, tier_text=tier_text,
-             uid=target_uid, amount=float(request.get("amount", 0) or 0))
-    msg += "📝 <b>" + tg_html_escape(str(reason_text)) + "</b>\n"
-    if request.get("rejected_by"):
-        msg += "❌ " + tg_html_escape(str(request.get("rejected_by_name", "Unknown"))) \
-               + f" (<code>{request.get('rejected_by')}</code>)\n"
-
-    # ═══ NEW: زر إعادة الإكمال ═══
-    buttons = [
-        ("🔄 إعادة للإكمال", f"owner_recomplete:{target_uid}:{index}"),
-        (t(uid, "appr_btn_rejected"), "admin_rejected:0"),
-    ]
-    await query.edit_message_text(msg, parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
 
 
 async def admin_show_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -891,11 +807,10 @@ async def approval_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def _collect_all(items_field: str, sort_order: str = "newest") -> List[dict]:
-    users = load_json(USERS_DB)
+    users = load_json_readonly(USERS_DB)
     items = []
-    for uid, encrypted_data in users.items():
-        user_data = decrypt_user_data(encrypted_data)
-        for idx, item in enumerate(user_data.get(items_field, [])):
+    for uid, user_data in users.items():
+        for idx, item in enumerate(user_data.get(items_field, []) or []):
             copy = dict(item)
             copy["user_id"] = uid
             copy["index"] = idx
@@ -1682,88 +1597,8 @@ async def handle_deduct_points_input(update: Update, context: ContextTypes.DEFAU
         await update.message.reply_text(t(uid, "appr_invalid_amount"))
 
 
-async def view_rejected_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    uid = query.from_user.id
-    if uid != OWNER_ID:
-        await query.answer("🚫", show_alert=True)
-        return
-    try:
-        page = int(query.data.split(":")[1])
-    except (IndexError, ValueError):
-        page = 0
-    rejected = _collect_all("rejected_requests", sort_order="newest")
-    # ═══ NEW: استثناء الرفض التلقائي بسبب IMAP ═══
-    rejected = [r for r in rejected if not r.get("imap_auto_rejected")]
-    if not rejected:
-        await query.edit_message_text(t(uid, "appr_empty"),
-                                      reply_markup=kb_single(t(uid, "appr_title"), "approval_requests"))
-        return
-
-    def label(rej):
-        reason = rej.get('reject_reason', 'unknown')
-        icon = REJECT_REASON_ICONS.get(reason, "❌")
-        user_name = rej.get("user_name", "Unknown")
-        user_username = rej.get("user_username", "None")
-        display_name = f"{user_name} (@{user_username})" if user_username != "None" else user_name
-        email_display = rej.get('email', '')[:15] + "..." if len(rej.get('email', '')) > 15 else rej.get('email', '')
-        return (f"{icon} {email_display} - {display_name[:12]}",
-                f"rejected_detail:{rej['user_id']}:{rej.get('index', 0)}")
-
-    buttons = paginate_buttons(rejected, page, "view_rejected", label)
-    buttons.append((t(uid, "appr_title"), "approval_requests"))
-    await query.edit_message_text(
-        t(uid, "appr_rejected_title", count=len(rejected)),
-        parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
 
 
-async def rejected_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    uid = query.from_user.id
-    if uid != OWNER_ID:
-        await query.answer("🚫", show_alert=True)
-        return
-    parts = query.data.split(":")
-    target_uid = int(parts[1])
-    index = int(parts[2])
-    user_data = get_user(target_uid)
-    rejected_list = user_data.get("rejected_requests", [])
-    if index >= len(rejected_list):
-        await query.edit_message_text(t(uid, "appr_not_found"),
-                                      reply_markup=kb_single(t(uid, "appr_btn_rejected"), "view_rejected:0"))
-        return
-    request = rejected_list[index]
-    if request.get("imap_auto_rejected"):
-        await query.answer("🚫 لا يمكن عرض هذا السجل — رفض تلقائي بسبب IMAP.", show_alert=True)
-        return
-    reason = request.get('reject_reason', 'unknown')
-
-    reason_text = request.get("reject_reason_text") or REJECT_REASON_MESSAGES.get(reason, reason)
-    tier_icon = "🟢" if request.get("has_app_pass") else "🟡" if request.get("has_totp") else "🔵"
-    tier_text = t(uid, "appr_tier_full") if request.get("has_app_pass") else t(uid, "appr_tier_totp") if request.get("has_totp") else t(uid, "appr_tier_pass_only")
-
-    msg = t(uid, "owner_rejected_detail_title")
-    msg += t(uid, "admin_req_detail_seller", name=tg_html_escape(request.get('user_name', 'unknown')), username=tg_html_escape(request.get('user_username', 'none')))
-    msg += t(uid, "admin_req_detail_email", email=tg_html_escape(request.get('email', '')))
-    msg += t(uid, "admin_req_detail_pass", password=tg_html_escape(request.get('password', '')))
-    if request.get("has_totp", False):
-        msg += t(uid, "admin_req_detail_totp", totp=tg_html_escape(request.get('totp', '')))
-    if request.get("has_app_pass", False):
-        msg += t(uid, "admin_req_detail_app_pass", status=f"<code>{tg_html_escape(format_app_password(request.get('app_pass', '')))}</code>")
-    msg += t(uid, "owner_pending_detail_misc", tier_icon=tier_icon, tier_text=tier_text, uid=target_uid, amount=request.get('amount', 0))
-    msg += t(uid, "owner_rejected_reason", reason=tg_html_escape(str(reason_text)))
-
-    if request.get("rejected_by"):
-        msg += t(uid, "owner_rejected_by", id=request.get('rejected_by'), name=tg_html_escape(request.get('rejected_by_name', 'Unknown')))
-
-    msg += t(uid, "owner_rejected_give_points_prompt")
-
-    buttons = [
-        ("🔄 إعادة للإكمال", f"owner_recomplete:{target_uid}:{index}"),
-        (t(uid, "appr_give_points"), f"give_points:{target_uid}:{index}"),
-        (t(uid, "appr_btn_rejected"), "view_rejected:0")
-    ]
-    await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
 
 
 async def give_points(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1774,20 +1609,20 @@ async def give_points(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     parts = query.data.split(":")
     target_uid = int(parts[1])
-    index = int(parts[2])
     user_data = get_user(target_uid)
-    rejected_list = user_data.get("rejected_requests", [])
-    if index >= len(rejected_list):
+    found = _find_rejected(user_data, parts[2])
+    if found is None:
         await query.edit_message_text(t(uid, "appr_not_found"),
                                       reply_markup=kb_single(t(uid, "appr_btn_rejected"), "view_rejected:0"))
         return
-    email = rejected_list[index].get("email", "")
+    index, rec = found
+    email = rec.get("email", "")
     context.user_data["give_uid"] = target_uid
     context.user_data["give_index"] = index
     await query.edit_message_text(
         t(uid, "appr_give_prompt", email=email, uid=target_uid),
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb_single(t(uid, "btn_cancel"), f"rejected_detail:{target_uid}:{index}"))
+        reply_markup=kb_single(t(uid, "btn_cancel"), f"rej_view:{target_uid}:{account_callback_token(email)}"))
     context.user_data["step"] = "give_points_input"
 
 
@@ -2249,8 +2084,23 @@ async def reject_request_reason(update: Update, context: ContextTypes.DEFAULT_TY
         else f"admin_request_detail:{target_uid}:{request_token}"
     )
 
-    # ═══ الأدمن: عرض خيار "ايميل استرداد" بدل الرفض ═══
-    if query.data.startswith("reject_request:") and actor_id != OWNER_ID:
+    context.user_data.pop("force_final", None)
+    # ═══ ايميل استرداد بدل الرفض (للأدمن والمالك) ═══
+    if query.data.startswith("reject_request:"):
+        if actor_id == OWNER_ID:
+            await query.edit_message_text(
+                f"📧 <code>{display_email}</code>\n\nماذا تريد أن تفعل بهذا الطلب؟\n\n"
+                f"• <b>ايميل استرداد</b>: قبول الطلب مع ايميل استرداد.\n"
+                f"• <b>رفض (1/3)</b>: يُسجَّل رفضك ويبقى الطلب لمشرف آخر.\n"
+                f"• <b>رفض نهائي فوري</b>: ينقل الطلب مباشرة إلى المرفوضة.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb_vertical([
+                    ("📧 ايميل استرداد وقبول", f"recovery_yes:{target_uid}:{request_token}"),
+                    ("❌ رفض عادي (يحتاج 3 رفضات)", f"reject_continue:{target_uid}:{request_token}"),
+                    ("⛔ رفض نهائي فوري", f"reject_final_now:{target_uid}:{request_token}"),
+                    (t(actor_id, "appr_btn_back_detail"), detail_callback),
+                ]))
+            return
         await query.edit_message_text(
             f"📧 <code>{display_email}</code>\n\n"
             f"هل تريد وضع <b>ايميل استرداد</b> بدل الرفض وإنهاء العملية بـ <b>قبول</b>؟\n\n"
@@ -2262,6 +2112,8 @@ async def reject_request_reason(update: Update, context: ContextTypes.DEFAULT_TY
                 (t(actor_id, "appr_btn_back_detail"), detail_callback),
             ]))
         return
+    if query.data.startswith("reject_final_now:") and actor_id == OWNER_ID:
+        context.user_data["force_final"] = True
 
     context.user_data["reject_uid"] = target_uid
     context.user_data["reject_index"] = index
@@ -2401,7 +2253,8 @@ async def _apply_admin_rejection(update, context, actor_id, target_uid, index,
     user_data["pending_requests"] = pending
 
     count = len(rejected_by_admins)
-    is_final = count >= REJECTIONS_REQUIRED_FOR_FINAL
+    force_final = bool(context.user_data.pop("force_final", False)) and actor_id == OWNER_ID
+    is_final = force_final or count >= REJECTIONS_REQUIRED_FOR_FINAL
 
     if is_final:
         # ═══ الرفض نهائي ═══
@@ -2443,7 +2296,7 @@ async def _apply_admin_rejection(update, context, actor_id, target_uid, index,
         except Exception:
             logger.exception("Failed to notify rejected user")
 
-        success_text = (f"✅ <b>تم الرفض النهائي</b> (3/3)\n\n"
+        success_text = (f"✅ <b>تم الرفض النهائي</b> ({'مباشر من المالك' if force_final else '3/3'})\n\n"
                         f"📧 <code>{display_email}</code>\n"
                         f"📝 السبب: {REJECT_REASON_LABELS.get(reason_type, reason_type)}")
         if ban_result:
@@ -2591,7 +2444,8 @@ def _normal_extractable(acc: dict) -> bool:
 async def recovery_offer_yes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     actor_id = update.effective_user.id
-    if not is_admin(actor_id):
+    context.user_data.pop("recovery_from_rejected", None)
+    if not is_admin_or_owner(actor_id):
         await query.answer("🚫", show_alert=True)
         return
     parts = query.data.split(":")
@@ -2610,7 +2464,9 @@ async def recovery_offer_yes(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"📧 <code>{tg_html_escape(request.get('email', ''))}</code>\n\n"
         f"✍️ أرسل الآن <b>ايميل الاسترداد</b>:",
         parse_mode=ParseMode.HTML,
-        reply_markup=kb_single(t(actor_id, "btn_cancel"), f"admin_request_detail:{target_uid}:{token}"))
+        reply_markup=kb_single(t(actor_id, "btn_cancel"),
+                               (f"pending_detail:{target_uid}:{token}" if actor_id == OWNER_ID
+                                else f"admin_request_detail:{target_uid}:{token}")))
 
 
 async def handle_recovery_email_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2619,21 +2475,32 @@ async def handle_recovery_email_input(update: Update, context: ContextTypes.DEFA
     target_uid = context.user_data.get("recovery_uid")
     token = context.user_data.get("recovery_token")
     if text.casefold() in {"إلغاء", "الغاء", "cancel", "отмена"}:
-        for k in ("step", "recovery_uid", "recovery_token"):
+        for k in ("step", "recovery_uid", "recovery_token", "recovery_from_rejected"):
             context.user_data.pop(k, None)
         await update.message.reply_text(t(admin_id, "msg_cancelled"),
-                                        reply_markup=kb_single(t(admin_id, "appr_btn_requests"), "admin_requests:0"))
+                                        reply_markup=kb_single(t(admin_id, "appr_btn_requests"), rejection_list_callback(admin_id)))
         return
-    if not is_admin(admin_id) or target_uid is None or not token:
-        for k in ("step", "recovery_uid", "recovery_token"):
+    if not is_admin_or_owner(admin_id) or target_uid is None or not token:
+        for k in ("step", "recovery_uid", "recovery_token", "recovery_from_rejected"):
             context.user_data.pop(k, None)
         await update.message.reply_text(t(admin_id, "msg_error"))
         return
     if not _EMAIL_RE.match(text):
         await update.message.reply_text("⚠️ صيغة الايميل غير صحيحة. أرسل ايميل الاسترداد مرة أخرى (أو اكتب: إلغاء).")
         return
+    from_rejected = context.user_data.pop("recovery_from_rejected", False)
     for k in ("step", "recovery_uid", "recovery_token"):
         context.user_data.pop(k, None)
+    if from_rejected:
+        # يخرج الإيميل من المرفوضة إلى المنتظرة ثم يُقبل مع ايميل الاسترداد
+        ud = get_user(int(target_uid))
+        res = revive_rejected_request(ud, token, admin_id)
+        if not isinstance(res, tuple):
+            await update.message.reply_text(
+                "⚠️ لا يمكن إكمال العملية: " + ("الإيميل موجود حالياً كطلب/حساب نشط." if res == "duplicate" else "السجل غير موجود."),
+                reply_markup=kb_single(t(admin_id, "appr_btn_rejected"), _rej_list_cb(admin_id)))
+            return
+        save_user(int(target_uid), ud)
     await admin_accept_with_recovery(update, context, int(target_uid), token, text)
 
 
@@ -2906,6 +2773,410 @@ async def handle_extraction_remove_input(update: Update, context: ContextTypes.D
         lines.append(f"{'✅' if e in removed else '❌ غير موجود:'} {e}")
     await update.message.reply_text(
         "🗑 نتيجة الإزالة من الاستخراج:\n\n" + "\n".join(lines), reply_markup=back)
+
+
+# ==================== REJECTED SECTION (موحّد للمالك والأدمن) ====================
+# مفاتيح تخص مرحلة الرفض/القبول السابقة وتُزال عند إعادة الطلب إلى المنتظرة
+_REVIVE_DROP_KEYS = (
+    "reject_reason", "reject_reason_text", "rejected_by", "rejected_by_name",
+    "rejected_by_username", "rejected_at", "rejected_from_approved", "rejected_at_24h",
+    "final_rejected", "final_rejected_by", "final_rejected_at", "superseded",
+    "approved_with_leave", "leave_confirmed", "leave_confirmed_at", "approval_time",
+    "release_at", "hold_seconds", "admin_bonus_status", "admin_bonus", "extracted",
+    "removed_from_extraction", "acceptance_mode", "auto_verified", "skip_recheck",
+)
+
+
+def _rej_is_owner(uid: int) -> bool:
+    return uid == OWNER_ID
+
+
+def _rej_list_cb(uid: int) -> str:
+    return "view_rejected:0" if uid == OWNER_ID else "admin_rejected:0"
+
+
+def _find_rejected(user_data: dict, token: str) -> Optional[Tuple[int, dict]]:
+    """يبحث عن سجل مرفوض بالتوكن (ثابت) بدل رقم الترتيب الذي يتغيّر. الأحدث أولاً."""
+    lst = user_data.get("rejected_requests", []) or []
+    found = None
+    for i, rec in enumerate(lst):
+        if is_visible_rejected(rec) and account_callback_token(rec.get("email", "")) == token:
+            found = (i, rec)
+    if found:
+        return found
+    if str(token).isdigit():  # توافق مع أزرار قديمة
+        i = int(token)
+        if 0 <= i < len(lst) and is_visible_rejected(lst[i]):
+            return i, lst[i]
+    return None
+
+
+def revive_rejected_request(user_data: dict, token: str, actor_id: int):
+    """ينقل سجلاً مرفوضاً إلى المنتظرة. يرجع (index, request) أو "duplicate" أو None. لا يحفظ."""
+    match = _find_rejected(user_data, token)
+    if match is None:
+        return None
+    r_index, rec = match
+    email = rec.get("email", "")
+    normalized = normalize_email(email)
+    pending = user_data.get("pending_requests")
+    if not isinstance(pending, list):
+        pending = []
+    if any(normalize_email(p.get("email", "")) == normalized for p in pending):
+        return "duplicate"
+    status = get_active_account_status(email)
+    if status in ("approved", "pending"):
+        return "duplicate"
+    new_request = dict(rec)
+    for key in _REVIVE_DROP_KEYS:
+        new_request.pop(key, None)
+    new_request["rejected_by_admins"] = []
+    new_request["recompleted_at"] = datetime.now(timezone.utc).isoformat()
+    new_request["recompleted_by"] = actor_id
+    pending.append(new_request)
+    user_data["pending_requests"] = pending
+    user_data["pending_balance"] = clamp_money(
+        float(user_data.get("pending_balance", 0.0)) + float(new_request.get("amount", 0.0)))
+    user_data["rejected_requests"].pop(r_index)
+    user_data["rejected_emails"] = [
+        e for e in (user_data.get("rejected_emails", []) or []) if normalize_email(e) != normalized]
+    return len(pending) - 1, new_request
+
+
+async def _rej_guard(query, actor_id: int) -> bool:
+    if not is_admin_or_owner(actor_id):
+        await query.answer("🚫", show_alert=True)
+        return False
+    return True
+
+
+async def _show_rejected_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = query.from_user.id
+    if not await _rej_guard(query, uid):
+        return
+    owner = _rej_is_owner(uid)
+    prefix = "view_rejected" if owner else "admin_rejected"
+    back = ("approval_requests", t(uid, "appr_title")) if owner else ("admin_settings", t(uid, "admin_btn_settings"))
+    try:
+        page = int(query.data.split(":")[1])
+    except (IndexError, ValueError):
+        page = 0
+    rejected = [r for r in _collect_all("rejected_requests", sort_order="newest") if is_visible_rejected(r)]
+    if not rejected:
+        await query.edit_message_text(t(uid, "appr_empty"), reply_markup=kb_single(back[1], back[0]))
+        return
+
+    def label(rej):
+        icon = REJECT_REASON_ICONS.get(rej.get("reject_reason", "unknown"), "❌")
+        tier_icon = "🟢" if rej.get("has_app_pass") else "🟡" if rej.get("has_totp") else "🔵"
+        type_icon = "🆕" if rej.get("account_type") == "new" else "📝"
+        lock = "🔒" if rej.get("final_rejected") else ""
+        email = str(rej.get("email", ""))
+        email_display = email[:16] + "..." if len(email) > 16 else email
+        extra = ""
+        if owner:
+            name = str(rej.get("user_name", "") or "")
+            extra = f" - {name[:10]}" if name else ""
+        return (f"{type_icon}{tier_icon}{icon}{lock} {email_display}{extra}",
+                f"rej_view:{rej['user_id']}:{account_callback_token(email)}")
+
+    buttons = paginate_buttons(rejected, page, prefix, label)
+    buttons.append((back[1], back[0]))
+    await query.edit_message_text(
+        t(uid, "appr_rejected_title", count=len(rejected)),
+        parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
+
+
+async def admin_rejected_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _show_rejected_list(update, context)
+
+
+async def view_rejected_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _show_rejected_list(update, context)
+
+
+async def rejected_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تفاصيل الطلب المرفوض بنفس ترتيب المنتظر: الإيميل ثم الباسورد ثم رمز المصادقة ثم كلمة مرور التطبيق."""
+    query = update.callback_query
+    uid = query.from_user.id
+    if not await _rej_guard(query, uid):
+        return
+    owner = _rej_is_owner(uid)
+    back_btn = (t(uid, "appr_btn_rejected"), _rej_list_cb(uid))
+    try:
+        parts = query.data.split(":")
+        target_uid = int(parts[1])
+        token = parts[2]
+    except (IndexError, ValueError):
+        await query.edit_message_text(t(uid, "appr_not_found"), reply_markup=kb_single(*back_btn))
+        return
+    user_data = get_user(target_uid)
+    found = _find_rejected(user_data, token)
+    if found is None:
+        await query.edit_message_text(t(uid, "appr_not_found"), reply_markup=kb_single(*back_btn))
+        return
+    _, request = found
+    token = account_callback_token(request.get("email", ""))
+    reason = request.get("reject_reason", "unknown")
+    reason_text = request.get("reject_reason_text") or REJECT_REASON_MESSAGES.get(reason, reason)
+    has_totp = bool(request.get("has_totp"))
+    has_app_pass = bool(request.get("has_app_pass"))
+    tier_icon = "🟢" if has_app_pass else "🟡" if has_totp else "🔵"
+    tier_text = (t(uid, "appr_tier_full") if has_app_pass
+                 else t(uid, "appr_tier_totp") if has_totp else t(uid, "appr_tier_pass_only"))
+    type_text = t(uid, "appr_type_new") if request.get("account_type") == "new" else t(uid, "appr_type_old")
+
+    msg = "📋 <b>تفاصيل الطلب المرفوض (" + type_text + ")</b>\n\n"
+    msg += t(uid, "admin_req_detail_seller", name=tg_html_escape(request.get("user_name", "unknown")),
+             username=tg_html_escape(request.get("user_username", "none")))
+    msg += t(uid, "admin_req_detail_email", email=tg_html_escape(request.get("email", "")))
+    msg += t(uid, "admin_req_detail_pass", password=tg_html_escape(request.get("password", "")))
+    if has_totp:
+        msg += t(uid, "admin_req_detail_totp", totp=tg_html_escape(request.get("totp", "")))
+    else:
+        msg += t(uid, "admin_req_detail_totp_none")
+    if has_app_pass:
+        msg += t(uid, "admin_req_detail_app_pass",
+                 status=f"<code>{tg_html_escape(format_app_password(request.get('app_pass', '')))}</code>")
+    else:
+        msg += t(uid, "admin_req_detail_app_pass", status=t(uid, "appr_none"))
+    msg += t(uid, "owner_pending_detail_misc", tier_icon=tier_icon, tier_text=tier_text,
+             uid=target_uid, amount=float(request.get("amount", 0) or 0))
+    msg += "\n📝 <b>سبب الرفض:</b> " + tg_html_escape(str(reason_text)) + "\n"
+    if request.get("rejected_by"):
+        msg += (f"❌ <b>من رفضه:</b> {tg_html_escape(str(request.get('rejected_by_name', 'Unknown')))}"
+                f" (<code>{request.get('rejected_by')}</code>)\n")
+    admins_rj = request.get("rejected_by_admins") or []
+    if admins_rj:
+        msg += f"⚠️ <b>عدد الرفضات:</b> <code>{len(admins_rj)}</code>\n"
+    locked = bool(request.get("final_rejected"))
+    if locked:
+        msg += "🔒 <b>رفض نهائي مؤكد</b>\n"
+
+    buttons = []
+    if not locked or owner:
+        if not (has_totp and has_app_pass):
+            buttons.append(("📝 إكمال المعلومات", f"rej_complete:{target_uid}:{token}"))
+        buttons.append(("✅ قبول", f"rej_accept:{target_uid}:{token}"))
+        buttons.append(("❌ رفض (استرداد / نهائي)", f"rej_reject:{target_uid}:{token}"))
+    if owner:
+        buttons.append((t(uid, "appr_give_points"), f"give_points:{target_uid}:{token}"))
+    buttons.append(back_btn)
+    await query.edit_message_text(msg, parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
+
+
+async def _rej_revive_or_report(update, context, target_uid: int, token: str, actor_id: int):
+    """يُخرج السجل إلى المنتظرة ويحفظ. يرجع (index, request) أو None بعد إبلاغ المستخدم."""
+    query = update.callback_query
+    back = kb_single(t(actor_id, "appr_btn_rejected"), _rej_list_cb(actor_id))
+    user_data = get_user(target_uid)
+    res = revive_rejected_request(user_data, token, actor_id)
+    if res is None:
+        await query.edit_message_text(t(actor_id, "appr_not_found"), reply_markup=back)
+        return None
+    if res == "duplicate":
+        await query.edit_message_text(
+            "⚠️ هذا الإيميل موجود حالياً كطلب منتظر أو حساب مقبول، لذلك لا يمكن إعادته.",
+            reply_markup=back)
+        return None
+    save_user(target_uid, user_data)
+    return res
+
+
+async def rej_complete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    actor_id = query.from_user.id
+    if not await _rej_guard(query, actor_id):
+        return
+    parts = query.data.split(":")
+    target_uid, token = int(parts[1]), parts[2]
+    res = await _rej_revive_or_report(update, context, target_uid, token, actor_id)
+    if res is None:
+        return
+    record_admin_activity(actor_id, "recomplete")
+    token = account_callback_token(res[1].get("email", ""))
+    if actor_id == OWNER_ID:
+        query.data = f"complete_request_owner:{target_uid}:{token}"
+        await complete_request_owner(update, context)
+    else:
+        query.data = f"admin_complete_start:{target_uid}:{token}"
+        await admin_complete_start(update, context)
+
+
+async def rej_accept(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """قبول طلب مرفوض: يعود للمنتظرة ثم يُفحص ويُقبل (الأدمن والعضو يحصلان على نقاطهما كالمعتاد)."""
+    query = update.callback_query
+    actor_id = query.from_user.id
+    if not await _rej_guard(query, actor_id):
+        return
+    parts = query.data.split(":")
+    target_uid, token = int(parts[1]), parts[2]
+    found = _find_rejected(get_user(target_uid), token)
+    if found is None:
+        await query.edit_message_text(t(actor_id, "appr_not_found"),
+                                      reply_markup=kb_single(t(actor_id, "appr_btn_rejected"), _rej_list_cb(actor_id)))
+        return
+    rec = found[1]
+    if rec.get("final_rejected") and actor_id != OWNER_ID:
+        await query.answer("🔒 رفض نهائي — للمالك فقط.", show_alert=True)
+        return
+    if not (rec.get("has_totp") and rec.get("has_app_pass")):
+        await query.answer("⚠️ المعلومات ناقصة. اضغط «إكمال المعلومات» أولاً.", show_alert=True)
+        return
+    res = await _rej_revive_or_report(update, context, target_uid, token, actor_id)
+    if res is None:
+        return
+    await admin_verify_and_store(update, context, target_uid, res[0], hold_seconds=LEAVE_HOLD_SECONDS)
+
+
+async def rej_reject(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """قائمة خيارات الرفض في المرفوضة: ايميل استرداد أو رفض نهائي (+ خيارات إضافية للمالك)."""
+    query = update.callback_query
+    actor_id = query.from_user.id
+    if not await _rej_guard(query, actor_id):
+        return
+    parts = query.data.split(":")
+    target_uid, token = int(parts[1]), parts[2]
+    found = _find_rejected(get_user(target_uid), token)
+    if found is None:
+        await query.edit_message_text(t(actor_id, "appr_not_found"),
+                                      reply_markup=kb_single(t(actor_id, "appr_btn_rejected"), _rej_list_cb(actor_id)))
+        return
+    rec = found[1]
+    token = account_callback_token(rec.get("email", ""))
+    buttons = []
+    text = f"📧 <code>{tg_html_escape(rec.get('email', ''))}</code>\n\n"
+    if actor_id == OWNER_ID:
+        text += ("ماذا تريد أن تفعل بهذا الطلب المرفوض؟\n\n"
+                 "• <b>ايميل استرداد</b>: قبول الطلب مع ايميل استرداد.\n"
+                 "• <b>رفض نهائي</b>: تثبيت الرفض (🔒).\n"
+                 "• <b>إعادة للمنتظرة</b>: يعود الطلب لقائمة الانتظار كما هو.\n"
+                 "• <b>حذف السجل</b>: يُزال من المرفوضة نهائياً.")
+    else:
+        text += (f"هل تريد وضع <b>ايميل استرداد</b> وإنهاء العملية بـ <b>قبول</b>؟\n"
+                 f"💰 ستحصل على <b>${RECOVERY_ADMIN_BONUS:.2f}</b> ويحصل العضو على المكافأة المحددة.\n\n"
+                 f"أو تثبيت <b>الرفض النهائي</b>.")
+    buttons.append(("📧 ايميل استرداد وقبول", f"rej_recovery:{target_uid}:{token}"))
+    buttons.append(("🔒 رفض نهائي", f"rej_final:{target_uid}:{token}"))
+    if actor_id == OWNER_ID:
+        buttons.append(("↩️ إعادة للمنتظرة", f"rej_requeue:{target_uid}:{token}"))
+        buttons.append(("🗑 حذف السجل", f"rej_delete:{target_uid}:{token}"))
+    buttons.append((t(actor_id, "appr_btn_back_detail"), f"rej_view:{target_uid}:{token}"))
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
+
+
+async def rej_recovery(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    actor_id = query.from_user.id
+    if not await _rej_guard(query, actor_id):
+        return
+    parts = query.data.split(":")
+    target_uid, token = int(parts[1]), parts[2]
+    found = _find_rejected(get_user(target_uid), token)
+    if found is None:
+        await query.edit_message_text(t(actor_id, "appr_not_found"),
+                                      reply_markup=kb_single(t(actor_id, "appr_btn_rejected"), _rej_list_cb(actor_id)))
+        return
+    rec = found[1]
+    if rec.get("final_rejected") and actor_id != OWNER_ID:
+        await query.answer("🔒 رفض نهائي — للمالك فقط.", show_alert=True)
+        return
+    context.user_data["step"] = "recovery_email_input"
+    context.user_data["recovery_uid"] = target_uid
+    context.user_data["recovery_token"] = account_callback_token(rec.get("email", ""))
+    context.user_data["recovery_from_rejected"] = True
+    await query.edit_message_text(
+        f"📧 <code>{tg_html_escape(rec.get('email', ''))}</code>\n\n✍️ أرسل الآن <b>ايميل الاسترداد</b>:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_single(t(actor_id, "btn_cancel"), f"rej_view:{target_uid}:{context.user_data['recovery_token']}"))
+
+
+async def rej_final(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    actor = update.effective_user
+    if not await _rej_guard(query, actor.id):
+        return
+    parts = query.data.split(":")
+    target_uid, token = int(parts[1]), parts[2]
+    user_data = get_user(target_uid)
+    found = _find_rejected(user_data, token)
+    if found is None:
+        await query.edit_message_text(t(actor.id, "appr_not_found"),
+                                      reply_markup=kb_single(t(actor.id, "appr_btn_rejected"), _rej_list_cb(actor.id)))
+        return
+    idx, rec = found
+    rec["final_rejected"] = True
+    rec["final_rejected_by"] = actor.id
+    rec["final_rejected_at"] = datetime.now(timezone.utc).isoformat()
+    user_data["rejected_requests"][idx] = rec
+    save_user(target_uid, user_data)
+    record_admin_activity(actor.id, "reject")
+    await query.edit_message_text(
+        f"🔒 <b>تم تثبيت الرفض النهائي</b>\n\n📧 <code>{tg_html_escape(rec.get('email', ''))}</code>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_single(t(actor.id, "appr_btn_rejected"), _rej_list_cb(actor.id)))
+
+
+async def rej_requeue(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """للمالك: إعادة الطلب إلى المنتظرة كما هو."""
+    query = update.callback_query
+    actor_id = query.from_user.id
+    if actor_id != OWNER_ID:
+        await query.answer("🚫", show_alert=True)
+        return
+    parts = query.data.split(":")
+    target_uid, token = int(parts[1]), parts[2]
+    res = await _rej_revive_or_report(update, context, target_uid, token, actor_id)
+    if res is None:
+        return
+    record_admin_activity(actor_id, "recomplete")
+    email = res[1].get("email", "")
+    try:
+        await context.bot.send_message(
+            chat_id=target_uid,
+            text=(f"🔄 <b>تمت إعادة طلبك للمراجعة</b>\n\n📧 <code>{tg_html_escape(email)}</code>\n\n"
+                  f"<i>سيتم مراجعة حسابك من جديد من قبل الإدارة.</i>"),
+            parse_mode=ParseMode.HTML)
+    except Exception:
+        pass
+    query.data = f"pending_detail:{target_uid}:{account_callback_token(email)}"
+    await pending_detail(update, context)
+
+
+async def rej_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """للمالك: حذف سجل مرفوض (مع تأكيد)."""
+    query = update.callback_query
+    actor_id = query.from_user.id
+    if actor_id != OWNER_ID:
+        await query.answer("🚫", show_alert=True)
+        return
+    parts = query.data.split(":")
+    target_uid, token = int(parts[1]), parts[2]
+    user_data = get_user(target_uid)
+    found = _find_rejected(user_data, token)
+    if found is None:
+        await query.edit_message_text(t(actor_id, "appr_not_found"),
+                                      reply_markup=kb_single(t(actor_id, "appr_btn_rejected"), _rej_list_cb(actor_id)))
+        return
+    idx, rec = found
+    if len(parts) < 4 or parts[3] != "ok":
+        await query.edit_message_text(
+            f"🗑 حذف السجل نهائياً؟\n\n📧 <code>{tg_html_escape(rec.get('email', ''))}</code>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_vertical([
+                ("✅ نعم، احذف", f"rej_delete:{target_uid}:{token}:ok"),
+                (t(actor_id, "btn_cancel"), f"rej_view:{target_uid}:{token}"),
+            ]))
+        return
+    user_data["rejected_requests"].pop(idx)
+    normalized = normalize_email(rec.get("email", ""))
+    user_data["rejected_emails"] = [
+        e for e in (user_data.get("rejected_emails", []) or []) if normalize_email(e) != normalized]
+    save_user(target_uid, user_data)
+    await query.edit_message_text("✅ تم حذف السجل.",
+                                  reply_markup=kb_single(t(actor_id, "appr_btn_rejected"), _rej_list_cb(actor_id)))
+
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]
