@@ -1783,6 +1783,7 @@ async def all_accounts_section(update: Update, context: ContextTypes.DEFAULT_TYP
         (t(uid, "accounts_btn_unextracted_old"), "unextracted_old"),
         (t(uid, "accounts_btn_hold"), "hold_accounts"),
         ("📧 استخراج حسابات مع ايميل اضافي", "recovery_extract"),
+        ("🚫 رفض ايميلات مع بريد الاسترداد", "bulk_reject_recovery_start"),
         ("🗑 ازالة الايميل من الاستخراج", "extraction_remove_start"),
         (t(uid, "owner_btn_back_panel"), "owner_panel")
     ]]
@@ -2773,6 +2774,143 @@ async def handle_extraction_remove_input(update: Update, context: ContextTypes.D
         lines.append(f"{'✅' if e in removed else '❌ غير موجود:'} {e}")
     await update.message.reply_text(
         "🗑 نتيجة الإزالة من الاستخراج:\n\n" + "\n".join(lines), reply_markup=back)
+
+
+# ==================== BULK REJECT OF RECOVERY-EMAIL ACCEPTED ACCOUNTS ====================
+_EMAIL_IN_LINE_RE = re.compile(r"[^\s:,;|]+@[^\s:,;|]+")
+
+
+async def bulk_reject_recovery_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = query.from_user.id
+    if uid != OWNER_ID:
+        await query.answer("🚫", show_alert=True)
+        return
+    context.user_data["step"] = "bulk_reject_recovery_input"
+    await query.edit_message_text(
+        "🚫 <b>رفض عدة ايميلات (المقبولة ببريد استرداد)</b>\n\n"
+        "أرسل الايميلات، كل ايميل في سطر. يمكنك لصق الصيغة <code>email:password:recovery</code> "
+        "وسآخذ الايميل الأول من كل سطر.\n\n"
+        "• الحساب في فترة الانتظار: يُلغى رصيد العضو المعلّق وتُلغى مكافأة المشرف.\n"
+        "• الحساب الذي أُفرج عنه: يُخصم المبلغ من رصيد العضو وتُلغى مكافأة المشرف.\n"
+        "• الايميلات المقبولة بطريقة أخرى (بدون بريد استرداد) لا تُمس.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_single(t(uid, "btn_cancel"), "all_accounts_section"))
+
+
+async def handle_bulk_reject_recovery_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if uid != OWNER_ID:
+        return
+    context.user_data.pop("step", None)
+    back = kb_single(t(uid, "accounts_title_admin"), "all_accounts_section")
+
+    wanted = []
+    seen = set()
+    for line in (update.message.text or "").splitlines():
+        m = _EMAIL_IN_LINE_RE.search(line)
+        if not m:
+            continue
+        key = normalize_email(m.group(0))
+        if key and key not in seen:
+            seen.add(key)
+            wanted.append(key)
+    if not wanted:
+        await update.message.reply_text("⚠️ لم أجد ايميلاً في رسالتك.", reply_markup=back)
+        return
+
+    # المرحلة 1: فهرسة كل الحسابات المقبولة (إيميل -> صاحب الحساب)
+    locations = {}
+    users = load_json(USERS_DB)
+    for target_uid, encrypted_data in users.items():
+        data = decrypt_user_data(encrypted_data)
+        for acc in data.get("approved_accounts", []) or []:
+            key = normalize_email(acc.get("email", ""))
+            if key in seen and not acc.get("rejected_at_24h"):
+                locations[key] = (int(target_uid), acc.get("acceptance_mode") == "recovery_email")
+
+    actor = update.effective_user
+    reason_text = "معلومات الحساب غير صحيحة"
+    lines = []
+    ok_count = 0
+    for email_key in wanted:
+        loc = locations.get(email_key)
+        if loc is None:
+            lines.append(f"❌ غير موجود في المقبولة: {email_key}")
+            continue
+        target_uid, is_recovery = loc
+        if not is_recovery:
+            lines.append(f"⏭ تم تخطيه (ليس مقبولاً ببريد استرداد): {email_key}")
+            continue
+        try:
+            user_data = get_user(target_uid)
+            accounts = user_data.get("approved_accounts", [])
+            match = next(((i, a) for i, a in enumerate(accounts)
+                          if normalize_email(a.get("email", "")) == email_key), None)
+            if match is None:
+                lines.append(f"❌ غير موجود في المقبولة: {email_key}")
+                continue
+            index, account = match
+            account = dict(account)
+            email = account.get("email", "")
+            amount = clamp_money(account.get("amount", 0.0))
+            was_hold = account.get("approved_with_leave") and not account.get("leave_confirmed")
+            was_released = bool(account.get("leave_confirmed")) and not account.get("rejected_at_24h")
+
+            try:
+                if settle_admin_bonus(account, "rejected", owner_data=user_data, owner_id=target_uid):
+                    account["admin_bonus_status"] = "rejected"
+            except Exception:
+                logger.exception("Bulk reject: failed to reverse admin bonus")
+
+            accounts.pop(index)
+            user_data["approved_accounts"] = accounts
+            move_approved_account_to_rejected(user_data, account, "other", reason_text)
+            if user_data.get("rejected_requests"):
+                user_data["rejected_requests"][-1]["rejected_by"] = actor.id
+                user_data["rejected_requests"][-1]["rejected_by_name"] = actor.full_name or "Unknown"
+                user_data["rejected_requests"][-1]["rejected_by_username"] = actor.username or ""
+
+            if was_hold:
+                user_data["hold_balance"] = clamp_money(float(user_data.get("hold_balance", 0.0)) - amount)
+                add_transaction(user_data, "approved_rejection", amount,
+                                "Rejected approved account (bulk), canceled hold", email)
+                status = "كان في الانتظار"
+            elif was_released:
+                user_data["balance"] = clamp_money(float(user_data.get("balance", 0.0)) - amount)
+                user_data["spent_balance"] = clamp_money(float(user_data.get("spent_balance", 0.0)) + amount)
+                add_transaction(user_data, "debit", amount,
+                                "Rejected approved account (bulk), refunded", email)
+                status = "كان قد أُفرج عنه وخُصم"
+            else:
+                status = "تم"
+            save_user(target_uid, user_data)
+            ok_count += 1
+            lines.append(f"✅ {email} ({status})")
+
+            try:
+                await context.bot.send_message(
+                    chat_id=target_uid,
+                    text=t(target_uid, "member_rejected_approved_msg", email=email, reason=reason_text),
+                    parse_mode=ParseMode.MARKDOWN)
+            except Exception:
+                pass
+        except Exception:
+            logger.exception("Bulk reject failed for %s", email_key)
+            lines.append(f"⚠️ خطأ أثناء رفض: {email_key}")
+
+    header = f"🚫 نتيجة الرفض الجماعي: {ok_count}/{len(wanted)} تم رفضها\n\n"
+    chunks, cur = [], header
+    for ln in lines:
+        if len(cur) + len(ln) + 1 > 3500:
+            chunks.append(cur)
+            cur = ""
+        cur += ln + "\n"
+    chunks.append(cur)
+    for i, chunk in enumerate(chunks):
+        await update.message.reply_text(
+            chunk, reply_markup=back if i == len(chunks) - 1 else None,
+            disable_web_page_preview=True)
 
 
 # ==================== REJECTED SECTION (موحّد للمالك والأدمن) ====================

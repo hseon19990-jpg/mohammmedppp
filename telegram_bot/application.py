@@ -137,6 +137,8 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_reject_reason_text(update, context); return
     if step == "recovery_email_input":
         await handle_recovery_email_input(update, context); return
+    if step == "bulk_reject_recovery_input":
+        await handle_bulk_reject_recovery_input(update, context); return
     if step == "extraction_remove_input":
         await handle_extraction_remove_input(update, context); return
     if step == "reject_approved_reason_text":
@@ -502,6 +504,8 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await recovery_extract_all(update, context)
     elif data == "recovery_extract_new":
         await recovery_extract_new(update, context)
+    elif data == "bulk_reject_recovery_start":
+        await bulk_reject_recovery_start(update, context)
     elif data == "extraction_remove_start":
         await extraction_remove_start(update, context)
     elif data.startswith("reject_reason:"):
