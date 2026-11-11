@@ -1593,6 +1593,17 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
             break
     if account is None or account.get("leave_confirmed", False):
         return
+    # ❄️ تجميد الإفراج: لا يخرج مال ولا مكافأة حتى يفتح المالك التجميد
+    if account.get("frozen"):
+        return
+    if account_release_frozen_by_admin(account):
+        account["frozen"] = True
+        account["frozen_at"] = datetime.now(timezone.utc).isoformat()
+        account["frozen_remaining"] = 0
+        accounts[account_idx] = account
+        user_data["approved_accounts"] = accounts
+        save_user(user_id, user_data)
+        return
     price = float(account.get("amount", 0.0))
     hold_hours = max(1, int(account.get("hold_seconds", LEAVE_HOLD_SECONDS)) // 3600)
     allowed, wait = imap_rate_ok(email)

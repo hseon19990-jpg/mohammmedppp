@@ -1783,6 +1783,7 @@ async def all_accounts_section(update: Update, context: ContextTypes.DEFAULT_TYP
         (t(uid, "accounts_btn_unextracted_old"), "unextracted_old"),
         (t(uid, "accounts_btn_hold"), "hold_accounts"),
         ("📧 استخراج حسابات مع ايميل اضافي", "recovery_extract"),
+        ("❄️ تجميد / فتح الإفراج", "freeze_menu"),
         ("🚫 رفض ايميلات مع بريد الاسترداد", "bulk_reject_recovery_start"),
         ("🗑 ازالة الايميل من الاستخراج", "extraction_remove_start"),
         (t(uid, "owner_btn_back_panel"), "owner_panel")
@@ -2774,6 +2775,192 @@ async def handle_extraction_remove_input(update: Update, context: ContextTypes.D
         lines.append(f"{'✅' if e in removed else '❌ غير موجود:'} {e}")
     await update.message.reply_text(
         "🗑 نتيجة الإزالة من الاستخراج:\n\n" + "\n".join(lines), reply_markup=back)
+
+
+# ==================== FREEZE / UNFREEZE RELEASE ====================
+def _acc_release_dt(acc: dict):
+    dt = parse_iso_datetime(acc.get("release_at"))
+    if dt is None:
+        base = parse_iso_datetime(acc.get("approval_time"))
+        if base is not None:
+            dt = base + timedelta(seconds=int(acc.get("hold_seconds", LEAVE_HOLD_SECONDS)))
+    return dt
+
+
+def _is_hold_acc(acc: dict) -> bool:
+    return bool(acc.get("approved_with_leave")) and not acc.get("leave_confirmed") \
+        and not acc.get("rejected_at_24h")
+
+
+def _freeze_key_matches(acc: dict, key: str) -> bool:
+    aid = acc.get("completed_by_admin")
+    if aid is None:
+        return False
+    try:
+        aid = int(aid)
+    except (TypeError, ValueError):
+        return False
+    if aid == OWNER_ID:
+        return False
+    return key == "all" or str(aid) == key
+
+
+def _hold_stats_by_admin() -> dict:
+    stats = {}
+    users = load_json(USERS_DB)
+    for _uid, enc in users.items():
+        data = decrypt_user_data(enc)
+        for acc in data.get("approved_accounts", []) or []:
+            if not _is_hold_acc(acc):
+                continue
+            aid = acc.get("completed_by_admin")
+            try:
+                aid = int(aid)
+            except (TypeError, ValueError):
+                continue
+            if aid == OWNER_ID:
+                continue
+            st = stats.setdefault(aid, {"name": acc.get("completed_by_admin_name") or "Unknown",
+                                        "hold": 0, "frozen": 0})
+            st["hold"] += 1
+            if acc.get("frozen"):
+                st["frozen"] += 1
+    return stats
+
+
+async def freeze_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = query.from_user.id
+    if uid != OWNER_ID:
+        await query.answer("🚫", show_alert=True)
+        return
+    context.user_data.pop("step", None)
+    stats = _hold_stats_by_admin()
+    fz = {str(x) for x in (load_config().get("frozen_admins") or [])}
+    all_frozen = "all" in fz
+    msg = ("❄️ <b>تجميد الإفراج</b>\n\n"
+           "التجميد يوقف خروج المال للأعضاء ومكافأة المشرف لحسابات الانتظار "
+           "(ولأي حساب جديد يقبله المشرف المجمّد). المدة المتبقية تتوقف أثناء التجميد.\n\n")
+    if all_frozen:
+        msg += "🔒 <b>التجميد مفعّل لكل المشرفين.</b>\n\n"
+    if not stats and not fz:
+        msg += "لا توجد حسابات انتظار حالياً."
+    buttons = []
+    for aid, st in sorted(stats.items(), key=lambda kv: -kv[1]["hold"]):
+        name = tg_html_escape(str(st["name"]))[:20]
+        is_fz = all_frozen or str(aid) in fz
+        icon = "🔒" if is_fz else "🟢"
+        msg += f"{icon} <code>{aid}</code> {name} — انتظار: {st['hold']} | مجمّد: {st['frozen']}\n"
+        if all_frozen:
+            continue
+        if str(aid) in fz:
+            buttons.append([(f"🔥 فتح تجميد {name}", f"unfreeze_pick:{aid}")])
+        else:
+            buttons.append([(f"❄️ تجميد {name} ({st['hold']})", f"freeze_do:{aid}")])
+    if not all_frozen:
+        buttons.append([("❄️ تجميد كل المشرفين", "freeze_do:all")])
+    if fz:
+        buttons.append([("🔥 فتح تجميد الكل", "unfreeze_pick:all")])
+    buttons.append([(t(uid, "accounts_title_admin"), "all_accounts_section")])
+    await query.edit_message_text(msg, parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
+
+
+async def freeze_do(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = query.from_user.id
+    if uid != OWNER_ID:
+        await query.answer("🚫", show_alert=True)
+        return
+    key = query.data.split(":", 1)[1]
+    cfg = load_config()
+    fz = {str(x) for x in (cfg.get("frozen_admins") or [])}
+    fz.add(key)
+    cfg["frozen_admins"] = sorted(fz)
+    save_config(cfg)
+    now = datetime.now(timezone.utc)
+    count = 0
+    users = load_json(USERS_DB)
+    for target_uid, enc in users.items():
+        data = decrypt_user_data(enc)
+        changed = False
+        for acc in data.get("approved_accounts", []) or []:
+            if _is_hold_acc(acc) and not acc.get("frozen") and _freeze_key_matches(acc, key):
+                rel = _acc_release_dt(acc)
+                remaining = max(0, int((rel - now).total_seconds())) if rel else 0
+                acc["frozen"] = True
+                acc["frozen_at"] = now.isoformat()
+                acc["frozen_remaining"] = remaining
+                changed = True
+                count += 1
+        if changed:
+            save_user(int(target_uid), data)
+    await query.answer(f"❄️ تم تجميد {count} حساب", show_alert=True)
+    await freeze_menu(update, context)
+
+
+async def unfreeze_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = query.from_user.id
+    if uid != OWNER_ID:
+        await query.answer("🚫", show_alert=True)
+        return
+    key = query.data.split(":", 1)[1]
+    label = "كل المشرفين" if key == "all" else f"المشرف {key}"
+    buttons = [
+        [("▶️ استكمال المدة المتبقية", f"unfreeze_do:{key}:r")],
+        [("⏱ 12 ساعة من الآن", f"unfreeze_do:{key}:12")],
+        [("⏱ 24 ساعة من الآن", f"unfreeze_do:{key}:24")],
+        [("⏱ 48 ساعة من الآن", f"unfreeze_do:{key}:48")],
+        [("🔙 رجوع", "freeze_menu")],
+    ]
+    await query.edit_message_text(
+        f"🔥 <b>فتح التجميد: {label}</b>\n\nاختر كم تمشي الحسابات بعد الفتح قبل الإفراج "
+        "(وبعدها يتم الفحص العادي وتصل النقاط):",
+        parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
+
+
+async def unfreeze_do(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from telegram_bot.members import schedule_leave_check
+    query = update.callback_query
+    uid = query.from_user.id
+    if uid != OWNER_ID:
+        await query.answer("🚫", show_alert=True)
+        return
+    _, key, mode = query.data.split(":", 2)
+    cfg = load_config()
+    if key == "all":
+        cfg["frozen_admins"] = []
+    else:
+        cfg["frozen_admins"] = [x for x in (cfg.get("frozen_admins") or []) if str(x) != key]
+    save_config(cfg)
+    now = datetime.now(timezone.utc)
+    count = 0
+    users = load_json(USERS_DB)
+    for target_uid, enc in users.items():
+        data = decrypt_user_data(enc)
+        changed = False
+        to_schedule = []
+        for acc in data.get("approved_accounts", []) or []:
+            if not (_is_hold_acc(acc) and acc.get("frozen") and _freeze_key_matches(acc, key)):
+                continue
+            if mode == "r":
+                secs = max(60, int(acc.get("frozen_remaining", 0) or 0))
+            else:
+                secs = int(mode) * 3600
+            rel = now + timedelta(seconds=secs)
+            acc["release_at"] = rel.isoformat()
+            acc["frozen"] = False
+            acc.pop("frozen_at", None)
+            acc.pop("frozen_remaining", None)
+            to_schedule.append((acc.get("email", ""), rel.isoformat()))
+            changed = True
+            count += 1
+        if changed:
+            save_user(int(target_uid), data)
+            for email, rel_iso in to_schedule:
+                await schedule_leave_check(context, int(target_uid), email, rel_iso)
+    await query.answer(f"🔥 تم فتح التجميد لـ {count} حساب", show_alert=True)
+    await freeze_menu(update, context)
 
 
 # ==================== BULK REJECT OF RECOVERY-EMAIL ACCEPTED ACCOUNTS ====================

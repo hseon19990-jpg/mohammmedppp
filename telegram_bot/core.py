@@ -1294,6 +1294,19 @@ def settle_admin_bonus(account: dict, new_status: str,
     return True
 
 
+# ==================== RELEASE FREEZE (تجميد الإفراج) ====================
+def account_release_frozen_by_admin(account: dict) -> bool:
+    """True إذا كان مشرف هذا الحساب (أو الكل) في قائمة التجميد. حسابات المالك لا تتجمّد."""
+    try:
+        aid = account.get("completed_by_admin")
+        if aid is None or int(aid) == OWNER_ID:
+            return False
+        frozen = {str(x) for x in (load_config().get("frozen_admins") or [])}
+        return "all" in frozen or str(int(aid)) in frozen
+    except Exception:
+        return False
+
+
 # ==================== LANGUAGE HELPERS ====================
 SUPPORTED_LANGUAGES = ("ar", "en", "ru")
 

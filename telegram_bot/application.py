@@ -504,6 +504,14 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await recovery_extract_all(update, context)
     elif data == "recovery_extract_new":
         await recovery_extract_new(update, context)
+    elif data == "freeze_menu":
+        await freeze_menu(update, context)
+    elif data.startswith("freeze_do:"):
+        await freeze_do(update, context)
+    elif data.startswith("unfreeze_pick:"):
+        await unfreeze_pick(update, context)
+    elif data.startswith("unfreeze_do:"):
+        await unfreeze_do(update, context)
     elif data == "bulk_reject_recovery_start":
         await bulk_reject_recovery_start(update, context)
     elif data == "extraction_remove_start":
