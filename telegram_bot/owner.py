@@ -797,6 +797,7 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ("📈 إحصائيات المستخدمين", "owner_stats"),
         ("🔎 فحص عضو", "check_member"),
         ("🔍 فحص إيميل", "check_email_by_address"),
+        ("🔐 فحص IMAP", "imap_check_menu"),
         ("🔗 نظام الإحالة", "referral_settings"),
         ("💰 خصم/منح نقاط", "points_management"),
         ("🔙 القائمة الرئيسية", "main_menu")

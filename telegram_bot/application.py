@@ -6,6 +6,7 @@ from telegram_bot.owner import *
 from telegram_bot.approvals import *
 from telegram_bot.store import *
 from telegram_bot.volunteer import *
+from telegram_bot.imap_audit import *
 from telegram_bot.locales import TRANSLATIONS
 
 from telegram_bot.members import restore_leave_checks
@@ -53,6 +54,10 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if mode.startswith("master_rate_"):
         from telegram_bot.owner import handle_master_rate_input
         await handle_master_rate_input(update, context); return
+
+    # ═══ 0d. Owner IMAP audit (email:app_password list) ═══
+    if mode == IMAP_AUDIT_MODE:
+        await handle_imap_text(update, context); return
 
     # ═══ 1. API management input ═══
     if context.user_data.get("api_add_step") == "key":
@@ -231,6 +236,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
     clear_edit_state(context)
+    if context.user_data.get("mode") == IMAP_AUDIT_MODE:
+        context.user_data.pop("mode", None)
     SESSIONS.pop(update.effective_user.id, None)
     save_sessions()
     if notice:
@@ -350,6 +357,8 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_video_in_add(update, context)
     elif data == "owner_panel":
         await owner_panel(update, context)
+    elif data == "imap_check_menu" or data.startswith("imapx:"):
+        await imap_check_callback(update, context)
     elif data == "maintenance_toggle":
         await toggle_maintenance(update, context)
     elif data == "support_link_settings":
@@ -805,6 +814,7 @@ async def owner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                ("📈 إحصائيات المستخدمين", "owner_stats"),
                ("🔎 فحص عضو", "check_member"),
                ("🔍 فحص إيميل", "check_email_by_address"),
+               ("🔐 فحص IMAP", "imap_check_menu"),
                ("🔗 نظام الإحالة", "referral_settings"),
                ("💰 خصم/منح نقاط", "points_management"),
                ("🔙 القائمة الرئيسية", "main_menu")]
@@ -872,6 +882,7 @@ def main():
     app.add_handler(CallbackQueryHandler(router))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_input))
     app.add_handler(MessageHandler(filters.VIDEO, handle_video_upload))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_imap_document))
     logger.info("🤖 Bot started.")
     app.run_polling()
 
