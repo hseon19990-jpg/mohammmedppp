@@ -44,7 +44,13 @@ def _pick_app_password(rest: str) -> str:
     if len(squashed) == 16:
         return squashed
     tokens = candidate.split()
+    # "pass TOTP abcd efgh ijkl mnop" (space-only separators): the app password is
+    # either the last 16-char token or the last four 4-char groups.
+    if len(tokens) >= 4 and all(len(x) == 4 and x.isalnum() for x in tokens[-4:]):
+        return "".join(tokens[-4:])
     if len(tokens) > 1 and len(tokens[-1]) == 16 and tokens[-1].isalnum():
+        return tokens[-1]
+    if len(tokens) > 1:
         return tokens[-1]
     return squashed
 
