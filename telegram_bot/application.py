@@ -60,6 +60,10 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if mode == IMAP_AUDIT_MODE:
         await handle_imap_text(update, context); return
 
+    # ═══ 0e-2. المالك يكتب ملاحظات الذكاء الاصطناعي ═══
+    if context.user_data.get("ai_notes_step") == "notes":
+        await handle_ai_notes_input(update, context); return
+
     # ═══ 0e-1. المالك يضيف مفتاح الذكاء الاصطناعي ═══
     if context.user_data.get("ai_key_step") == "key":
         await handle_ai_key_input(update, context); return
@@ -281,6 +285,8 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await ask_ai_start(update, context)
     elif data == "ai_settings":
         await ai_settings_menu(update, context)
+    elif data == "ai_notes_start":
+        await ai_notes_start(update, context)
     elif data == "ai_key_start":
         await ai_key_start(update, context)
     elif data == "ai_key_test":

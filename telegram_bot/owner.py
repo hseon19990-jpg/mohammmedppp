@@ -774,6 +774,7 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("api_add_step", None)
     context.user_data.pop("api_add_actor", None)
     context.user_data.pop("ai_key_step", None)
+    context.user_data.pop("ai_notes_step", None)
     context.user_data.pop("mode", None)
     buttons = [
         maintenance_toggle_button(),
