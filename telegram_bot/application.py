@@ -632,6 +632,10 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await user_buy_service(update, context)
     elif data.startswith("deliver_order:"):
         await deliver_order(update, context)
+    elif data == "cleanup_recovery_run":
+        await cleanup_recovery_run(update, context)
+    elif data == "cleanup_recovery_cancel":
+        await cleanup_recovery_cancel(update, context)
     elif data == "all_accounts_section":
         await all_accounts_section(update, context)
     elif data == "owner_stats":
@@ -863,6 +867,7 @@ def main():
     app.add_handler(CommandHandler("owner", owner_command))
     app.add_handler(CommandHandler("admin", admin_command))
     app.add_handler(CommandHandler("backup", backup_command))
+    app.add_handler(CommandHandler("cleanup_recovery", cleanup_recovery_command))
     app.add_handler(CallbackQueryHandler(router))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_input))
     app.add_handler(MessageHandler(filters.VIDEO, handle_video_upload))

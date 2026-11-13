@@ -2417,25 +2417,198 @@ async def _finalize_stale_request(context: ContextTypes.DEFAULT_TYPE, target_uid
 
 
 # ==================== EXTRACTION HELPERS ====================
+def _is_recovery_account(acc: dict) -> bool:
+    """سجل قديم قُبل بطريقة ايميل الاسترداد (لم يمرّ بفحص IMAP)."""
+    return acc.get("acceptance_mode") == "recovery_email" or bool(acc.get("recovery_email"))
+
+
+def _passed_first_imap(acc: dict) -> bool:
+    """نجح في فحص IMAP الأول (نتيجة الفحص الثاني لا تهم)."""
+    if _is_recovery_account(acc):
+        return False
+    ver = acc.get("verification") or {}
+    return acc.get("auto_verified") is True or ver.get("imap_ok") is True
+
+
+def _is_complete_account(acc: dict) -> bool:
+    """مكتمل: ايميل + باسورد + مصادقة (TOTP)."""
+    return all(str(acc.get(k) or "").strip() for k in ("email", "password", "totp"))
+
+
+def _extraction_eligible(acc: dict) -> bool:
+    return _passed_first_imap(acc) and _is_complete_account(acc)
+
+
 def _normal_extractable(acc: dict) -> bool:
-    """يظهر في الاستخراج: ليس محذوفاً من الاستخراج (وسجلات قديمة غير مفحوصة بـ IMAP مستثناة)."""
-    return not acc.get("removed_from_extraction") and acc.get("acceptance_mode") != "recovery_email"
+    """يظهر في الاستخراج: غير محذوف منه، نجح في IMAP الأول، ومكتمل."""
+    return not acc.get("removed_from_extraction") and _extraction_eligible(acc)
 
 
 def _extraction_pool(data: dict, acc_type: str = "all") -> list:
     """حسابات المستخدم المرشحة للاستخراج (نفس كائنات القاموس، فالتعديل عليها يُحفظ).
-    للنوع الجديد تشمل أيضاً الحسابات التي نجحت في IMAP الأول ثم فشلت في الفحص الثاني (24 ساعة)،
-    فتبقى في القوائم سواء قُبلت أو رُفضت بعد الفحص الثاني."""
-    pool = [a for a in (data.get("approved_accounts", []) or [])
-            if a.get("acceptance_mode") != "recovery_email"]
+    حصراً الحسابات التي نجحت في IMAP الأول ومكتملة (ايميل+باسورد+مصادقة).
+    تبقى في القوائم سواء نجحت أو فشلت في الفحص الثاني (24 ساعة):
+    الفاشلة في الثاني تُجمع من المرفوضة للنوع الجديد."""
+    pool = [a for a in (data.get("approved_accounts", []) or []) if _extraction_eligible(a)]
     if acc_type == "new":
         for rec in data.get("rejected_requests", []) or []:
-            if rec.get("acceptance_mode") == "recovery_email":
-                continue
             if rec.get("rejected_from_approved") and (
-                    rec.get("rejected_at_24h") or rec.get("reject_reason") == "imap_failed_24h"):
+                    rec.get("rejected_at_24h") or rec.get("reject_reason") == "imap_failed_24h"
+            ) and _extraction_eligible(rec):
                 pool.append(rec)
     return pool
+
+
+# ==================== ONE-TIME CLEANUP: RECOVERY-ACCEPTED ACCOUNTS ====================
+def _scan_cleanup() -> dict:
+    users = load_json(USERS_DB)
+    info = {"targets": [], "member_hold": 0.0, "member_released": 0.0, "admin_bonus": {},
+            "hidden_no_imap": 0, "hidden_incomplete": 0}
+    for uid_str, enc in users.items():
+        data = decrypt_user_data(enc)
+        for acc in data.get("approved_accounts", []) or []:
+            if _is_recovery_account(acc):
+                amt = clamp_money(acc.get("amount", 0.0))
+                released = bool(acc.get("leave_confirmed"))
+                info["targets"].append(uid_str)
+                info["member_released" if released else "member_hold"] += amt
+                try:
+                    aid = int(acc.get("completed_by_admin"))
+                except (TypeError, ValueError):
+                    aid = None
+                if aid and aid != OWNER_ID and money_to_cents(acc.get("admin_bonus", 0.0)) > 0 \
+                        and str(acc.get("admin_bonus_status") or "") in ("pending", "", "released"):
+                    info["admin_bonus"][aid] = round(info["admin_bonus"].get(aid, 0.0)
+                                                      + float(acc.get("admin_bonus", 0.0)), 2)
+            else:
+                if not _passed_first_imap(acc):
+                    info["hidden_no_imap"] += 1
+                elif not _is_complete_account(acc):
+                    info["hidden_incomplete"] += 1
+    return info
+
+
+async def cleanup_recovery_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/cleanup_recovery — للمالك فقط: معاينة ثم تأكيد."""
+    uid = update.effective_user.id
+    if uid != OWNER_ID:
+        return
+    info = _scan_cleanup()
+    n = len(info["targets"])
+    admins_txt = "\n".join(f"   • {a}: ${v:.2f}" for a, v in info["admin_bonus"].items()) or "   —"
+    msg = (f"🧹 معاينة التنظيف\n\n"
+           f"📧 ايميلات ستُرفض (قُبلت بايميل استرداد): {n}\n"
+           f"   • في فترة الانتظار (يُلغى المعلّق): ${info['member_hold']:.2f}\n"
+           f"   • مستلمة (تُخصم من رصيد العضو): ${info['member_released']:.2f}\n"
+           f"👮 مكافآت مشرفين ستُخصم:\n{admins_txt}\n\n"
+           f"🙈 مخفية من الاستخراج (لا تُحذف، فقط لا تظهر):\n"
+           f"   • لم تنجح في IMAP الأول: {info['hidden_no_imap']}\n"
+           f"   • ناقصة (بدون باسورد أو مصادقة): {info['hidden_incomplete']}")
+    if n == 0:
+        await update.message.reply_text(msg + "\n\n✅ لا يوجد ما يُرفض.")
+        return
+    await update.message.reply_text(msg, reply_markup=kb_vertical([
+        (f"✅ تنفيذ رفض {n} ايميل وخصم النقاط", "cleanup_recovery_run"),
+        ("❌ إلغاء", "cleanup_recovery_cancel"),
+    ]))
+
+
+async def cleanup_recovery_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.from_user.id != OWNER_ID:
+        await query.answer("🚫", show_alert=True)
+        return
+    await query.edit_message_text("تم الإلغاء. لم يتغير شيء.")
+
+
+async def cleanup_recovery_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.from_user.id != OWNER_ID:
+        await query.answer("🚫", show_alert=True)
+        return
+    await query.edit_message_text("⏳ جارٍ التنفيذ...")
+    reason_text = "تم إلغاء الايميل (قُبل بايميل استرداد) واسترجاع النقاط"
+    uids = sorted({int(u) for u in _scan_cleanup()["targets"]})
+    done, member_total, shortfalls, admin_ded = 0, 0.0, [], {}
+    for target_uid in uids:
+        try:
+            data = get_user(target_uid)   # قراءة جديدة: قد يكون عُدّل كمشرف سابقاً
+            accounts = data.get("approved_accounts", []) or []
+            targets = [a for a in accounts if _is_recovery_account(a)]
+            if not targets:
+                continue
+            data["approved_accounts"] = [a for a in accounts if not _is_recovery_account(a)]
+            admin_ops, notices = [], []
+            for acc in targets:
+                account = dict(acc)
+                email = account.get("email", "")
+                amount = clamp_money(account.get("amount", 0.0))
+                released = bool(account.get("leave_confirmed"))
+
+                # 1) خصم المشرف
+                try:
+                    aid = int(account.get("completed_by_admin"))
+                except (TypeError, ValueError):
+                    aid = None
+                bonus_c = money_to_cents(account.get("admin_bonus", 0.0))
+                status = str(account.get("admin_bonus_status") or "")
+                if aid and aid != OWNER_ID and bonus_c > 0:
+                    if status in ("pending", ""):
+                        if settle_admin_bonus(account, "rejected", owner_data=data, owner_id=target_uid):
+                            account["admin_bonus_status"] = "rejected"
+                            admin_ded[aid] = round(admin_ded.get(aid, 0.0) + cents_to_money(bonus_c), 2)
+                    elif status == "released":
+                        admin_ops.append((aid, bonus_c, email))
+                        account["admin_bonus_status"] = "rejected"
+                        admin_ded[aid] = round(admin_ded.get(aid, 0.0) + cents_to_money(bonus_c), 2)
+
+                # 2) خصم العضو
+                if released:
+                    bal = clamp_money(data.get("balance", 0.0))
+                    ded = min(bal, amount)
+                    data["balance"] = clamp_money(bal - ded)
+                    data["spent_balance"] = clamp_money(float(data.get("spent_balance", 0.0)) + ded)
+                    add_transaction(data, "debit", ded, "Cancelled recovery-email account, refunded", email)
+                    member_total += ded
+                    if amount - ded > 0.004:
+                        shortfalls.append((target_uid, email, round(amount - ded, 2)))
+                else:
+                    data["hold_balance"] = clamp_money(float(data.get("hold_balance", 0.0)) - amount)
+                    add_transaction(data, "approved_rejection", amount,
+                                    "Cancelled recovery-email account, canceled hold", email)
+                    member_total += amount
+
+                move_approved_account_to_rejected(data, account, "other", reason_text)
+                if data.get("rejected_requests"):
+                    rec = data["rejected_requests"][-1]
+                    rec["rejected_by"] = OWNER_ID
+                    rec["rejected_by_name"] = "Owner (cleanup)"
+                notices.append(email)
+                done += 1
+            save_user(target_uid, data)
+            for aid, bonus_c, email in admin_ops:     # بعد حفظ العضو (قد يكون هو المشرف نفسه)
+                deduct_from_admin_balance(aid, bonus_c, "recovery email cancelled", email)
+            for email in notices:
+                try:
+                    await context.bot.send_message(
+                        chat_id=target_uid,
+                        text=t(target_uid, "member_rejected_approved_msg", email=email, reason=reason_text),
+                        parse_mode=ParseMode.MARKDOWN)
+                except Exception:
+                    pass
+        except Exception:
+            logger.exception("cleanup_recovery failed for user %s", target_uid)
+    lines = [f"✅ تم رفض {done} ايميل.",
+             f"👤 إجمالي ما أُلغي/خُصم من الأعضاء: ${member_total:.2f}"]
+    if admin_ded:
+        lines.append("👮 خُصم من المشرفين:")
+        lines += [f"   • {a}: ${v:.2f}" for a, v in admin_ded.items()]
+    if shortfalls:
+        lines.append(f"\n⚠️ عجز (رصيد العضو أقل من المطلوب، لا يمكن أن يصبح سالباً): {len(shortfalls)}")
+        lines += [f"   • {u} | {e} | ${v:.2f}" for u, e, v in shortfalls[:40]]
+    text = "\n".join(lines)
+    for i in range(0, len(text), 3500):
+        await context.bot.send_message(chat_id=OWNER_ID, text=text[i:i + 3500])
 
 
 async def extraction_remove_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
