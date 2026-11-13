@@ -30,6 +30,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                      new_price=prices_new["tier_3"])
 
     buttons = [
+        [(t(uid, "btn_ask_ai"), "ask_ai")],   # زر الذكاء الاصطناعي وحده في أعلى القائمة
         (t(uid, "btn_sell_old"), "add_account"),
         (t(uid, "btn_sell_new"), "sell_new_email"),
         (t(uid, "btn_wallet"), "my_wallet"),
@@ -52,7 +53,6 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         (t(uid, "btn_referral"), "referral_menu"),
         (t(uid, "btn_edit_accounts"), "edit_my_accounts"),
         (t(uid, "btn_language"), "language_menu"),
-        (t(uid, "btn_ask_ai"), "ask_ai"),
     ])
     if not is_admin(uid) and uid != OWNER_ID:
         buttons.append(("🙋 التطوع لأصبح أدمن", "volunteer_menu"))
