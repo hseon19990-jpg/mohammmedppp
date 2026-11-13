@@ -52,6 +52,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         (t(uid, "btn_referral"), "referral_menu"),
         (t(uid, "btn_edit_accounts"), "edit_my_accounts"),
         (t(uid, "btn_language"), "language_menu"),
+        (t(uid, "btn_ask_ai"), "ask_ai"),
     ])
     if not is_admin(uid) and uid != OWNER_ID:
         buttons.append(("🙋 التطوع لأصبح أدمن", "volunteer_menu"))

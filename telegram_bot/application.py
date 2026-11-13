@@ -7,6 +7,7 @@ from telegram_bot.approvals import *
 from telegram_bot.store import *
 from telegram_bot.volunteer import *
 from telegram_bot.imap_audit import *
+from telegram_bot.ai_help import *
 from telegram_bot.locales import TRANSLATIONS
 
 from telegram_bot.members import restore_leave_checks
@@ -58,6 +59,14 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ═══ 0d. Owner IMAP audit (email:app_password list) ═══
     if mode == IMAP_AUDIT_MODE:
         await handle_imap_text(update, context); return
+
+    # ═══ 0e-1. المالك يضيف مفتاح الذكاء الاصطناعي ═══
+    if context.user_data.get("ai_key_step") == "key":
+        await handle_ai_key_input(update, context); return
+
+    # ═══ 0e. اسأل الذكاء الاصطناعي ═══
+    if context.user_data.get("step") == AI_STEP:
+        await handle_ask_ai_input(update, context); return
 
     # ═══ 1. API management input ═══
     if context.user_data.get("api_add_step") == "key":
@@ -268,6 +277,16 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await main_menu(update, context)
     elif data == "language_menu":
         await language_menu(update, context)
+    elif data == "ask_ai":
+        await ask_ai_start(update, context)
+    elif data == "ai_settings":
+        await ai_settings_menu(update, context)
+    elif data == "ai_key_start":
+        await ai_key_start(update, context)
+    elif data == "ai_key_test":
+        await ai_key_test(update, context)
+    elif data == "ai_key_delete":
+        await ai_key_delete(update, context)
     elif data.startswith("set_language:"):
         await set_language_handler(update, context)
     elif data == "daily_gift_view":

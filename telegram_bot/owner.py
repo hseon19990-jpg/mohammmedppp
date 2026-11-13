@@ -773,6 +773,7 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("contest_build_step", None)
     context.user_data.pop("api_add_step", None)
     context.user_data.pop("api_add_actor", None)
+    context.user_data.pop("ai_key_step", None)
     context.user_data.pop("mode", None)
     buttons = [
         maintenance_toggle_button(),
@@ -780,6 +781,7 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ("👥 الإدارية", "admin_management"),
         ("🙋 التطوع للأدمن", "volunteer_settings"),
         ("🔑 إدارة APIs", "apis_menu"),
+        ("🤖 الذكاء الاصطناعي", "ai_settings"),
         ("🚫 إدارة الحظر", "bans_menu"),
         ("💰 أسعار المستويات", "set_tier_prices"),
         ("💱 أسعار ماستر/آسيا/أثير", "master_rate_settings"),
