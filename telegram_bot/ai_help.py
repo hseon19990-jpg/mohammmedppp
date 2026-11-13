@@ -112,7 +112,7 @@ AI_KEY_STEP = "ai_key_step"
 
 # (الاسم الظاهر، عنوان الـ API، النمط: openai = متوافق مع OpenAI، anthropic = رسمي)
 AI_PROVIDERS = {
-    "gemini":     ("Google Gemini (مجاني)", "https://generativelanguage.googleapis.com/v1beta/openai", "openai"),
+    "gemini":     ("Google Gemini (مجاني)", "https://generativelanguage.googleapis.com/v1beta", "gemini"),
     "groq":       ("Groq (مجاني)", "https://api.groq.com/openai/v1", "openai"),
     "openrouter": ("OpenRouter", "https://openrouter.ai/api/v1", "openai"),
     "xai":        ("xAI Grok (مدفوع)", "https://api.x.ai/v1", "openai"),
@@ -144,11 +144,11 @@ def detect_provider(key: str) -> Optional[str]:
 
 
 def _ai_headers(provider: str, key: str) -> dict:
+    if AI_PROVIDERS[provider][2] == "gemini":
+        return {"x-goog-api-key": key, "content-type": "application/json"}
     if AI_PROVIDERS[provider][2] == "anthropic":
         return {"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"}
     headers = {"Authorization": f"Bearer {key}", "content-type": "application/json"}
-    if provider == "gemini":
-        headers["x-goog-api-key"] = key
     return headers
 
 
@@ -179,31 +179,55 @@ def _ai_resolve() -> Tuple[str, str, str]:
 
 
 async def _ai_list_models(client, provider: str, key: str) -> List[str]:
-    base = AI_PROVIDERS[provider][1]
-    resp = await client.get(f"{base}/models", headers=_ai_headers(provider, key))
+    base, mode = AI_PROVIDERS[provider][1], AI_PROVIDERS[provider][2]
+    url = f"{base}/models?pageSize=200" if mode == "gemini" else f"{base}/models"
+    resp = await client.get(url, headers=_ai_headers(provider, key))
     resp.raise_for_status()
     data = resp.json()
     items = data.get("data") or data.get("models") or []
     ids = []
     for it in items:
+        methods = it.get("supportedGenerationMethods")
+        if methods is not None and "generateContent" not in methods:
+            continue
         mid = it.get("id") or it.get("name") or ""
         ids.append(mid.split("models/", 1)[-1])
     return ids
 
 
-def _pick_model(provider: str, ids: List[str]) -> str:
+def _rank_models(provider: str, ids: List[str]) -> List[str]:
+    """النماذج الصالحة مرتبة حسب التفضيل (الأرخص/الأسرع أولاً)."""
     usable = [i for i in ids if i and not _MODEL_SKIP.search(i)]
+    ranked: List[str] = []
     for pref in _MODEL_PREFS.get(provider, []):
         for mid in usable:
-            if pref in mid:
-                return mid
-    return usable[0] if usable else ""
+            if pref in mid and mid not in ranked:
+                ranked.append(mid)
+    ranked += [m for m in usable if m not in ranked]
+    return ranked
+
+
+def _pick_model(provider: str, ids: List[str]) -> str:
+    ranked = _rank_models(provider, ids)
+    return ranked[0] if ranked else ""
 
 
 async def _ai_call(provider: str, key: str, model: str, system: str, user: str, max_tokens: int = 800):
     """استدعاء واحد. يرجع (النص، توكنات_إدخال، توكنات_إخراج). يرفع httpx.HTTPStatusError عند الفشل."""
     base, mode = AI_PROVIDERS[provider][1], AI_PROVIDERS[provider][2]
     async with httpx.AsyncClient(timeout=30) as client:
+        if mode == "gemini":
+            payload = {"systemInstruction": {"parts": [{"text": system}]},
+                       "contents": [{"role": "user", "parts": [{"text": user}]}],
+                       "generationConfig": {"temperature": 0, "maxOutputTokens": max(max_tokens, 1024)}}
+            resp = await client.post(f"{base}/models/{model}:generateContent",
+                                     headers=_ai_headers(provider, key), json=payload)
+            resp.raise_for_status()
+            j = resp.json()
+            parts = (((j.get("candidates") or [{}])[0].get("content") or {}).get("parts")) or []
+            text = "".join(p_.get("text", "") for p_ in parts)
+            u = j.get("usageMetadata") or {}
+            return text, int(u.get("promptTokenCount", 0)), int(u.get("candidatesTokenCount", 0))
         if mode == "anthropic":
             payload = {"model": model, "max_tokens": max_tokens, "temperature": 0, "system": system,
                        "messages": [{"role": "user", "content": user}]}
@@ -431,21 +455,36 @@ async def _ai_validate_and_save(key: str, keep_usage: bool = False) -> str:
     if not provider:
         return ("❌ لم يقبل أي مزوّد هذا المفتاح. تأكد أنك نسخته كاملاً. المزوّدون المدعومون: "
                 "Gemini · Groq · OpenRouter · Grok · OpenAI · Claude")
+    stage = "قراءة قائمة النماذج"
+    model = ""
     try:
         if last_exc is not None and not ids and len(candidates) == 1:
             raise last_exc
-        model = _pick_model(provider, ids)
-        if not model:
+        ranked = _rank_models(provider, ids)
+        if not ranked:
             return "❌ المفتاح صحيح لكن لا يوجد له نموذج نصي مناسب."
-        text, tin, tout = await _ai_call(provider, key, model, "Reply with the single word: ok", "ping", 20)
+        for m in ranked[:4]:
+            stage = f"اختبار النموذج {m}"
+            try:
+                await _ai_call(provider, key, m, "Reply with the single word: ok", "ping", 20)
+                model = m
+                break
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code not in (400, 404):
+                    raise
+                last_exc = exc
+        if not model:
+            raise last_exc if last_exc else RuntimeError("no working model")
     except httpx.HTTPStatusError as exc:
         code = exc.response.status_code
-        hint = {401: "المفتاح غير صحيح", 403: "المفتاح مرفوض أو غير مفعّل",
+        hint = {400: "طلب مرفوض (تحقق من أن المفتاح لمشروع مفعّل)", 401: "المفتاح غير صحيح",
+                403: "المفتاح مرفوض أو غير مفعّل لهذه الخدمة", 404: "النموذج/العنوان غير موجود",
                 429: "المفتاح صحيح لكنه بلا رصيد/حصة حالياً"}.get(code, "فشل الاتصال")
-        return f"❌ فشل الفحص (HTTP {code}): {hint}."
+        return (f"❌ فشل الفحص (HTTP {code}) في خطوة: {stage}\n{hint}.\n"
+                f"المزوّد المكتشف: <b>{AI_PROVIDERS[provider][0]}</b>")
     except Exception as exc:
         logger.exception("ai key validation failed")
-        return f"❌ تعذّر الاتصال بالمزوّد: <code>{tg_html_escape(type(exc).__name__)}</code>"
+        return f"❌ تعذّر الاتصال بالمزوّد ({stage}): <code>{tg_html_escape(type(exc).__name__)}</code>"
     changes = dict(provider=provider, key=enc(key), model=model, status="active", last_error="")
     if not keep_usage:
         changes["usage"] = {"questions": 0, "input_tokens": 0, "output_tokens": 0, "errors": 0}
