@@ -138,7 +138,7 @@ def detect_provider(key: str) -> Optional[str]:
     if k.startswith("sk-or-"): return "openrouter"
     if k.startswith("xai-"): return "xai"
     if k.startswith("gsk_"): return "groq"
-    if k.startswith("AIza"): return "gemini"
+    if k.startswith("AIza") or k.startswith("AQ."): return "gemini"
     if k.startswith("sk-"): return "openai"
     return None
 
@@ -146,7 +146,10 @@ def detect_provider(key: str) -> Optional[str]:
 def _ai_headers(provider: str, key: str) -> dict:
     if AI_PROVIDERS[provider][2] == "anthropic":
         return {"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"}
-    return {"Authorization": f"Bearer {key}", "content-type": "application/json"}
+    headers = {"Authorization": f"Bearer {key}", "content-type": "application/json"}
+    if provider == "gemini":
+        headers["x-goog-api-key"] = key
+    return headers
 
 
 def get_ai_config() -> dict:
@@ -413,13 +416,24 @@ async def ai_key_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _ai_validate_and_save(key: str, keep_usage: bool = False) -> str:
     """يتحقق من المفتاح ويحفظه. يرجع رسالة HTML للمالك."""
     provider = detect_provider(key)
+    # صيغة غير معروفة: نجرّب المزوّدين واحداً واحداً حتى يقبل أحدهم المفتاح
+    candidates = [provider] if provider else ["gemini", "groq", "openrouter", "xai", "openai", "anthropic"]
+    ids = []
+    last_exc: Optional[Exception] = None
+    for cand in candidates:
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                ids = await _ai_list_models(client, cand, key)
+            provider = cand
+            break
+        except Exception as exc:
+            last_exc = exc
     if not provider:
-        return ("❌ لم أتعرف على نوع المفتاح. المفاتيح المدعومة تبدأ بـ: "
-                "<code>AIza</code> (Gemini) · <code>gsk_</code> (Groq) · <code>sk-or-</code> (OpenRouter) · "
-                "<code>xai-</code> (Grok) · <code>sk-ant-</code> (Claude) · <code>sk-</code> (OpenAI)")
+        return ("❌ لم يقبل أي مزوّد هذا المفتاح. تأكد أنك نسخته كاملاً. المزوّدون المدعومون: "
+                "Gemini · Groq · OpenRouter · Grok · OpenAI · Claude")
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            ids = await _ai_list_models(client, provider, key)
+        if last_exc is not None and not ids and len(candidates) == 1:
+            raise last_exc
         model = _pick_model(provider, ids)
         if not model:
             return "❌ المفتاح صحيح لكن لا يوجد له نموذج نصي مناسب."
