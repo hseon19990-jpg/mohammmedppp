@@ -476,7 +476,6 @@ async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "approval_uid", "approval_index", "approval_token",
                 "approval_data", "approval_step", "approval_with_leave",
                 "reject_uid", "reject_index", "reject_reason",
-                "recovery_uid", "recovery_token",
                 "deduct_uid", "deduct_token", "give_uid", "give_index",
                 "mode", "store_action", "setting_tier", "pending_video_type",
                 "contest_build", "contest_build_step",
@@ -1614,7 +1613,7 @@ async def check_leave_status(context: ContextTypes.DEFAULT_TYPE):
     imap_rate_mark(email)
     if account.get("skip_recheck"):
         recheck = {"level": "unknown", "badge": "⚪", "imap_ok": True, "totp_ok": False,
-                   "message": "Recheck skipped (accepted with recovery email, no app password)"}
+                   "message": "Recheck skipped (legacy record)"}
     else:
         recheck = await verify_account_credentials(
             email=account.get("email", ""), password=account.get("password", ""),

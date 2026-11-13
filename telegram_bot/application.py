@@ -140,10 +140,6 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_check_email_input(update, context); return
     if step == "reject_reason_text":
         await handle_reject_reason_text(update, context); return
-    if step == "recovery_email_input":
-        await handle_recovery_email_input(update, context); return
-    if step == "bulk_reject_recovery_input":
-        await handle_bulk_reject_recovery_input(update, context); return
     if step == "extraction_remove_input":
         await handle_extraction_remove_input(update, context); return
     if step == "reject_approved_reason_text":
@@ -441,8 +437,6 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await rej_accept(update, context)
     elif data.startswith("rej_reject:"):
         await rej_reject(update, context)
-    elif data.startswith("rej_recovery:"):
-        await rej_recovery(update, context)
     elif data.startswith("rej_final:"):
         await rej_final(update, context)
     elif data.startswith("rej_requeue:"):
@@ -505,14 +499,6 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await approve_request_owner(update, context)
     elif data.startswith("reject_request:") or data.startswith("reject_continue:") or data.startswith("reject_final_now:"):
         await reject_request_reason(update, context)
-    elif data.startswith("recovery_yes:"):
-        await recovery_offer_yes(update, context)
-    elif data == "recovery_extract":
-        await recovery_extract(update, context)
-    elif data == "recovery_extract_all":
-        await recovery_extract_all(update, context)
-    elif data == "recovery_extract_new":
-        await recovery_extract_new(update, context)
     elif data == "freeze_menu":
         await freeze_menu(update, context)
     elif data.startswith("freeze_do:"):
@@ -521,8 +507,6 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await unfreeze_pick(update, context)
     elif data.startswith("unfreeze_do:"):
         await unfreeze_do(update, context)
-    elif data == "bulk_reject_recovery_start":
-        await bulk_reject_recovery_start(update, context)
     elif data == "extraction_remove_start":
         await extraction_remove_start(update, context)
     elif data.startswith("reject_reason:"):
