@@ -1,0 +1,915 @@
+"""Telegram update routing and application setup."""
+
+from telegram_bot.core import *
+from telegram_bot.members import *
+from telegram_bot.owner import *
+from telegram_bot.approvals import *
+from telegram_bot.store import *
+from telegram_bot.volunteer import *
+from telegram_bot.imap_audit import *
+from telegram_bot.ai_help import *
+from telegram_bot.locales import TRANSLATIONS
+
+from telegram_bot.members import restore_leave_checks
+
+
+# ==================== TEXT INPUT ROUTER ====================
+async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return
+
+    text = update.message.text.strip()
+    user_id = update.effective_user.id
+
+    if not await maintenance_access_allowed(update):
+        return
+    if not await check_forced_channel(update, context):
+        return
+
+    # ═══ 0. Crypto withdrawal flow ═══
+    crypto_state = context.user_data.get("crypto_withdraw")
+    if crypto_state:
+        stage = crypto_state.get("stage")
+        if stage == "awaiting_wallet":
+            from telegram_bot.store import crypto_handle_wallet
+            await crypto_handle_wallet(update, context)
+            return
+        if stage == "awaiting_binance_id":
+            from telegram_bot.store import crypto_handle_binance_id
+            await crypto_handle_binance_id(update, context)
+            return
+        if stage == "awaiting_amount":
+            from telegram_bot.store import crypto_amount_input
+            if await crypto_amount_input(update, context):
+                return
+
+    # ═══ 0b. Master & balances purchase (quantity in units) ═══
+    master_state = context.user_data.get("master_balance")
+    if master_state and master_state.get("stage") == "awaiting_quantity":
+        from telegram_bot.store import master_quantity_input
+        if await master_quantity_input(update, context):
+            return
+
+    # ═══ 0c. NEW: Master rate editing (owner only) ═══
+    mode = context.user_data.get("mode", "")
+    if mode.startswith("master_rate_"):
+        from telegram_bot.owner import handle_master_rate_input
+        await handle_master_rate_input(update, context); return
+
+    # ═══ 0d. Owner IMAP audit (email:app_password list) ═══
+    if mode == IMAP_AUDIT_MODE:
+        await handle_imap_text(update, context); return
+
+    # ═══ 0e-2. المالك يكتب ملاحظات الذكاء الاصطناعي ═══
+    if context.user_data.get("ai_notes_step") == "notes":
+        await handle_ai_notes_input(update, context); return
+
+    # ═══ 0e-3. المالك يضبط رصيد الذكاء الاصطناعي ═══
+    if context.user_data.get("ai_budget_step") == "v":
+        await handle_ai_budget_input(update, context); return
+
+    # ═══ 0e-1. المالك يضيف مفتاح الذكاء الاصطناعي ═══
+    if context.user_data.get("ai_key_step") == "key":
+        await handle_ai_key_input(update, context); return
+
+    # ═══ 0e. اسأل الذكاء الاصطناعي ═══
+    if context.user_data.get("step") == AI_STEP:
+        await handle_ask_ai_input(update, context); return
+
+    # ═══ 1. API management input ═══
+    if context.user_data.get("api_add_step") == "key":
+        await handle_api_key_input(update, context); return
+
+    # ═══ 2. Global withdraw limits (owner) ═══
+    mode = context.user_data.get("mode")
+    if mode in ("withdraw_set_min", "withdraw_set_max"):
+        await handle_withdraw_input(update, context); return
+
+    # ═══ 3. Daily gift settings (owner) ═══
+    if mode in ("daily_gift_set_emails", "daily_gift_set_reward"):
+        await handle_daily_gift_input(update, context); return
+
+    # ═══ 3b. Admin volunteer conditions (owner) ═══
+    if mode == "volunteer_set_value":
+        await handle_volunteer_input(update, context); return
+
+    # ═══ 4. Store flow (buy_flow / legacy) ═══
+    if context.user_data.get("buy_flow"):
+        await handle_purchase_message(update, context); return
+    if user_id in PENDING_PURCHASES:
+        await handle_purchase_message(update, context); return
+
+    # ═══ 5. Store action (add_category, add_service_*, set_channel, إلخ) ═══
+    store_action = str(context.user_data.get("store_action", "") or "")
+    if store_action:
+        await handle_store_input(update, context); return
+
+    # ═══ 6. Sell new email flow ═══
+    sell_step = context.user_data.get("step")
+    if sell_step == "sell_new_email_totp":
+        await handle_sell_new_email_totp(update, context); return
+    if sell_step == "sell_new_email_app_pass":
+        await handle_sell_new_email_app_pass(update, context); return
+
+    # ═══ 7. Support link input ═══
+    if context.user_data.get("step") == "support_link_input":
+        await handle_support_link_input(update, context); return
+
+    # ═══ 8. TG-Lion search ═══
+    if "tg_lion_search_page" in context.user_data:
+        await tg_lion_search_country_input(update, context); return
+
+    # ═══ 9. Contest build ═══
+    if context.user_data.get("contest_build_step"):
+        if user_id != OWNER_ID:
+            return
+        await handle_contest_build_input(update, context); return
+
+    # ═══ 10. Account session (add_account_step) ═══
+    session = SESSIONS.get(user_id)
+    if session and session.step:
+        admin_steps = ("admin_approval_step", "step", "mode", "store_action",
+                       "contest_build_step")
+        has_admin_step = any(context.user_data.get(k) for k in admin_steps)
+        if not has_admin_step:
+            await add_account_step(update, context); return
+
+    # ═══ 11. Admin approval ═══
+    admin_approval_step = context.user_data.get("admin_approval_step")
+    if admin_approval_step == "waiting_totp":
+        await handle_admin_totp_input(update, context); return
+    if admin_approval_step == "waiting_app_pass":
+        await handle_admin_app_pass_input(update, context); return
+    if admin_approval_step == "waiting_acceptance_choice":
+        await prompt_admin_acceptance_choice(
+            update, context,
+            context.user_data.get("admin_completing_uid"),
+            context.user_data.get("admin_completing_index"))
+        return
+
+    # ═══ 12. Add admin input ═══
+    if context.user_data.get("step") == "add_admin_input":
+        await handle_add_admin_input(update, context); return
+
+    # ═══ 13. Various step inputs ═══
+    step = context.user_data.get("step")
+    if step == "check_email_input":
+        await handle_check_email_input(update, context); return
+    if step == "reject_reason_text":
+        await handle_reject_reason_text(update, context); return
+    if step == "extraction_remove_input":
+        await handle_extraction_remove_input(update, context); return
+    if step == "reject_approved_reason_text":
+        await handle_reject_approved_reason_text(update, context); return
+    if step == "deduct_points_input":
+        await handle_deduct_points_input(update, context); return
+    if step == "give_points_input":
+        await handle_give_points_input(update, context); return
+    if step == "give_points_by_id_input" or step == "deduct_points_by_id_input":
+        await handle_points_by_id_input(update, context); return
+    if step == "check_member_input":
+        await handle_member_check_input(update, context); return
+    if step == "editing_field":
+        await handle_edit_field_input(update, context); return
+
+    # ═══ 13b. Search orders input (owner) ═══
+    if step == "search_orders_input":
+        await handle_search_orders_input(update, context); return
+
+    # ═══ 14. Approval TOTP / App Pass ═══
+    approval_step = context.user_data.get("approval_step")
+    if approval_step == "waiting_totp":
+        await handle_approval_totp(update, context); return
+    if approval_step == "waiting_app_pass":
+        await handle_approval_app_pass(update, context); return
+
+    # ═══ 15. Tier price ═══
+    if mode == "set_tier_price":
+        if user_id != OWNER_ID: return
+        try:
+            price = float(text)
+            if price <= 0:
+                await update.message.reply_text("⚠️ السعر > 0!")
+                return
+            tier = context.user_data.get("setting_tier")
+            acc_type = context.user_data.get("setting_type", "old")
+            if tier and acc_type:
+                config = load_config()
+                config[f"{acc_type}_tier_{tier}_price"] = price
+                save_config(config)
+                await update.message.reply_text(f"✅ تم تحديث سعر المستوى {tier} ({acc_type}): ${price:.2f}")
+                context.user_data.pop("mode", None)
+                context.user_data.pop("setting_tier", None)
+                context.user_data.pop("setting_type", None)
+                await set_tier_prices(update, context)
+        except ValueError:
+            await update.message.reply_text("⚠️ أرسل رقماً.")
+        return
+
+    # ═══ 16. Referral bonus ═══
+    if mode == "set_referral_bonus":
+        if user_id != OWNER_ID: return
+        try:
+            bonus = float(text)
+            if bonus < 0:
+                await update.message.reply_text("⚠️ المبلغ >= 0!")
+                return
+            config = load_config()
+            config["referral_bonus"] = bonus
+            save_config(config)
+            await update.message.reply_text(f"✅ تم تحديث مكافأة الإحالة: ${bonus:.2f}")
+            context.user_data.pop("mode", None)
+            await owner_panel(update, context)
+        except ValueError:
+            await update.message.reply_text("⚠️ أرسل رقماً.")
+        return
+
+    # ═══ 16b. إعدادات إحالة البوت الأول ═══
+    if mode in {"set_ref2_bonus", "set_ref2_link", "set_ref2_api"}:
+        await handle_ref2_setting_input(update, context, mode, text)
+        return
+
+    # ═══ 16c. مسابقة الإحالات ═══
+    if mode in {"rc_prizes", "rc_days", "rc_extend", "rc_target", "rc_min", "rc_desc", "rc_assign"}:
+        await handle_rc_input(update, context, mode, text)
+        return
+
+    # ═══ 17. Fallback: session step ═══
+    if session and session.step:
+        await add_account_step(update, context)
+        return
+
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await maintenance_access_allowed(update):
+        return
+    # نسجّل المستخدم والإحالة قبل بوابة القنوات حتى لا يضيع الكود.
+    payload = context.args[0] if context.args and context.args[0] else ""
+    notice = register_start(update.effective_user.id, payload)
+    if not await check_forced_channel(update, context):
+        return
+    clear_edit_state(context)
+    if context.user_data.get("mode") == IMAP_AUDIT_MODE:
+        context.user_data.pop("mode", None)
+    SESSIONS.pop(update.effective_user.id, None)
+    save_sessions()
+    if notice:
+        await update.message.reply_text(notice)
+    if await process_pending_referrals(update, context):
+        return
+    await main_menu(update, context)
+
+
+async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await maintenance_access_allowed(update):
+        return
+    await withdraw_store(update, context)
+
+
+# ==================== ROUTER ====================
+async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query:
+        return
+    data = query.data
+    if data == "noop":
+        await query.answer()
+        return
+    if not await maintenance_access_allowed(update):
+        return
+    await query.answer()
+    if not await check_forced_channel(update, context):
+        return
+
+    if data == "main_menu":
+        await main_menu(update, context)
+    elif data == "language_menu":
+        await language_menu(update, context)
+    elif data == "ask_ai":
+        await ask_ai_start(update, context)
+    elif data == "ai_settings":
+        await ai_settings_menu(update, context)
+    elif data == "ai_notes_start":
+        await ai_notes_start(update, context)
+    elif data == "ai_key_start":
+        await ai_key_start(update, context)
+    elif data == "ai_budget_start":
+        await ai_budget_start(update, context)
+    elif data == "ai_owner_toggle":
+        await ai_owner_toggle(update, context)
+    elif data == "ai_key_test":
+        await ai_key_test(update, context)
+    elif data == "ai_key_delete":
+        await ai_key_delete(update, context)
+    elif data.startswith("set_language:"):
+        await set_language_handler(update, context)
+    elif data == "daily_gift_view":
+        await daily_gift_view(update, context)
+    elif data == "add_account":
+        await add_account_start(update, context)
+    elif data == "sell_new_email":
+        await sell_new_email_start(update, context)
+    elif data == "sell_new_email_complete":
+        await sell_new_email_complete(update, context)
+    elif data == "sell_new_email_finish_prompt":
+        await sell_new_email_finish_prompt(update, context)
+    elif data == "sell_new_email_finish_confirm":
+        await sell_new_email_finish_confirm(update, context)
+    elif data == "sell_new_email_cancel":
+        await sell_new_email_cancel(update, context)
+    elif data == "sell_new_email_finish":
+        await sell_new_email_finish(update, context)
+    elif data.startswith("sell_show_video:"):
+        await sell_show_video(update, context)
+
+    # ═══ Resume saved sell-new sessions ═══
+    elif data == "resume_sell_new":
+        await resume_sell_new_session(update, context)
+    elif data.startswith("resume_sell_pick:"):
+        await resume_sell_pick(update, context)
+
+    # ═══ Crypto withdrawals ═══
+    elif data == "crypto_withdraw_menu":
+        await crypto_withdraw_menu(update, context)
+    elif data.startswith("crypto_pick:"):
+        await crypto_pick_network(update, context)
+
+    # ═══ Master & balances ═══
+    elif data == "master_balances_menu":
+        await master_balances_menu(update, context)
+    elif data.startswith("master_pick:"):
+        await master_pick(update, context)
+    elif data.startswith("complete_order:"):
+        await complete_order_callback(update, context)
+    elif data.startswith("confirm_complete_order:"):
+        await confirm_complete_order(update, context)
+
+    # ═══ NEW: Master rate settings (owner) ═══
+    elif data == "master_rate_settings":
+        await master_rate_settings(update, context)
+    elif data.startswith("master_edit_rate:"):
+        await master_edit_rate(update, context)
+
+    # ═══ NEW: Recompletion of rejected email ═══
+    elif data.startswith("owner_recomplete:"):
+        query.data = "rej_requeue:" + data.split(":", 1)[1]
+        await rej_requeue(update, context)
+
+    elif data.startswith("old_continue:"):
+        await old_email_continue(update, context)
+    elif data.startswith("old_finish:"):
+        await old_email_finish(update, context)
+
+    elif data == "cancel":
+        await add_account_cancel(update, context)
+    elif data.startswith("complete_more:"):
+        await complete_more_callback(update, context)
+    elif data.startswith("finish_request:"):
+        await finish_request_callback(update, context)
+    elif data.startswith("back_to_offer:"):
+        await back_to_offer_callback(update, context)
+    elif data == "my_wallet":
+        await my_wallet(update, context)
+    elif data == "my_transactions":
+        await my_transactions(update, context)
+    elif data == "my_accounts":
+        await my_accounts(update, context)
+    elif data == "top_sellers" or data == "top_sellers_owner":
+        await top_sellers_view(update, context)
+    elif data == "rejected_emails":
+        await view_member_rejected_emails(update, context)
+    elif data == "tutorials":
+        await tutorials(update, context)
+    elif data.startswith("play_video:"):
+        await play_video(update, context)
+    elif data.startswith("show_video:"):
+        await show_video_in_add(update, context)
+    elif data == "owner_panel":
+        await owner_panel(update, context)
+    elif data == "imap_check_menu" or data.startswith("imapx:"):
+        await imap_check_callback(update, context)
+    elif data == "maintenance_toggle":
+        await toggle_maintenance(update, context)
+    elif data == "support_link_settings":
+        await support_link_settings(update, context)
+    elif data == "support_link_cancel":
+        await cancel_support_link(update, context)
+    elif data == "support_link_unavailable":
+        await query.edit_message_text(
+            "ℹ️ لم يضبط المالك رابط الدعم بعد.",
+            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+    elif data == "withdraw_settings":
+        await withdraw_settings(update, context)
+    elif data == "withdraw_set_min":
+        await withdraw_set_min(update, context)
+    elif data == "withdraw_set_max":
+        await withdraw_set_max(update, context)
+    elif data == "withdraw_clear_limits":
+        await withdraw_clear_limits(update, context)
+    elif data == "daily_gift_settings":
+        await daily_gift_settings(update, context)
+    elif data == "daily_gift_toggle":
+        await daily_gift_toggle(update, context)
+    elif data == "daily_gift_set_emails":
+        await daily_gift_set_emails(update, context)
+    elif data == "daily_gift_set_reward":
+        await daily_gift_set_reward(update, context)
+    elif data == "volunteer_menu":
+        await volunteer_menu(update, context)
+    elif data == "volunteer_benefits":
+        await volunteer_benefits(update, context)
+    elif data == "volunteer_request":
+        await volunteer_request(update, context)
+    elif data.startswith("volunteer_approve:"):
+        await volunteer_approve(update, context)
+    elif data.startswith("volunteer_reject:"):
+        await volunteer_reject(update, context)
+    elif data == "volunteer_pending_list":
+        await volunteer_pending_list(update, context)
+    elif data == "volunteer_settings":
+        await volunteer_settings(update, context)
+    elif data.startswith("volunteer_set:"):
+        await volunteer_set_start(update, context)
+    elif data == "contest_menu":
+        await contest_menu(update, context)
+    elif data == "contest_create_start":
+        await contest_create_start(update, context)
+    elif data == "contest_add_tier":
+        await contest_add_tier(update, context)
+    elif data == "contest_finalize":
+        await contest_finalize(update, context)
+    elif data == "contest_stop":
+        await contest_stop(update, context)
+    elif data == "contest_stats":
+        await contest_stats(update, context)
+    elif data == "sales_total":
+        await sales_total_view(update, context)
+    elif data == "sales_during_contest":
+        await sales_during_contest_view(update, context)
+    elif data == "admin_management":
+        await admin_management(update, context)
+    elif data == "add_admin":
+        await add_admin_start(update, context)
+    elif data == "remove_admin_menu":
+        await remove_admin_menu(update, context)
+    elif data.startswith("remove_admin_execute:"):
+        await remove_admin_execute(update, context)
+    elif data == "admin_panel":
+        await admin_panel(update, context)
+    elif data == "admin_settings":
+        await admin_settings(update, context)
+    elif data.startswith("admin_requests"):
+        await admin_requests(update, context)
+    elif data.startswith("admin_request_detail:"):
+        await admin_request_detail(update, context)
+    elif data.startswith("rej_view:") or data.startswith("admin_rejected_detail:") or data.startswith("rejected_detail:"):
+        await rejected_detail(update, context)
+    elif data.startswith("rej_complete:"):
+        await rej_complete(update, context)
+    elif data.startswith("rej_accept:"):
+        await rej_accept(update, context)
+    elif data.startswith("rej_reject:"):
+        await rej_reject(update, context)
+    elif data.startswith("rej_final:"):
+        await rej_final(update, context)
+    elif data.startswith("rej_requeue:"):
+        await rej_requeue(update, context)
+    elif data.startswith("rej_delete:"):
+        await rej_delete(update, context)
+    elif data.startswith("admin_rejected:"):
+        await admin_rejected_requests(update, context)
+    elif data.startswith("admin_complete_start:"):
+        await admin_complete_start(update, context)
+    elif data.startswith("admin_accept_auto:") or data.startswith("admin_accept_leave:"):
+        await admin_accept_completed(update, context)
+    elif data.startswith("admin_completion_cancel:"):
+        await admin_completion_cancel(update, context)
+    elif data.startswith("admin_show_code:"):
+        await admin_show_code(update, context)
+    elif data == "check_member":
+        await check_member(update, context)
+    elif data == "check_email_by_address":
+        await check_email_by_address(update, context)
+    elif data == "search_orders_menu":
+        await search_orders_menu(update, context)
+    elif data == "set_tier_prices":
+        await set_tier_prices(update, context)
+    elif data.startswith("set_tier:"):
+        await set_tier(update, context)
+    elif data == "approval_requests":
+        await approval_requests(update, context)
+    elif data.startswith("view_pending"):
+        await view_pending_requests(update, context)
+    elif data.startswith("view_approved"):
+        await view_approved_requests(update, context)
+    elif data.startswith("view_rejected"):
+        await view_rejected_requests(update, context)
+    elif data.startswith("pending_detail:"):
+        await pending_detail(update, context)
+    elif data.startswith("complete_request_owner:"):
+        await complete_request_owner(update, context)
+    elif data.startswith("auto_verify:"):
+        await auto_verify_account(update, context)
+    elif data.startswith("approved_detail:"):
+        await approved_detail(update, context)
+    elif data.startswith("reject_approved:"):
+        await reject_approved_start(update, context)
+    elif data.startswith("reject_approved_reason:"):
+        await execute_reject_approved_reason(update, context)
+    elif data.startswith("new_totp_code:"):
+        await new_totp_code(update, context)
+    elif data.startswith("deduct_points:"):
+        await deduct_points(update, context)
+    elif data.startswith("give_points:"):
+        await give_points(update, context)
+    elif data == "points_management":
+        await points_management(update, context)
+    elif data == "give_points_by_id":
+        await give_points_by_id(update, context)
+    elif data == "deduct_points_by_id":
+        await deduct_points_by_id(update, context)
+    elif data.startswith("approve_request:"):
+        await approve_request_owner(update, context)
+    elif data.startswith("reject_request:") or data.startswith("reject_continue:") or data.startswith("reject_final_now:"):
+        await reject_request_reason(update, context)
+    elif data == "freeze_menu":
+        await freeze_menu(update, context)
+    elif data.startswith("freeze_do:"):
+        await freeze_do(update, context)
+    elif data.startswith("unfreeze_pick:"):
+        await unfreeze_pick(update, context)
+    elif data.startswith("unfreeze_do:"):
+        await unfreeze_do(update, context)
+    elif data == "extraction_remove_start":
+        await extraction_remove_start(update, context)
+    elif data.startswith("reject_reason:"):
+        await execute_reject_reason(update, context)
+    elif data == "videos_section":
+        await videos_section(update, context)
+    elif data.startswith("video_action:"):
+        await video_action(update, context)
+    elif data.startswith("view_video:"):
+        await view_video(update, context)
+    elif data.startswith("delete_video:"):
+        await delete_video(update, context)
+    elif data.startswith("set_video:"):
+        await set_video_callback(update, context)
+    elif data == "store_section":
+        await owner_store_section(update, context)
+    elif data == "store_add_category":
+        await store_add_category(update, context)
+    elif data == "store_delete_category_menu":
+        await store_delete_category_menu(update, context)
+    elif data.startswith("store_delete_category_confirm:"):
+        await store_delete_category_confirm(update, context)
+    elif data.startswith("store_delete_category_execute:"):
+        await store_delete_category_execute(update, context)
+    elif data.startswith("store_category:"):
+        await store_category_menu(update, context)
+    elif data.startswith("store_add_service:"):
+        await store_add_service(update, context)
+    elif data == "service_types_done":
+        await service_types_done(update, context)
+    elif data.startswith("service_toggle_type:"):
+        await service_toggle_type(update, context)
+    elif data.startswith("service_qty_skip_min:"):
+        await service_qty_skip_min(update, context)
+    elif data.startswith("service_qty_skip_max:"):
+        await service_qty_skip_max(update, context)
+    elif data.startswith("service_detail:"):
+        await service_detail(update, context)
+    elif data.startswith("service_edit_types:"):
+        await service_edit_types(update, context)
+    elif data.startswith("service_edit_toggle:"):
+        await service_edit_toggle(update, context)
+    elif data == "service_edit_types_save":
+        await service_edit_types_save(update, context)
+    elif data.startswith("store_delete_service:"):
+        await store_delete_service(update, context)
+    elif data.startswith("store_delete_service_confirm:"):
+        await store_delete_service_confirm(update, context)
+    elif data.startswith("delete_service:"):
+        await delete_service_execute(update, context)
+    elif data.startswith("store_edit_service:"):
+        await store_edit_service(update, context)
+    elif data.startswith("store_edit_field:"):
+        await store_edit_field(update, context)
+    elif data == "forced_channel":
+        await forced_channel(update, context)
+    elif data == "check_forced_channel":
+        await check_forced_channel_callback(update, context)
+    elif data == "remove_channel" or data.startswith("remove_channel:"):
+        await remove_channel(update, context)
+    elif data == "add_forced_channel":
+        await add_forced_channel(update, context)
+    elif data == "purchase_channels":
+        await purchase_channels(update, context)
+    elif data == "set_purchase_channel_1":
+        await set_purchase_channel(update, context, 1)
+    elif data == "set_purchase_channel_2":
+        await set_purchase_channel(update, context, 2)
+    elif data == "withdraw_store":
+        await withdraw_store(update, context)
+    elif data == "tg_lion_catalog":
+        await tg_lion_catalog(update, context)
+    elif data.startswith("tg_lion_page:"):
+        try:
+            page = int(data.split(":", 1)[1])
+        except (ValueError, IndexError):
+            page = 0
+        await tg_lion_catalog(update, context, page)
+    elif data.startswith("tg_lion_search_start:"):
+        try:
+            page = int(data.split(":", 1)[1])
+        except (ValueError, IndexError):
+            page = 0
+        await tg_lion_search_start(update, context, page)
+    elif data.startswith("tg_lion_search_cancel:"):
+        try:
+            page = int(data.split(":", 1)[1])
+        except (ValueError, IndexError):
+            page = 0
+        await tg_lion_search_cancel(update, context, page)
+    elif data.startswith("tg_lion_search_result:"):
+        parts = data.split(":")
+        if len(parts) == 3:
+            try:
+                await tg_lion_country_menu(update, context, parts[1], int(parts[2]))
+            except ValueError:
+                await update.callback_query.answer("تعذر فتح الدولة.", show_alert=True)
+    elif data.startswith("tg_lion_country:"):
+        parts = data.split(":")
+        if len(parts) == 3:
+            try:
+                await tg_lion_country_menu(update, context, parts[1], int(parts[2]))
+            except ValueError:
+                await update.callback_query.answer("تعذر فتح الدولة.", show_alert=True)
+    elif data.startswith("tg_lion_confirm:"):
+        parts = data.split(":")
+        if len(parts) == 3:
+            try:
+                await tg_lion_confirm_order(update, context, parts[1], int(parts[2]))
+            except ValueError:
+                await update.callback_query.answer("تعذر تأكيد الطلب.", show_alert=True)
+    elif data.startswith("tg_lion_cancel:"):
+        try:
+            page = int(data.split(":", 1)[1])
+        except (ValueError, IndexError):
+            page = 0
+        await tg_lion_cancel_order(update, context, page)
+    elif data == "toggle_tg_lion_store":
+        await toggle_tg_lion_store(update, context)
+    elif data.startswith("user_category:"):
+        await user_category_menu(update, context)
+    elif data.startswith("user_buy:"):
+        await user_buy_service(update, context)
+    elif data.startswith("deliver_order:"):
+        await deliver_order(update, context)
+    elif data == "cleanup_recovery_run":
+        await cleanup_recovery_run(update, context)
+    elif data == "cleanup_recovery_cancel":
+        await cleanup_recovery_cancel(update, context)
+    elif data == "all_accounts_section":
+        await all_accounts_section(update, context)
+    elif data == "owner_stats":
+        await owner_stats(update, context)
+    elif data == "all_accounts":
+        await all_accounts(update, context, "all")
+    elif data == "all_old":
+        await all_accounts(update, context, "old")
+    elif data == "all_new":
+        await all_accounts(update, context, "new")
+    elif data == "all_general":
+        await all_accounts(update, context, "all")
+    elif data == "unextracted_old":
+        await unextracted_accounts(update, context, "old")
+    elif data == "unextracted_new":
+        await unextracted_accounts(update, context, "new")
+    elif data.startswith("export_all_"):
+        acc_type = data.replace("export_all_", "")
+        await export_all_accounts(update, context, acc_type)
+    elif data.startswith("export_unextracted_"):
+        acc_type = data.replace("export_unextracted_", "")
+        await export_unextracted(update, context, acc_type)
+    elif data == "hold_accounts":
+        await hold_accounts(update, context)
+    elif data == "mark_extracted_menu":
+        await mark_extracted_menu(update, context)
+    elif data.startswith("mark_extracted:"):
+        await mark_extracted(update, context)
+    elif data == "referral_menu":
+        await referral_menu(update, context)
+    elif data.startswith("copy_referral:") or data.startswith("copy_referral2:"):
+        await copy_referral(update, context)
+    elif data in {"set_ref2_bonus", "set_ref2_link", "set_ref2_api"}:
+        await set_ref2_setting(update, context)
+    elif data == "ref2_verify":
+        await ref2_verify(update, context)
+    elif data == "rc_menu":
+        await rc_menu(update, context)
+    elif data == "rc_create":
+        await rc_create(update, context)
+    elif data == "rc_stop":
+        await rc_stop(update, context)
+    elif data == "rc_reopen":
+        await rc_reopen(update, context)
+    elif data == "rc_toggle_auto":
+        await rc_toggle_auto(update, context)
+    elif data.startswith("rc_edit:"):
+        await rc_edit(update, context)
+    elif data == "rc_board":
+        await rc_board(update, context)
+    elif data.startswith("rc_pay:"):
+        await rc_pay(update, context)
+    elif data == "rc_payall":
+        await rc_payall(update, context)
+    elif data == "rc_assign":
+        await rc_assign(update, context)
+    elif data.startswith("rc_assign_rank:"):
+        await rc_assign_rank(update, context)
+    elif data.startswith("rc_unassign:"):
+        await rc_unassign(update, context)
+    elif data == "rc_view":
+        await rc_view(update, context)
+    elif data == "referral_settings":
+        await referral_settings(update, context)
+    elif data == "set_referral_bonus":
+        await set_referral_bonus(update, context)
+    elif data == "referral_stats":
+        await referral_stats(update, context)
+    elif data == "edit_my_accounts":
+        await edit_my_accounts(update, context)
+    elif data.startswith("edit_pending:"):
+        await edit_pending_account(update, context)
+    elif data.startswith("edit_field:"):
+        await edit_field(update, context)
+    elif data.startswith("delete_pending:"):
+        await delete_pending_account(update, context)
+    elif data.startswith("owner_show_code:"):
+        await owner_show_code(update, context)
+    elif data == "apis_menu":
+        await apis_menu(update, context)
+    elif data == "apis_list_details":
+        context.user_data["apis_page"] = 0
+        await show_api_details(update, context)
+    elif data.startswith("apis_details_page:"):
+        try:
+            p = int(data.split(":", 1)[1])
+        except (ValueError, IndexError):
+            p = 0
+        context.user_data["apis_page"] = p
+        await show_api_details(update, context)
+    elif data.startswith("api_view:"):
+        api_id = data.split(":", 1)[1]
+        await show_api_details(update, context, api_id=api_id)
+    elif data == "api_add_start":
+        await api_add_start(update, context)
+    elif data.startswith("api_delete:"):
+        await api_delete_execute(update, context)
+    elif data == "bans_menu":
+        await bans_menu(update, context)
+    elif data.startswith("unban_member:"):
+        await unban_member(update, context)
+    else:
+        await placeholder(update, context)
+
+
+async def placeholder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        await update.callback_query.edit_message_text(
+            "⚠️ خيار غير معروف.",
+            reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
+    except Exception:
+        pass
+
+
+# ==================== COMMANDS ====================
+async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await maintenance_access_allowed(update):
+        return
+    if not await check_forced_channel(update, context):
+        return
+    user_id = update.effective_user.id
+    admins = load_admins()
+    apis = get_api_list()
+    active_apis = [a for a in apis if a.get("status") == "active"]
+    gift = get_daily_gift_config()
+    limits = get_withdraw_limits()
+    master_cfg = get_master_balance_config()
+    master_rates_line = " | ".join(f"{k}={int(v['rate'])}" for k, v in master_cfg.items())
+    await update.message.reply_text(
+        f"🔎 *تشخيص*\n\n🆔 رقمك: `{user_id}`\n👑 المالك: `{OWNER_ID}`\n"
+        f"✅ أنت المالك: {'نعم' if user_id == OWNER_ID else 'لا'}\n"
+        f"🛠 أدمن: {'نعم' if user_id in admins else 'لا'}\n"
+        f"👥 عدد الأدمن: `{len(admins)}`\n"
+        f"🔐 التشفير: {'مفعّل ✅' if CRYPTO_AVAILABLE else 'معطّل ❌'}\n"
+        f"🔑 APIs: `{len(apis)}` (نشطة: `{len(active_apis)}`)\n"
+        f"🛒 حدود السحب العامة: min={limits['min']}, max={limits['max']}\n"
+        f"🎁 الهدية: {'مفعلة' if gift['enabled'] else 'معطلة'} ({gift['emails_required']} إيميل → ${gift['reward']:.2f})\n"
+        f"💱 أسعار ماستر: `{master_rates_line}`\n"
+        f"💾 عدد المستخدمين: `{len(load_json(USERS_DB))}`",
+        parse_mode=ParseMode.MARKDOWN)
+
+
+async def owner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("🚫 هذا الأمر للمالك فقط.")
+        return
+    buttons = [maintenance_toggle_button(),
+               ("🔗 رابط الدعم", "support_link_settings"),
+               ("👥 الإدارية", "admin_management"),
+               ("🙋 التطوع للأدمن", "volunteer_settings"),
+               ("🔑 إدارة APIs", "apis_menu"),
+               ("🚫 إدارة الحظر", "bans_menu"),
+               ("💰 أسعار المستويات", "set_tier_prices"),
+               ("💱 أسعار ماستر/آسيا/أثير", "master_rate_settings"),
+               ("🛒 حدود السحب", "withdraw_settings"),
+               ("🎁 إعدادات الهدية اليومية", "daily_gift_settings"),
+               ("📋 الطلبات", "approval_requests"),
+               ("🎯 إدارة المسابقة", "contest_menu"),
+               ("🏆 الأكثر بيعاً", "top_sellers_owner"),
+               ("📹 قسم الفيديوهات", "videos_section"),
+               ("🛒 المبيعات", "store_section"),
+               ("📢 القنوات الإجبارية", "forced_channel"),
+               ("📊 جميع الحسابات المقبولة", "all_accounts_section"),
+               ("📈 إحصائيات المستخدمين", "owner_stats"),
+               ("🔎 فحص عضو", "check_member"),
+               ("🔍 فحص إيميل", "check_email_by_address"),
+               ("🔐 فحص IMAP", "imap_check_menu"),
+               ("🔗 نظام الإحالة", "referral_settings"),
+               ("💰 خصم/منح نقاط", "points_management"),
+               ("🔙 القائمة الرئيسية", "main_menu")]
+    await update.message.reply_text("⚙️ *لوحة تحكم المالك*", parse_mode=ParseMode.MARKDOWN,
+                                    reply_markup=kb_vertical(buttons))
+
+
+async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await maintenance_access_allowed(update):
+        return
+    if not await check_forced_channel(update, context):
+        return
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("🚫 هذا الأمر للأدمن فقط.")
+        return
+    buttons = [("⚙️ إعدادات الأدمن", "admin_settings"),
+               ("🔑 إدارة APIs", "apis_menu"),
+               ("🔙 القائمة الرئيسية", "main_menu")]
+    await update.message.reply_text("🛠 *الإدارية*", parse_mode=ParseMode.MARKDOWN,
+                                    reply_markup=kb_vertical(buttons))
+
+
+async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        return
+    await daily_backup_job(context)
+    await update.message.reply_text("✅ تم إنشاء نسخة احتياطية.")
+
+
+# ==================== MAIN ====================
+async def initialize_application(application: Application):
+    await restore_leave_checks(application)
+    try:
+        migrated = migrate_second_check_blocks()
+        if migrated:
+            logger.info("Blocked %s emails that previously failed the second check.", migrated)
+    except Exception:
+        logger.exception("migrate_second_check_blocks failed")
+    if application.job_queue:
+        application.job_queue.run_repeating(ref_contest_tick, interval=60, first=30)
+        application.job_queue.run_repeating(finalize_stale_rejections_job, interval=600, first=60)
+    await application.bot.set_my_commands(
+        [
+            BotCommand("start", "check your account status"),
+            BotCommand("buy", "open the purchase section"),
+        ]
+    )
+
+
+def main():
+    if not BOT_TOKEN:
+        raise SystemExit("❌ BOT_TOKEN غير مضبوط.")
+    if not OWNER_ID:
+        logger.warning("⚠️ OWNER_TELEGRAM_ID = 0")
+    app = (Application.builder()
+           .token(BOT_TOKEN)
+           .post_init(initialize_application)
+           .build())
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("buy", buy_command))
+    app.add_handler(CommandHandler("debug", debug_command))
+    app.add_handler(CommandHandler("owner", owner_command))
+    app.add_handler(CommandHandler("admin", admin_command))
+    app.add_handler(CommandHandler("backup", backup_command))
+    app.add_handler(CommandHandler("cleanup_recovery", cleanup_recovery_command))
+    app.add_handler(CallbackQueryHandler(router))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_input))
+    app.add_handler(MessageHandler(filters.VIDEO, handle_video_upload))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_imap_document))
+    logger.info("🤖 Bot started.")
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
+
+__all__ = [name for name in globals() if not name.startswith("__")]
