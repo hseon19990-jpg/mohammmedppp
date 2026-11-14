@@ -929,6 +929,7 @@ async def old_email_finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.HTML)
     except Exception:
         pass
+    await notify_admins_complete_email(context, uid, email, steps=steps, account_type="old")
 
 
 # ==================== SELL NEW EMAIL FLOW ====================
@@ -1184,6 +1185,7 @@ async def sell_new_email_finish_confirm(update: Update, context: ContextTypes.DE
             parse_mode=ParseMode.HTML)
     except Exception:
         pass
+    await notify_admins_complete_email(context, uid, creds["email"], steps=2, account_type="new")
 
 
 async def sell_new_email_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1422,6 +1424,14 @@ async def sell_new_email_finish(update: Update, context: ContextTypes.DEFAULT_TY
                                       reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
         return
     remove_sell_session(uid, creds.get("email", ""))
+    try:
+        _pend = get_user(uid).get("pending_requests", []) or []
+        if any(normalize_email(r.get("email", "")) == normalize_email(creds.get("email", ""))
+               and not r.get("has_app_pass") for r in _pend):
+            await notify_admins_complete_email(context, uid, creds.get("email", ""),
+                                               steps=3, account_type="new")
+    except Exception:
+        logger.exception("notify admins (sell_new finish) failed")
     await query.edit_message_text(
         t(uid, "sell_new_finished", email=tg_html_escape(creds.get('email', ''))),
         parse_mode=ParseMode.HTML,

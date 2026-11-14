@@ -1307,6 +1307,41 @@ def account_release_frozen_by_admin(account: dict) -> bool:
         return False
 
 
+# ==================== ADMIN "COMPLETE THE EMAIL" ALERT + REJECTION SQUARES ====================
+def rejection_squares(count: int) -> str:
+    """مؤشر للمالك فقط: 🟥⬜ = رفضه مشرف واحد، 🟥🟥 = رفضه مشرفان، فارغ = لا رفض."""
+    if count <= 0:
+        return ""
+    if count == 1:
+        return "🟥⬜"
+    return "🟥🟥"
+
+
+async def notify_admins_complete_email(context, target_uid: int, email: str, steps: int = 0,
+                                        account_type: str = "old") -> None:
+    """إشعار كل المشرفين (عدا المالك والمجمّدين) بوصول إيميل ناقص ليُكمله أحدهم أولاً."""
+    try:
+        frozen = {str(x) for x in (load_config().get("frozen_admins") or [])}
+    except Exception:
+        frozen = set()
+    steps_txt = f" ({steps} خطوات)" if steps else ""
+    kind = "جديد" if account_type == "new" else "قديم"
+    markup = kb_single("📂 فتح الطلب وإكماله",
+                       f"admin_request_detail:{target_uid}:{account_callback_token(email)}")
+    for admin_id in load_admins():
+        if admin_id == OWNER_ID or str(admin_id) in frozen or "all" in frozen:
+            continue
+        try:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=(f"🔔 <b>إيميل {kind} جديد بانتظار الإكمال{steps_txt}</b>\n\n"
+                      f"📧 <code>{tg_html_escape(email)}</code>\n\n"
+                      f"⚡ أيها المشرف، قم بإكمال الإيميل قبل أن يأتي مشرف آخر ويُكمله بدلاً عنك."),
+                parse_mode=ParseMode.HTML, reply_markup=markup)
+        except Exception:
+            pass
+
+
 # ==================== LANGUAGE HELPERS ====================
 SUPPORTED_LANGUAGES = ("ar", "en", "ru")
 

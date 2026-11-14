@@ -874,7 +874,7 @@ async def view_pending_requests(update: Update, context: ContextTypes.DEFAULT_TY
         acc_type = req.get("account_type", "old")
         type_icon = "🆕" if acc_type == "new" else "📝"
         rj_count = request_rejection_count(req)
-        rj_badge = f" ⚠️{rj_count}/3" if rj_count > 0 else ""
+        rj_badge = f" {rejection_squares(rj_count)}" if rj_count > 0 else ""
         return (f"{type_icon}{v_badge}{tier_icon} {email_display}{rj_badge}",
                 f"pending_detail:{req['user_id']}:{account_callback_token(email)}")
 

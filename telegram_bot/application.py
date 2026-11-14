@@ -88,6 +88,8 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ═══ 3b. Admin volunteer conditions (owner) ═══
     if mode == "volunteer_set_value":
         await handle_volunteer_input(update, context); return
+    if mode == "volunteer_set_contact":
+        await handle_volunteer_contact_input(update, context); return
 
     # ═══ 4. Store flow (buy_flow / legacy) ═══
     if context.user_data.get("buy_flow"):
@@ -408,6 +410,12 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await daily_gift_set_reward(update, context)
     elif data == "volunteer_menu":
         await volunteer_menu(update, context)
+    elif data == "volunteer_free":
+        await volunteer_free(update, context)
+    elif data == "volunteer_paid":
+        await volunteer_paid(update, context)
+    elif data.startswith("volunteer_contact:"):
+        await volunteer_contact_start(update, context)
     elif data == "volunteer_benefits":
         await volunteer_benefits(update, context)
     elif data == "volunteer_request":

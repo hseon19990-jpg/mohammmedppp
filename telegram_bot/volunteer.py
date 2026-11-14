@@ -103,6 +103,23 @@ async def _owner_only(update: Update) -> bool:
 
 
 # ==================== MEMBER SCREENS ====================
+PAID_DEFAULTS = {"owner_username": "@mo07_ed", "site_username": "@mo00_0_0bot"}
+PAID_PRICES = (("يومياً", "0.7"), ("أسبوعياً", "3"), ("شهرياً", "10"))
+PAID_LABELS = {"owner_username": "👤 يوزر التواصل (المالك)",
+               "site_username": "🌐 يوزر السايت (البوت)"}
+
+
+def get_paid_contacts() -> dict:
+    raw = load_config().get("admin_volunteer_paid", {})
+    if not isinstance(raw, dict):
+        raw = {}
+    out = {}
+    for key, default in PAID_DEFAULTS.items():
+        value = str(raw.get(key) or default).strip()
+        out[key] = value if value.startswith("@") else "@" + value.lstrip("@")
+    return out
+
+
 async def volunteer_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     uid = update.effective_user.id
@@ -111,20 +128,57 @@ async def volunteer_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "ℹ️ أنت أدمن بالفعل.",
             reply_markup=kb_single("🔙 القائمة الرئيسية", "main_menu"))
         return
+    text = ("🙋 <b>التطوع لتصبح أدمن</b>\n\n"
+            "اختر طريقة التطوع:")
+    buttons = [
+        ("🆓 التطوع مجاناً", "volunteer_free"),
+        ("💎 التطوع مدفوعاً", "volunteer_paid"),
+        ("🔙 القائمة الرئيسية", "main_menu"),
+    ]
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML,
+                                  reply_markup=kb_vertical(buttons))
+
+
+async def volunteer_free(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = update.effective_user.id
+    if uid == OWNER_ID or is_admin(uid):
+        await volunteer_menu(update, context)
+        return
     cfg = get_volunteer_config()
     progress = get_volunteer_progress(uid)
     text = (
-        "🙋 <b>التطوع لتصبح أدمن</b>\n\n"
+        "🆓 <b>التطوع المجاني</b>\n\n"
         "لكي تصبح أدمن يجب عليك إكمال الشروط اللازمة.\n\n"
         + _conditions_text(progress, cfg)
     )
     buttons = [
         ("ℹ️ فوائد الأدمن", "volunteer_benefits"),
         ("📨 طلب أن أصبح أدمن", "volunteer_request"),
-        ("🔙 القائمة الرئيسية", "main_menu"),
+        ("🔙 رجوع", "volunteer_menu"),
     ]
     await query.edit_message_text(text, parse_mode=ParseMode.HTML,
                                   reply_markup=kb_vertical(buttons))
+
+
+async def volunteer_paid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = update.effective_user.id
+    if uid == OWNER_ID or is_admin(uid):
+        await volunteer_menu(update, context)
+        return
+    contacts = get_paid_contacts()
+    prices = "\n".join(f"• <b>${amount}</b> {period}" for period, amount in PAID_PRICES)
+    text = (
+        "💎 <b>التطوع المدفوع</b>\n\n"
+        "إذا أردت التقدّم لتصبح أدمن بشكل مدفوع، فالاشتراك هو:\n\n"
+        f"{prices}\n\n"
+        "للتقديم والدفع تواصل مع:\n"
+        f"👤 المالك: {tg_html_escape(contacts['owner_username'])}\n"
+        f"🌐 سايت: {tg_html_escape(contacts['site_username'])}"
+    )
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML,
+                                  reply_markup=kb_single("🔙 رجوع", "volunteer_menu"))
 
 
 async def volunteer_benefits(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -142,7 +196,7 @@ async def volunteer_benefits(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
     buttons = [
         ("📨 طلب أن أصبح أدمن", "volunteer_request"),
-        ("🔙 رجوع", "volunteer_menu"),
+        ("🔙 رجوع", "volunteer_free"),
     ]
     await query.edit_message_text(text, parse_mode=ParseMode.HTML,
                                   reply_markup=kb_vertical(buttons))
@@ -152,7 +206,7 @@ async def volunteer_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = update.effective_user
     uid = user.id
-    back = kb_single("🔙 رجوع", "volunteer_menu")
+    back = kb_single("🔙 رجوع", "volunteer_free")
 
     if uid == OWNER_ID or is_admin(uid):
         await query.edit_message_text("ℹ️ أنت أدمن بالفعل.", reply_markup=back)
@@ -329,6 +383,8 @@ async def volunteer_settings(update: Update, context: ContextTypes.DEFAULT_TYPE)
         (f"{VOLUNTEER_LABELS['invites']}: {cfg['invites']}", "volunteer_set:invites"),
         (f"{VOLUNTEER_LABELS['active_invites']}: {cfg['active_invites']}", "volunteer_set:active_invites"),
         (f"{VOLUNTEER_LABELS['emails']}: {cfg['emails']}", "volunteer_set:emails"),
+        (f"{PAID_LABELS['owner_username']}: {get_paid_contacts()['owner_username']}", "volunteer_contact:owner_username"),
+        (f"{PAID_LABELS['site_username']}: {get_paid_contacts()['site_username']}", "volunteer_contact:site_username"),
         ("🔙 إعدادات المالك", "owner_panel"),
     ]
     await query.edit_message_text(text, parse_mode=ParseMode.HTML,
@@ -389,6 +445,55 @@ async def handle_volunteer_input(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data.pop("volunteer_key", None)
     await update.message.reply_text(
         f"✅ تم تحديث «{VOLUNTEER_LABELS[key]}» إلى <code>{value}</code>.",
+        parse_mode=ParseMode.HTML, reply_markup=back)
+
+
+async def volunteer_contact_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _owner_only(update):
+        return
+    query = update.callback_query
+    key = query.data.split(":", 1)[1] if ":" in query.data else ""
+    if key not in PAID_DEFAULTS:
+        return
+    context.user_data["mode"] = "volunteer_set_contact"
+    context.user_data["volunteer_contact_key"] = key
+    await query.edit_message_text(
+        f"{PAID_LABELS[key]}\n\n"
+        f"📌 الحالي: <code>{tg_html_escape(get_paid_contacts()[key])}</code>\n\n"
+        "أرسل اليوزر الجديد (مثال: <code>@username</code>)\n"
+        "<i>أو 'إلغاء' للعودة.</i>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_single("🔙 إلغاء", "volunteer_settings"))
+
+
+async def handle_volunteer_contact_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        context.user_data.pop("mode", None)
+        context.user_data.pop("volunteer_contact_key", None)
+        return
+    text = update.message.text.strip()
+    back = kb_single("🔙 إعدادات التطوع", "volunteer_settings")
+    key = context.user_data.get("volunteer_contact_key")
+    if text.casefold() in _CANCEL_WORDS or key not in PAID_DEFAULTS:
+        context.user_data.pop("mode", None)
+        context.user_data.pop("volunteer_contact_key", None)
+        await update.message.reply_text("❌ تم الإلغاء.", reply_markup=back)
+        return
+    username = text.replace("https://t.me/", "").replace("t.me/", "").lstrip("@").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_]{4,32}", username):
+        await update.message.reply_text("⚠️ يوزر غير صالح. أرسله بهذا الشكل: @username")
+        return
+    config = load_config()
+    section = config.get("admin_volunteer_paid", {})
+    if not isinstance(section, dict):
+        section = {}
+    section[key] = "@" + username
+    config["admin_volunteer_paid"] = section
+    save_config(config)
+    context.user_data.pop("mode", None)
+    context.user_data.pop("volunteer_contact_key", None)
+    await update.message.reply_text(
+        f"✅ تم تحديث «{PAID_LABELS[key]}» إلى <code>@{username}</code>.",
         parse_mode=ParseMode.HTML, reply_markup=back)
 
 
