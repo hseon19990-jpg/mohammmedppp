@@ -183,8 +183,8 @@ async def admin_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
         email_display = email[:18] + "..." if len(email) > 18 else email
         acc_type = req.get("account_type", "old")
         type_icon = "🆕" if acc_type == "new" else "📝"
-        rj_count = request_rejection_count(req)
-        rj_badge = f" ⚠️{rj_count}/3" if rj_count > 0 else ""
+        # المشرف لا يرى أن إيميلاً رُفض سابقاً من مشرف آخر (يظهر له كأنه جديد)
+        rj_badge = ""
         return (f"{type_icon} {tier_icon} {email_display} — ${amount:.2f}{rj_badge}",
                 f"admin_request_detail:{req['user_id']}:{account_callback_token(email)}")
 
@@ -240,7 +240,7 @@ async def admin_request_detail(update: Update, context: ContextTypes.DEFAULT_TYP
 
     # ═══ NEW: عرض حالة الرفض المتعدد ═══
     rejected_by_admins = request.get("rejected_by_admins", []) or []
-    if rejected_by_admins:
+    if rejected_by_admins and uid == OWNER_ID:
         msg += f"\n\n⚠️ <b>عدد المشرفين الذين رفضوه:</b> <code>{len(rejected_by_admins)}/{REJECTIONS_REQUIRED_FOR_FINAL}</code>\n"
         for rj in rejected_by_admins:
             msg += f"  • <code>{rj.get('admin_id')}</code> — {tg_html_escape(rj.get('admin_name', 'Unknown'))} ({REJECT_REASON_LABELS.get(rj.get('reason', ''), rj.get('reason', ''))})\n"
@@ -2302,11 +2302,17 @@ async def _apply_admin_rejection(update, context, actor_id, target_uid, index,
     # ═══ ليس نهائياً - يبقى في pending ═══
     save_user(target_uid, user_data)
     remaining = REJECTIONS_REQUIRED_FOR_FINAL - count
-    success_text = (f"⚠️ <b>تم تسجيل رفضك ({count}/{REJECTIONS_REQUIRED_FOR_FINAL})</b>\n\n"
-                    f"📧 <code>{display_email}</code>\n"
-                    f"📝 السبب: {REJECT_REASON_LABELS.get(reason_type, reason_type)}\n\n"
-                    f"📌 <i>يحتاج {remaining} رفض إضافي من مشرفين آخرين ليصبح نهائياً.</i>\n"
-                    f"<i>الإيميل الآن متاح لمشرف آخر للقبول أو الرفض.</i>")
+    if actor_id == OWNER_ID:
+        success_text = (f"⚠️ <b>تم تسجيل رفضك ({count}/{REJECTIONS_REQUIRED_FOR_FINAL})</b>\n\n"
+                        f"📧 <code>{display_email}</code>\n"
+                        f"📝 السبب: {REJECT_REASON_LABELS.get(reason_type, reason_type)}\n\n"
+                        f"📌 <i>يحتاج {remaining} رفض إضافي من مشرفين آخرين ليصبح نهائياً.</i>\n"
+                        f"<i>الإيميل الآن متاح لمشرف آخر للقبول أو الرفض.</i>")
+    else:
+        success_text = (f"✅ <b>تم تسجيل رفضك</b>\n\n"
+                        f"📧 <code>{display_email}</code>\n"
+                        f"📝 السبب: {REJECT_REASON_LABELS.get(reason_type, reason_type)}\n\n"
+                        f"<i>تم إخفاء الإيميل من قائمتك، وسيراجعه مشرف آخر.</i>")
     detail_callback = (
         f"pending_detail:{target_uid}:{request_token}"
         if actor_id == OWNER_ID
