@@ -223,12 +223,12 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ═══ 16b. إعدادات إحالة البوت الأول ═══
-    if mode in {"set_ref2_bonus", "set_ref2_link", "set_ref2_api"}:
+    if mode in {"set_ref2_bonus", "set_ref2_link", "set_ref2_api", "set_ref2_referrer"}:
         await handle_ref2_setting_input(update, context, mode, text)
         return
 
     # ═══ 16c. مسابقة الإحالات ═══
-    if mode in {"rc_prizes", "rc_days", "rc_extend", "rc_target", "rc_min", "rc_desc", "rc_assign"}:
+    if mode in {"rc_prizes", "rc_days", "rc_extend", "rc_target", "rc_min", "rc_desc", "rc_assign", "rc_ban", "rc_unban"}:
         await handle_rc_input(update, context, mode, text)
         return
 
@@ -701,10 +701,12 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await referral_menu(update, context)
     elif data.startswith("copy_referral:") or data.startswith("copy_referral2:"):
         await copy_referral(update, context)
-    elif data in {"set_ref2_bonus", "set_ref2_link", "set_ref2_api"}:
+    elif data in {"set_ref2_bonus", "set_ref2_link", "set_ref2_api", "set_ref2_referrer"}:
         await set_ref2_setting(update, context)
     elif data == "ref2_verify":
         await ref2_verify(update, context)
+    elif data in ("rc_ban_start", "rc_unban_start"):
+        await rc_ban_start(update, context)
     elif data == "rc_menu":
         await rc_menu(update, context)
     elif data == "rc_create":

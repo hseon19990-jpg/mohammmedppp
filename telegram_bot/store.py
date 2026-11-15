@@ -1709,6 +1709,7 @@ async def referral_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
                ("💲 مكافأة إحالة البوت الأول", "set_ref2_bonus"),
                ("🔗 رابط البوت الأول", "set_ref2_link"),
                ("🌐 رابط API للبوت الأول", "set_ref2_api"),
+               ("👤 حساب الإحالة الثاني", "set_ref2_referrer"),
                ("🏆 مسابقة الإحالات", "rc_menu"),
                ("📊 إحصائيات", "referral_stats"),
                ("🔙 إعدادات المالك", "owner_panel")]
@@ -1718,6 +1719,7 @@ async def referral_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💰 مكافأة إحالة البوت الأول (مرة واحدة): ${ref2_bonus:.2f}\n"
         f"🔗 رابط البوت الأول: `{ref2_link}`\n"
         f"🌐 رابط API: `{ref2_api}`\n"
+        f"👤 حساب الإحالة الثاني (يجب أن تصله الإحالة): `{config.get('ref2_expected_referrer') or 'غير مضبوط'}`\n"
         f"🔑 مفتاح PARTNER\\_API\\_KEY: {key_state}",
         parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
 
@@ -1743,6 +1745,8 @@ async def set_ref2_setting(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "set_ref2_bonus": "💰 أرسل مكافأة إحالة البوت الأول بالدولار (تُدفع مرة واحدة):",
         "set_ref2_link": ("🔗 أرسل رابط البوت الأول كما تريد أن يظهر للأعضاء، مثل `https://t.me/BotName?start=xxx`.\n"
                           "سيظهر نفسه لكل الأعضاء دون أي تغيير."),
+        "set_ref2_referrer": ("👤 أرسل يوزر أو آيدي حسابك الثاني في البوت الأول (الذي وضعت رابط إحالته).\n"
+                             "لن تُحتسب الإحالة إلا إذا سجّلها البوت الأول لهذا الحساب. أرسل `-` لإلغاء الشرط."),
         "set_ref2_api": ("🌐 أرسل رابط خادم البوت الأول، مثل `https://your-bot.up.railway.app`.\n"
                          "المفتاح السري يوضع في متغير البيئة `PARTNER_API_KEY` في البوتين بنفس القيمة."),
     }
@@ -1801,6 +1805,17 @@ async def handle_ref2_setting_input(update: Update, context: ContextTypes.DEFAUL
             return True
         config["ref2_bonus"] = round(bonus, 2)
         reply = f"✅ مكافأة إحالة البوت الأول: ${bonus:.2f}"
+    elif mode == "set_ref2_referrer":
+        value = text.strip().lstrip("@")
+        if value == "-":
+            config.pop("ref2_expected_referrer", None)
+            reply = "✅ أُلغي شرط حساب الإحالة الثاني."
+        elif re.fullmatch(r"\d{5,15}|[A-Za-z0-9_]{4,32}", value):
+            config["ref2_expected_referrer"] = value
+            reply = f"✅ حساب الإحالة الثاني: {value}"
+        else:
+            await update.message.reply_text("⚠️ أرسل يوزر أو آيدي صالحاً.")
+            return True
     elif mode == "set_ref2_link":
         link = normalize_partner_link(text)
         if not link:
@@ -1887,6 +1902,17 @@ def _md(text: str) -> str:
     return text
 
 
+def ref_contest_banned(contest: dict) -> set:
+    """معرّفات المطرودين من المسابقة الحالية."""
+    out = set()
+    for key in (contest.get("banned") or {}):
+        try:
+            out.add(int(key))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def ref_contest_ranking(contest: dict) -> List[dict]:
     """ترتيب المحيلين: الأكثر إحالات مكتملة (النوع الثاني فقط) خلال مدة المسابقة.
 
@@ -1897,6 +1923,7 @@ def ref_contest_ranking(contest: dict) -> List[dict]:
     if not start:
         return []
     end = _parse_iso(contest.get("ended_at") or contest.get("ends_at"))
+    banned = ref_contest_banned(contest)
     stats: Dict[int, dict] = {}
     for _uid, encrypted in load_json(USERS_DB).items():
         ref2 = decrypt_user_data(encrypted).get("ref2")
@@ -1905,6 +1932,8 @@ def ref_contest_ranking(contest: dict) -> List[dict]:
         paid_at = _parse_iso(ref2.get("paid_at"))
         referrer = ref2.get("referrer")
         if not paid_at or not referrer or paid_at < start or (end and paid_at > end):
+            continue
+        if int(referrer) in banned:
             continue
         entry = stats.setdefault(int(referrer), {"user_id": int(referrer), "count": 0, "last": paid_at})
         entry["count"] += 1
@@ -1921,6 +1950,8 @@ def ref_contest_winners(contest: dict) -> List[dict]:
     overrides = {}
     for key, value in (contest.get("overrides") or {}).items():
         try:
+            if int(value) in ref_contest_banned(contest):
+                continue
             overrides[int(key)] = int(value)
         except (TypeError, ValueError):
             continue
@@ -2108,6 +2139,92 @@ def _owner_only(update: Update) -> bool:
     return update.effective_user.id == OWNER_ID
 
 
+def _contest_points_earned(user_data: dict, contest: dict) -> float:
+    """مجموع مكافآت إحالة البوت الأول التي نالها العضو خلال مدة المسابقة."""
+    start = _parse_iso(contest.get("started_at"))
+    end = _parse_iso(contest.get("ended_at") or contest.get("ends_at"))
+    total = 0.0
+    for tx in user_data.get("transactions", []) or []:
+        if tx.get("kind") != "referral" or not str(tx.get("note", "")).startswith("Bot-1 referral"):
+            continue
+        at = _parse_iso(tx.get("at"))
+        if not at or (start and at < start) or (end and at > end):
+            continue
+        total += float(tx.get("amount", 0) or 0)
+    return round(total, 2)
+
+
+async def ban_from_ref_contest(context: ContextTypes.DEFAULT_TYPE, uid: int) -> str:
+    """يطرد العضو: يخصم نقاط المسابقة، يزيله من الترتيب، ويمنع مشاركته فيها."""
+    contest = get_ref_contest()
+    if not contest:
+        return "⚠️ لا توجد مسابقة."
+    if str(uid) not in load_json(USERS_DB):
+        return "⚠️ هذا المعرّف غير موجود في البوت."
+    banned = contest.setdefault("banned", {})
+    if str(uid) in banned:
+        return "ℹ️ هذا العضو مطرود مسبقاً من المسابقة."
+    data = get_user(uid)
+    earned = _contest_points_earned(data, contest)
+    balance = float(data.get("balance", 0.0) or 0.0)
+    deducted = round(min(earned, max(balance, 0.0)), 2)
+    if deducted > 0:
+        data["balance"] = clamp_money(balance - deducted)
+        data["referral_earnings"] = clamp_money(max(float(data.get("referral_earnings", 0.0) or 0.0) - deducted, 0.0))
+        data["total_credited_balance"] = clamp_money(
+            max(float(data.get("total_credited_balance", 0.0) or 0.0) - deducted, 0.0))
+        add_transaction(data, "referral_reversal", -deducted, "Removed from referral contest")
+        save_user(uid, data)
+    banned[str(uid)] = {"at": datetime.now(timezone.utc).isoformat(),
+                        "earned": earned, "deducted": deducted}
+    for rank, value in list((contest.get("overrides") or {}).items()):
+        if str(value) == str(uid):
+            contest["overrides"].pop(rank, None)
+    save_ref_contest(contest)
+    try:
+        await context.bot.send_message(
+            chat_id=uid, text="🚫 تم استبعادك من مسابقة الإحالات وخُصمت منك نقاطها. "
+                              "يمكنك متابعة استخدام البوت وجمع النقاط بشكل طبيعي.")
+    except Exception:
+        pass
+    note = "" if deducted >= earned else f"\n⚠️ رصيده الحالي أقل مما حصل عليه، فخُصم المتاح فقط."
+    return (f"✅ طُرد {uid} من المسابقة.\n💸 نقاط المسابقة التي حصل عليها: ${earned:.2f}\n"
+            f"➖ المخصوم: ${deducted:.2f}{note}")
+
+
+async def unban_from_ref_contest(uid: int) -> str:
+    contest = get_ref_contest()
+    info = (contest.get("banned") or {}).pop(str(uid), None) if contest else None
+    if info is None:
+        return "ℹ️ هذا العضو ليس مطروداً."
+    refund = float(info.get("deducted", 0) or 0)
+    if refund > 0:
+        data = get_user(uid)
+        data["balance"] = clamp_money(float(data.get("balance", 0.0) or 0.0) + refund)
+        data["referral_earnings"] = clamp_money(float(data.get("referral_earnings", 0.0) or 0.0) + refund)
+        data["total_credited_balance"] = clamp_money(float(data.get("total_credited_balance", 0.0) or 0.0) + refund)
+        add_transaction(data, "referral", refund, "Bot-1 referral restored (contest ban lifted)")
+        save_user(uid, data)
+    save_ref_contest(contest)
+    return f"✅ أُرجع {uid} للمسابقة" + (f" وأُعيدت له نقاطه (${refund:.2f})." if refund > 0 else ".")
+
+
+async def rc_ban_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not _owner_only(update):
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    mode = "rc_unban" if query.data == "rc_unban_start" else "rc_ban"
+    context.user_data["mode"] = mode
+    banned = ref_contest_banned(get_ref_contest())
+    text = ("🚫 أرسل معرّف (ID) العضو الذي تريد طرده من المسابقة.\n\n"
+            "• تُخصم منه نقاط المسابقة\n• يُحذف من المتصدرين\n• لا يمكنه المشاركة فيها (يستمر جمعه للنقاط عادياً)"
+            if mode == "rc_ban" else
+            "♻️ أرسل معرّف (ID) العضو الذي تريد إرجاعه (تُعاد له النقاط المخصومة).\n\n"
+            f"المطرودون: {', '.join(map(str, sorted(banned))) or 'لا يوجد'}")
+    await query.edit_message_text(text, reply_markup=kb_single("🔙 إلغاء", "rc_menu"))
+
+
 async def rc_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not _owner_only(update):
@@ -2133,6 +2250,8 @@ async def rc_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                ("🎯 تعديل عدد الإحالات المنهي", "rc_edit:target"),
                ("🔢 الحد الأدنى للفوز", "rc_edit:min"),
                ("📝 العنوان والوصف", "rc_edit:desc"),
+               (f"🚫 طرد مشارك من المسابقة ({len(ref_contest_banned(contest))})", "rc_ban_start"),
+               ("♻️ إرجاع مطرود", "rc_unban_start"),
                (f"🤖 التسليم التلقائي: {'مفعّل ✅' if contest.get('auto_deliver') else 'متوقف ❌'}", "rc_toggle_auto"),
                ("🛑 إنهاء المسابقة الآن" if active else "▶️ إعادة فتح المسابقة",
                 "rc_stop" if active else "rc_reopen")]
@@ -2203,6 +2322,15 @@ async def handle_rc_input(update: Update, context: ContextTypes.DEFAULT_TYPE, mo
         context.user_data.pop("mode", None)
         context.user_data.pop("rc_flow", None)
         await update.message.reply_text(message, reply_markup=kb_single("🏆 مسابقة الإحالات", "rc_menu"))
+
+    if mode in ("rc_ban", "rc_unban"):
+        if not text.isdigit():
+            await update.message.reply_text("⚠️ أرسل رقم معرّف المستخدم (أرقام فقط).", reply_markup=cancel)
+            return True
+        result = (await ban_from_ref_contest(context, int(text)) if mode == "rc_ban"
+                  else await unban_from_ref_contest(int(text)))
+        await done(result)
+        return True
 
     if mode == "rc_assign":
         rank = int(context.user_data.get("rc_assign_rank", 0) or 0)
@@ -3526,6 +3654,29 @@ def _is_new_in_partner(status: dict, ref2: dict) -> bool:
     return first_seen >= started_at - timedelta(minutes=2)
 
 
+def _partner_conditions_missing(status: dict) -> str:
+    """يعيد سبب عدم اكتمال شروط البوت الأول (نص عربي) أو فارغاً إن اكتملت.
+
+    1) أن يكمل المُحال الاشتراك الإجباري والتحقق داخل البوت الأول:
+       الـ API يجب أن يعيد verified=true (أو completed / subscribed).
+    2) أن تُسجَّل الإحالة لحساب المالك الثاني: الـ API يعيد referrer (يوزر أو آيدي)
+       ويُقارن بالقيمة المضبوطة في إعدادات الإحالة، وإن أعاد referrer_credited=false فلا تُحتسب.
+    أي حقل غير موجود عند الحاجة إليه يُعامل كأنه غير مكتمل (لا نمنح الإحالة بالتخمين).
+    """
+    flags = [status.get(k) for k in ("verified", "completed", "subscribed") if k in status]
+    if not flags or not all(bool(f) for f in flags):
+        return "لم تكمل بعد الاشتراك الإجباري والتحقق داخل البوت الأول. أكملها ثم اضغط «تحققت» من جديد."
+    expected = str(load_config().get("ref2_expected_referrer") or "").strip().lstrip("@").casefold()
+    if expected:
+        actual = {str(status.get(k)).strip().lstrip("@").casefold()
+                  for k in ("referrer", "referrer_id", "referrer_username") if status.get(k) not in (None, "")}
+        if expected not in actual:
+            return "لم تُسجَّل الإحالة على الحساب المطلوب في البوت الأول. ادخل من الرابط المعروض هنا فقط."
+    if status.get("referrer_credited") is False:
+        return "لم تصل نقاط الإحالة بعد في البوت الأول. أكمل الشروط هناك ثم أعد التحقق."
+    return ""
+
+
 async def _credit_ref2_referrer(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> str:
     """يدفع المكافأة مرة واحدة. يعيد: paid | invalid | already."""
     user_data = get_user(user_id)
@@ -3595,6 +3746,10 @@ async def ref2_verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_user(user_id, user_data)
         await _send_or_edit(update, context,
                             "⚠️ كنت مسجلاً في البوت الأول من قبل، لذلك لا تُحتسب هذه الإحالة.", back)
+        return
+    missing = _partner_conditions_missing(status)
+    if missing:
+        await query.answer("⚠️ " + missing, show_alert=True)
         return
     result = await _credit_ref2_referrer(context, user_id)
     if result == "paid":
