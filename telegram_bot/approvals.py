@@ -3232,8 +3232,8 @@ async def rej_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # يطلب من المشرف وضعه كبريد استرداد للحساب، ثم يفحص صندوق وارد هذا البريد ليرى هل وصل
 # إشعار Google يخص الحساب. بدون ذلك لا يكمل المشرف (المالك مُستثنى).
 RECOVERY_FOLDERS = ("INBOX", "[Gmail]/Spam")
-RECOVERY_MAX_CANDIDATES = 8
-_RECOVERY_CACHE: dict = {}
+RECOVERY_MAX_LOGIN_TESTS = 25   # أقصى عدد محاولات دخول IMAP في كل مرحلة اختيار
+_RECOVERY_RESERVED: dict = {}   # بريد -> {"until": وقت, "for": الحساب المحجوز له} حتى لا يأخذه مشرفان معاً
 
 
 def recovery_check_enabled() -> bool:
@@ -3251,18 +3251,66 @@ def _recovery_candidates(exclude_email: str) -> list:
                 continue
             found.append((str(acc.get("completed_at") or acc.get("timestamp") or ""), mail, pw))
     found.sort(reverse=True)
-    return [(m, p) for _, m, p in found[:RECOVERY_MAX_CANDIDATES]]
+    seen, out = set(), []
+    for _, m, p in found:
+        key = normalize_email(m)
+        if key not in seen:
+            seen.add(key)
+            out.append((m, p))
+    return out
 
 
-async def pick_recovery_mailbox(exclude_email: str) -> Optional[dict]:
-    cached = _RECOVERY_CACHE.get("box")
-    if cached and time.time() - cached["at"] < 1800 and normalize_email(cached["email"]) != normalize_email(exclude_email):
-        return {"email": cached["email"], "app_pass": cached["app_pass"]}
-    for mail, pw in await asyncio.to_thread(_recovery_candidates, exclude_email):
+def _recovery_used_map() -> dict:
+    data = load_config().get("recovery_mailboxes", {})
+    return data if isinstance(data, dict) else {}
+
+
+def mark_recovery_used(mailbox: str, target_email: str) -> None:
+    config = load_config()
+    used = config.get("recovery_mailboxes", {})
+    if not isinstance(used, dict):
+        used = {}
+    key = normalize_email(mailbox)
+    entry = used.get(key) if isinstance(used.get(key), dict) else {}
+    used[key] = {"at": datetime.now(timezone.utc).isoformat(), "count": int(entry.get("count", 0) or 0) + 1,
+                 "last_for": normalize_email(target_email)}
+    config["recovery_mailboxes"] = used
+    save_config(config)
+    _RECOVERY_RESERVED.pop(key, None)
+
+
+async def pick_recovery_mailbox(exclude_email: str, skip: tuple = ()) -> Optional[dict]:
+    """يختار بريد استرداد لم يُستعمل من قبل. لا يُعاد استعمال بريد إلا إذا انتهت كل البريدات
+    الصالحة (التي يعمل لها IMAP) — عندها فقط يُختار الأقدم استعمالاً."""
+    target_key = normalize_email(exclude_email)
+    skip_keys = {normalize_email(x) for x in skip}
+    now = time.time()
+    used = _recovery_used_map()
+    candidates = await asyncio.to_thread(_recovery_candidates, exclude_email)
+
+    def free(mail: str) -> bool:
+        key = normalize_email(mail)
+        res = _RECOVERY_RESERVED.get(key)
+        reserved_by_other = bool(res and res["until"] > now and res["for"] != target_key)
+        return key not in skip_keys and not reserved_by_other
+
+    def reserve(mail: str):
+        _RECOVERY_RESERVED[normalize_email(mail)] = {"until": time.time() + 1800, "for": target_key}
+
+    unused = [(m, p) for m, p in candidates if normalize_email(m) not in used and free(m)]
+    for mail, pw in unused[:RECOVERY_MAX_LOGIN_TESTS]:
         ok, _msg = await asyncio.to_thread(_imap_login_sync, mail, pw)
         if ok:
-            _RECOVERY_CACHE["box"] = {"email": mail, "app_pass": pw, "at": time.time()}
-            return {"email": mail, "app_pass": pw}
+            reserve(mail)
+            return {"email": mail, "app_pass": pw, "reused": False}
+    # لا يوجد بريد غير مستعمل يعمل: نسمح بتكرار الأقدم استعمالاً (حالة الانتهاء فقط)
+    reuse = sorted([(m, p) for m, p in candidates if normalize_email(m) in used and free(m)],
+                   key=lambda mp: str((used.get(normalize_email(mp[0])) or {}).get("at", "")))
+    for mail, pw in reuse[:RECOVERY_MAX_LOGIN_TESTS]:
+        ok, _msg = await asyncio.to_thread(_imap_login_sync, mail, pw)
+        if ok:
+            reserve(mail)
+            return {"email": mail, "app_pass": pw, "reused": True}
     return None
 
 
@@ -3326,6 +3374,16 @@ def _search_recovery_notice_sync(mailbox: str, app_pass: str, target_email: str,
     return False, ""
 
 
+def _recovery_creds_block(request: dict) -> str:
+    """بيانات الحساب للمشرف: الإيميل ثم الباسورد ثم رمز المصادقة إن وُجد (كلمة مرور التطبيق غير موجودة في هذه المرحلة)."""
+    lines = [f"📧 الإيميل:\n<code>{tg_html_escape(request.get('email', ''))}</code>"]
+    if request.get("password"):
+        lines.append(f"🔑 الباسورد:\n<code>{tg_html_escape(request.get('password', ''))}</code>")
+    if request.get("has_totp") and request.get("totp"):
+        lines.append(f"🔐 رمز المصادقة:\n<code>{tg_html_escape(request.get('totp', ''))}</code>")
+    return "\n\n".join(lines)
+
+
 def _recovery_kb(target_uid: int, token: str, extra: list = None):
     rows = list(extra or [])
     rows.append(("❌ إلغاء", f"admin_request_detail:{target_uid}:{token}"))
@@ -3348,7 +3406,7 @@ async def admin_recovery_step(update: Update, context: ContextTypes.DEFAULT_TYPE
         if ok:
             box = rec
     if box is None:
-        picked = await pick_recovery_mailbox(request.get("email", ""))
+        picked = await pick_recovery_mailbox(request.get("email", ""), skip=tuple(request.get("recovery_skipped") or ()))
         if not picked:
             await query.edit_message_text(
                 "⚠️ لا يوجد حالياً بريد استرداد صالح (لا حساب مقبول يعمل له IMAP). أبلغ المالك.",
@@ -3365,8 +3423,9 @@ async def admin_recovery_step(update: Update, context: ContextTypes.DEFAULT_TYPE
             save_user(target_uid, user_data)
     await query.edit_message_text(
         "📮 <b>الخطوة الأولى: بريد الاسترداد</b>\n\n"
-        f"📧 الحساب: <code>{tg_html_escape(request.get('email', ''))}</code>\n"
-        f"➡️ ضع هذا البريد كبريد استرداد له:\n<code>{tg_html_escape(box['email'])}</code>\n\n"
+        f"{_recovery_creds_block(request)}\n\n"
+        "➡️ ضع هذا البريد كبريد استرداد للحساب:\n"
+        f"<code>{tg_html_escape(box['email'])}</code>\n\n"
         "بعد وضعه اضغط الزر ليفحص البوت وصول إشعار Google. لا تضع بريداً آخر.",
         parse_mode=ParseMode.HTML,
         reply_markup=_recovery_kb(target_uid, token, [("✅ وضعته — افحص الآن", f"admin_recovery_check:{target_uid}:{token}")]))
@@ -3415,14 +3474,18 @@ async def admin_recovery_check(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     if not found:
         await query.edit_message_text(
-            "❌ لم يصل بعد إشعار من Google بأن هذا البريد صار بريد استرداد للحساب.\n\n"
-            "تأكد أنك وضعت البريد المطلوب بالضبط، وانتظر دقيقة ثم أعد الفحص.",
+            "❌ لم يصل بعد إشعار من Google بأن هذا البريد صار بريد استرداد للحساب.\n"
+            "تأكد أنك وضعت البريد المطلوب بالضبط، وانتظر دقيقة ثم أعد الفحص.\n\n"
+            f"{_recovery_creds_block(request)}\n\n"
+            f"➡️ بريد الاسترداد المطلوب:\n<code>{tg_html_escape(rec['email'])}</code>",
+            parse_mode=ParseMode.HTML,
             reply_markup=_recovery_kb(target_uid, token, retry))
         return
     user_data = get_user(target_uid)
     match = find_pending_request(user_data, token)
     if match is not None:
         pending = user_data.get("pending_requests", [])
+        mark_recovery_used(rec["email"], request.get("email", ""))
         pending[match[0]]["recovery_verified"] = True
         pending[match[0]]["recovery_verified_at"] = datetime.now(timezone.utc).isoformat()
         user_data["pending_requests"] = pending
@@ -3441,12 +3504,16 @@ async def admin_recovery_reset(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     parts = query.data.split(":")
     target_uid, token = int(parts[1]), parts[2]
-    _RECOVERY_CACHE.pop("box", None)
     user_data = get_user(target_uid)
     match = find_pending_request(user_data, token)
     if match is not None:
         pending = user_data.get("pending_requests", [])
-        pending[match[0]].pop("recovery", None)
+        old_rec = pending[match[0]].pop("recovery", None) or {}
+        if old_rec.get("email"):
+            skipped = list(pending[match[0]].get("recovery_skipped") or [])
+            skipped.append(old_rec["email"])
+            pending[match[0]]["recovery_skipped"] = skipped[-20:]
+            _RECOVERY_RESERVED.pop(normalize_email(old_rec["email"]), None)
         user_data["pending_requests"] = pending
         save_user(target_uid, user_data)
     await admin_recovery_step(update, context, target_uid, token)
