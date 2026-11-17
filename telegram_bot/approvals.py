@@ -3341,15 +3341,18 @@ def _mentions_account(text: str, local: str, domain: str) -> bool:
     low = text.lower()
     if f"{local}@{domain}" in low:
         return True
+    if domain in ("gmail.com", "googlemail.com") and "." in local:
+        if f"{local.replace('.', '')}@{domain}" in low.replace(".", "") or re.sub(r"\.", "", local) + "@" in low.replace(".", ""):
+            return True
     for k in range(1, min(3, len(local)) + 1):
         if re.search(re.escape(local[:k]) + r"[*\u2022\u00b7\u2024\u2026]+[^@\s]{0,3}@" + re.escape(domain), low):
             return True
     return len(local) >= 6 and local in low
 
 
-RECOVERY_SCAN_BUDGET = 100       # ثوانٍ: أقصى زمن لقراءة الصندوق كله
+RECOVERY_SCAN_BUDGET = 3600      # ثوانٍ: عملياً بلا حد (يقرأ الصندوق كله)
 RECOVERY_SCAN_CHUNK = 40         # عدد الرسائل في كل دفعة جلب
-RECOVERY_SCAN_MAX_PER_FOLDER = 6000
+RECOVERY_SCAN_MAX_PER_FOLDER = None  # بلا حد: كل الرسائل في كل مجلد
 
 
 def _imap_list_folders(imap) -> list:
@@ -3369,7 +3372,7 @@ def _imap_list_folders(imap) -> list:
             continue
         flags = m.group("flags").lower()
         name = m.group("name").strip().strip('"')
-        if "\\noselect" in flags or "\\important" in flags or "\\flagged" in flags or "\\drafts" in flags:
+        if "\\noselect" in flags or "\\nonexistent" in flags:
             continue
         folders.append(name)
     if "INBOX" not in folders:
@@ -3385,6 +3388,7 @@ def _search_recovery_notice_sync(mailbox: str, app_pass: str, target_email: str,
     - وتُقبل رسالة Google جديدة (بعد التحديد) تبدو رسالة استرداد/تحقق.
     """
     import email as emaillib
+    import html as _html
     from email.header import decode_header, make_header
     from email.utils import parsedate_to_datetime
     host, port = get_imap_host(mailbox)
@@ -3407,7 +3411,7 @@ def _search_recovery_notice_sync(mailbox: str, app_pass: str, target_email: str,
             typ, data = imap.uid("SEARCH", None, "ALL")
             if typ != "OK" or not data or not data[0]:
                 continue
-            uids = data[0].split()[-RECOVERY_SCAN_MAX_PER_FOLDER:]
+            uids = data[0].split()
             for i in range(len(uids) - 1, -1, -RECOVERY_SCAN_CHUNK):  # من الأحدث للأقدم
                 if time.monotonic() > deadline:
                     break
@@ -3430,18 +3434,16 @@ def _search_recovery_notice_sync(mailbox: str, app_pass: str, target_email: str,
                             payload = part.get_payload(decode=True) or b""
                             chunks.append(payload.decode(part.get_content_charset() or "utf-8", errors="replace"))
                     text = " ".join(chunks)
+                    try:
+                        _un = _html.unescape(text)
+                        text = text + " " + _un + " " + re.sub(r"<[^>]+>", "", _un)
+                    except Exception:
+                        pass
                     if _mentions_account(text, local, domain):
                         strong_hit = subject or "(بدون عنوان)"
                         break
                     if "google" in str(msg.get("From", "")).lower():
-                        try:
-                            sent = parsedate_to_datetime(msg.get("Date"))
-                            if sent.tzinfo is None:
-                                sent = sent.replace(tzinfo=timezone.utc)
-                            is_new = sent >= since
-                        except Exception:
-                            is_new = False
-                        if is_new:
+                        if True:  # بلا قيد تاريخ: كل رسائل Google قديمها وجديدها
                             seen.append(f"{folder}: {subject[:80]}")
                             if not loose_hit and _looks_like_recovery_notice(text):
                                 loose_hit = subject
@@ -3584,7 +3586,7 @@ async def _recovery_check_core(target_uid: int, token: str):
         found, subject, seen, scanned = await asyncio.wait_for(
             asyncio.to_thread(_search_recovery_notice_sync, rec["email"], rec["app_pass"],
                               request.get("email", ""), since.isoformat()),
-            timeout=130)
+            timeout=3700)
     except Exception as exc:
         logger.warning("recovery check failed for %s: %s", request.get("email"), exc)
         return ("⚠️ تعذّر فحص صندوق الوارد الآن (مشكلة اتصال أو IMAP). أعد المحاولة بعد قليل.",
