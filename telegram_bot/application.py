@@ -138,6 +138,8 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_admin_totp_input(update, context); return
     if admin_approval_step == "waiting_app_pass":
         await handle_admin_app_pass_input(update, context); return
+    if admin_approval_step == "waiting_recovery_email":
+        await handle_admin_recovery_input(update, context); return
     if admin_approval_step == "waiting_acceptance_choice":
         await prompt_admin_acceptance_choice(
             update, context,
