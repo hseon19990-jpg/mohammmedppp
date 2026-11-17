@@ -478,6 +478,12 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await rej_delete(update, context)
     elif data.startswith("admin_rejected:"):
         await admin_rejected_requests(update, context)
+    elif data.startswith("admin_recovery_start:"):
+        await admin_recovery_start(update, context)
+    elif data.startswith("admin_recovery_check:"):
+        await admin_recovery_check(update, context)
+    elif data.startswith("admin_recovery_reset:"):
+        await admin_recovery_reset(update, context)
     elif data.startswith("admin_complete_start:"):
         await admin_complete_start(update, context)
     elif data.startswith("admin_accept_auto:") or data.startswith("admin_accept_leave:"):
@@ -903,6 +909,7 @@ def main():
     app.add_handler(CommandHandler("admin", admin_command))
     app.add_handler(CommandHandler("backup", backup_command))
     app.add_handler(CommandHandler("cleanup_recovery", cleanup_recovery_command))
+    app.add_handler(CommandHandler("recovery_check", recovery_check_command))
     app.add_handler(CallbackQueryHandler(router))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_input))
     app.add_handler(MessageHandler(filters.VIDEO, handle_video_upload))
