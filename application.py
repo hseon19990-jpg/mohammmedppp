@@ -64,10 +64,6 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("ai_notes_step") == "notes":
         await handle_ai_notes_input(update, context); return
 
-    # ═══ 0e-3. المالك يضبط رصيد الذكاء الاصطناعي ═══
-    if context.user_data.get("ai_budget_step") == "v":
-        await handle_ai_budget_input(update, context); return
-
     # ═══ 0e-1. المالك يضيف مفتاح الذكاء الاصطناعي ═══
     if context.user_data.get("ai_key_step") == "key":
         await handle_ai_key_input(update, context); return
@@ -92,6 +88,8 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ═══ 3b. Admin volunteer conditions (owner) ═══
     if mode == "volunteer_set_value":
         await handle_volunteer_input(update, context); return
+    if mode == "volunteer_set_contact":
+        await handle_volunteer_contact_input(update, context); return
 
     # ═══ 4. Store flow (buy_flow / legacy) ═══
     if context.user_data.get("buy_flow"):
@@ -140,6 +138,8 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_admin_totp_input(update, context); return
     if admin_approval_step == "waiting_app_pass":
         await handle_admin_app_pass_input(update, context); return
+    if admin_approval_step == "waiting_recovery_email":
+        await handle_admin_recovery_input(update, context); return
     if admin_approval_step == "waiting_acceptance_choice":
         await prompt_admin_acceptance_choice(
             update, context,
@@ -225,12 +225,12 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ═══ 16b. إعدادات إحالة البوت الأول ═══
-    if mode in {"set_ref2_bonus", "set_ref2_link", "set_ref2_api"}:
+    if mode in {"set_ref2_bonus", "set_ref2_link", "set_ref2_api", "set_ref2_referrer"}:
         await handle_ref2_setting_input(update, context, mode, text)
         return
 
     # ═══ 16c. مسابقة الإحالات ═══
-    if mode in {"rc_prizes", "rc_days", "rc_extend", "rc_target", "rc_min", "rc_desc", "rc_assign"}:
+    if mode in {"rc_prizes", "rc_days", "rc_extend", "rc_target", "rc_min", "rc_desc", "rc_assign", "rc_ban", "rc_unban"}:
         await handle_rc_input(update, context, mode, text)
         return
 
@@ -293,10 +293,6 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await ai_notes_start(update, context)
     elif data == "ai_key_start":
         await ai_key_start(update, context)
-    elif data == "ai_budget_start":
-        await ai_budget_start(update, context)
-    elif data == "ai_owner_toggle":
-        await ai_owner_toggle(update, context)
     elif data == "ai_key_test":
         await ai_key_test(update, context)
     elif data == "ai_key_delete":
@@ -416,6 +412,12 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await daily_gift_set_reward(update, context)
     elif data == "volunteer_menu":
         await volunteer_menu(update, context)
+    elif data == "volunteer_free":
+        await volunteer_free(update, context)
+    elif data == "volunteer_paid":
+        await volunteer_paid(update, context)
+    elif data.startswith("volunteer_contact:"):
+        await volunteer_contact_start(update, context)
     elif data == "volunteer_benefits":
         await volunteer_benefits(update, context)
     elif data == "volunteer_request":
@@ -478,6 +480,12 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await rej_delete(update, context)
     elif data.startswith("admin_rejected:"):
         await admin_rejected_requests(update, context)
+    elif data.startswith("admin_recovery_start:"):
+        await admin_recovery_start(update, context)
+    elif data.startswith("admin_recovery_check:"):
+        await admin_recovery_check(update, context)
+    elif data.startswith("admin_recovery_reset:"):
+        await admin_recovery_reset(update, context)
     elif data.startswith("admin_complete_start:"):
         await admin_complete_start(update, context)
     elif data.startswith("admin_accept_auto:") or data.startswith("admin_accept_leave:"):
@@ -701,10 +709,12 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await referral_menu(update, context)
     elif data.startswith("copy_referral:") or data.startswith("copy_referral2:"):
         await copy_referral(update, context)
-    elif data in {"set_ref2_bonus", "set_ref2_link", "set_ref2_api"}:
+    elif data in {"set_ref2_bonus", "set_ref2_link", "set_ref2_api", "set_ref2_referrer"}:
         await set_ref2_setting(update, context)
     elif data == "ref2_verify":
         await ref2_verify(update, context)
+    elif data in ("rc_ban_start", "rc_unban_start"):
+        await rc_ban_start(update, context)
     elif data == "rc_menu":
         await rc_menu(update, context)
     elif data == "rc_create":
@@ -901,6 +911,7 @@ def main():
     app.add_handler(CommandHandler("admin", admin_command))
     app.add_handler(CommandHandler("backup", backup_command))
     app.add_handler(CommandHandler("cleanup_recovery", cleanup_recovery_command))
+    app.add_handler(CommandHandler("recovery_check", recovery_check_command))
     app.add_handler(CallbackQueryHandler(router))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_input))
     app.add_handler(MessageHandler(filters.VIDEO, handle_video_upload))
