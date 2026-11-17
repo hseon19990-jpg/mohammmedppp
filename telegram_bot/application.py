@@ -450,6 +450,10 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await sales_during_contest_view(update, context)
     elif data == "admin_management":
         await admin_management(update, context)
+    elif data == "recovery_admins_menu":
+        await recovery_admins_menu(update, context)
+    elif data.startswith("recovery_admin_toggle:"):
+        await recovery_admin_toggle(update, context)
     elif data == "add_admin":
         await add_admin_start(update, context)
     elif data == "remove_admin_menu":

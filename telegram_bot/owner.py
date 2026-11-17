@@ -2000,6 +2000,7 @@ async def admin_management(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = [
         ("➕ إضافة أدمن", "add_admin"),
         ("🗑️ مسح أدمن", "remove_admin_menu"),
+        ("📮 شرط بريد الاسترداد", "recovery_admins_menu"),
         ("🔙 إعدادات المالك", "owner_panel"),
     ]
     current = "\n".join(f"• `{a}`" for a in sorted(admins)) if admins else "_لا يوجد أدمن حالياً_"

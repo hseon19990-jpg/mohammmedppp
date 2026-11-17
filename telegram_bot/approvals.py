@@ -338,7 +338,7 @@ async def admin_complete_start(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     index, request = match
 
-    if recovery_check_enabled() and uid != OWNER_ID and not request.get("recovery_verified"):
+    if recovery_check_applies(uid) and not request.get("recovery_verified"):
         await admin_recovery_step(update, context, target_uid, token)
         return
 
@@ -526,7 +526,7 @@ async def admin_accept_completed(update: Update, context: ContextTypes.DEFAULT_T
             reply_markup=kb_single(t(uid, "appr_btn_requests"), "admin_requests:0"))
         return
     index, _req = match
-    if recovery_check_enabled() and uid != OWNER_ID and not _req.get("recovery_verified"):
+    if recovery_check_applies(uid) and not _req.get("recovery_verified"):
         await admin_recovery_step(update, context, target_uid, token)
         return
     await admin_verify_and_store(update, context, target_uid, index, hold_seconds=LEAVE_HOLD_SECONDS)
@@ -3236,8 +3236,20 @@ RECOVERY_MAX_LOGIN_TESTS = 25   # أقصى عدد محاولات دخول IMAP �
 _RECOVERY_RESERVED: dict = {}   # بريد -> {"until": وقت, "for": الحساب المحجوز له} حتى لا يأخذه مشرفان معاً
 
 
-def recovery_check_enabled() -> bool:
-    return bool(load_config().get("recovery_check_enabled", True))
+def recovery_check_admins() -> set:
+    """معرّفات المشرفين الذين يُطبَّق عليهم شرط بريد الاسترداد (يحددها المالك). الباقون على الطريقة القديمة."""
+    raw = load_config().get("recovery_check_admins", [])
+    out = set()
+    for x in raw if isinstance(raw, list) else []:
+        try:
+            out.add(int(x))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def recovery_check_applies(admin_id: int) -> bool:
+    return admin_id != OWNER_ID and int(admin_id) in recovery_check_admins()
 
 
 def _recovery_candidates(exclude_email: str) -> list:
@@ -3335,11 +3347,42 @@ def _mentions_account(text: str, local: str, domain: str) -> bool:
     return len(local) >= 6 and local in low
 
 
-def _search_recovery_notice_sync(mailbox: str, app_pass: str, target_email: str, since_iso: str):
-    """يرجع (وُجد؟، عنوان الرسالة، قائمة رسائل Google التي وصلت بعد التحديد للتشخيص).
+RECOVERY_SCAN_BUDGET = 100       # ثوانٍ: أقصى زمن لقراءة الصندوق كله
+RECOVERY_SCAN_CHUNK = 40         # عدد الرسائل في كل دفعة جلب
+RECOVERY_SCAN_MAX_PER_FOLDER = 6000
 
-    يُقبل الإشعار إن (1) ذكر الحساب (كاملاً أو مخفياً)، أو (2) كانت رسالة Google جديدة وصلت بعد تحديد
-    البريد وتبدو رسالة استرداد/تحقق. البريد محجوز لطلب واحد فقط فلا يُخلط مع غيره.
+
+def _imap_list_folders(imap) -> list:
+    """كل المجلدات القابلة للقراءة (وارد، كل البريد، مزعج، محذوف، مرسل...) بدون المجلدات المكررة (المهمة/المميزة)."""
+    import re as _re
+    folders = []
+    try:
+        typ, data = imap.list()
+    except Exception:
+        return ["INBOX"]
+    if typ != "OK":
+        return ["INBOX"]
+    for raw in data or []:
+        line = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+        m = _re.match(r'\((?P<flags>[^)]*)\)\s+"?(?P<sep>[^"\s]*)"?\s+(?P<name>.+)$', line)
+        if not m:
+            continue
+        flags = m.group("flags").lower()
+        name = m.group("name").strip().strip('"')
+        if "\\noselect" in flags or "\\important" in flags or "\\flagged" in flags or "\\drafts" in flags:
+            continue
+        folders.append(name)
+    if "INBOX" not in folders:
+        folders.insert(0, "INBOX")
+    return folders
+
+
+def _search_recovery_notice_sync(mailbox: str, app_pass: str, target_email: str, since_iso: str):
+    """يقرأ صندوق بريد الاسترداد كله (كل المجلدات، المقروء وغير المقروء، القديم والجديد) رسالةً رسالة.
+
+    يرجع (وُجد؟، عنوان الرسالة، قائمة رسائل Google بعد التحديد، عدد الرسائل المقروءة).
+    - تُقبل أي رسالة (من أي مرسل وبأي تاريخ) تذكر الحساب كاملاً أو مخفياً.
+    - وتُقبل رسالة Google جديدة (بعد التحديد) تبدو رسالة استرداد/تحقق.
     """
     import email as emaillib
     from email.header import decode_header, make_header
@@ -3347,55 +3390,68 @@ def _search_recovery_notice_sync(mailbox: str, app_pass: str, target_email: str,
     host, port = get_imap_host(mailbox)
     since = datetime.fromisoformat(since_iso) - timedelta(minutes=2)
     local, _, domain = str(target_email).strip().lower().partition("@")
-    seen = []
-    loose_hit = ""
-    with imaplib.IMAP4_SSL(host, port, ssl_context=ssl.create_default_context(), timeout=20) as imap:
+    seen, scanned = [], 0
+    loose_hit, strong_hit = "", ""
+    deadline = time.monotonic() + RECOVERY_SCAN_BUDGET
+    with imaplib.IMAP4_SSL(host, port, ssl_context=ssl.create_default_context(), timeout=30) as imap:
         imap.login(mailbox, app_pass)
-        for folder in RECOVERY_FOLDERS:
+        for folder in _imap_list_folders(imap):
+            if strong_hit or time.monotonic() > deadline:
+                break
             try:
                 typ, _ = imap.select(f'"{folder}"', readonly=True)
             except Exception:
                 continue
             if typ != "OK":
                 continue
-            day = (since - timedelta(days=1)).strftime("%d-%b-%Y")
-            typ, data = imap.search(None, "SINCE", day)
+            typ, data = imap.uid("SEARCH", None, "ALL")
             if typ != "OK" or not data or not data[0]:
                 continue
-            for mid in reversed(data[0].split()[-25:]):
-                typ, msgdata = imap.fetch(mid, "(RFC822)")
-                if typ != "OK" or not msgdata or not isinstance(msgdata[0], tuple):
+            uids = data[0].split()[-RECOVERY_SCAN_MAX_PER_FOLDER:]
+            for i in range(len(uids) - 1, -1, -RECOVERY_SCAN_CHUNK):  # من الأحدث للأقدم
+                if time.monotonic() > deadline:
+                    break
+                chunk = uids[max(0, i - RECOVERY_SCAN_CHUNK + 1): i + 1]
+                typ, msgdata = imap.uid("FETCH", b",".join(chunk).decode(), "(BODY.PEEK[])")
+                if typ != "OK":
                     continue
-                msg = emaillib.message_from_bytes(msgdata[0][1])
-                try:
-                    sent = parsedate_to_datetime(msg.get("Date"))
-                    if sent.tzinfo is None:
-                        sent = sent.replace(tzinfo=timezone.utc)
-                    if sent < since:
+                for item in msgdata or []:
+                    if not isinstance(item, tuple):
                         continue
-                except Exception:
-                    pass
-                sender = str(msg.get("From", "")).lower()
-                if "google" not in sender:
-                    continue
-                try:
-                    subject = str(make_header(decode_header(msg.get("Subject", ""))))
-                except Exception:
-                    subject = str(msg.get("Subject", ""))
-                chunks = [subject]
-                for part in msg.walk():
-                    if part.get_content_type() in ("text/plain", "text/html"):
-                        payload = part.get_payload(decode=True) or b""
-                        chunks.append(payload.decode(part.get_content_charset() or "utf-8", errors="replace"))
-                text = " ".join(chunks)
-                seen.append(f"{folder}: {subject[:80]}")
-                if _mentions_account(text, local, domain):
-                    return True, subject, seen
-                if not loose_hit and _looks_like_recovery_notice(text):
-                    loose_hit = subject
+                    scanned += 1
+                    msg = emaillib.message_from_bytes(item[1])
+                    try:
+                        subject = str(make_header(decode_header(msg.get("Subject", ""))))
+                    except Exception:
+                        subject = str(msg.get("Subject", ""))
+                    chunks = [subject]
+                    for part in msg.walk():
+                        if part.get_content_type() in ("text/plain", "text/html"):
+                            payload = part.get_payload(decode=True) or b""
+                            chunks.append(payload.decode(part.get_content_charset() or "utf-8", errors="replace"))
+                    text = " ".join(chunks)
+                    if _mentions_account(text, local, domain):
+                        strong_hit = subject or "(بدون عنوان)"
+                        break
+                    if "google" in str(msg.get("From", "")).lower():
+                        try:
+                            sent = parsedate_to_datetime(msg.get("Date"))
+                            if sent.tzinfo is None:
+                                sent = sent.replace(tzinfo=timezone.utc)
+                            is_new = sent >= since
+                        except Exception:
+                            is_new = False
+                        if is_new:
+                            seen.append(f"{folder}: {subject[:80]}")
+                            if not loose_hit and _looks_like_recovery_notice(text):
+                                loose_hit = subject
+                if strong_hit:
+                    break
+    if strong_hit:
+        return True, strong_hit, seen, scanned
     if loose_hit:
-        return True, loose_hit, seen
-    return False, "", seen
+        return True, loose_hit, seen, scanned
+    return False, "", seen, scanned
 
 
 def _recovery_creds_block(request: dict) -> str:
@@ -3525,20 +3581,20 @@ async def _recovery_check_core(target_uid: int, token: str):
              ("✏️ بريد استرداد آخر", f"admin_recovery_reset:{target_uid}:{token}")]
     try:
         since = datetime.fromisoformat(rec.get("assigned_at") or datetime.now(timezone.utc).isoformat()) - timedelta(minutes=60)
-        found, subject, seen = await asyncio.wait_for(
+        found, subject, seen, scanned = await asyncio.wait_for(
             asyncio.to_thread(_search_recovery_notice_sync, rec["email"], rec["app_pass"],
                               request.get("email", ""), since.isoformat()),
-            timeout=60)
+            timeout=130)
     except Exception as exc:
         logger.warning("recovery check failed for %s: %s", request.get("email"), exc)
         return ("⚠️ تعذّر فحص صندوق الوارد الآن (مشكلة اتصال أو IMAP). أعد المحاولة بعد قليل.",
                 _recovery_kb(target_uid, token, retry))
-    logger.info("recovery check mailbox=%s target=%s found=%s google_mails=%s",
-                rec.get("email"), request.get("email"), found, seen[:6])
+    logger.info("recovery check mailbox=%s target=%s found=%s scanned=%s google_mails=%s",
+                rec.get("email"), request.get("email"), found, scanned, seen[:6])
     if not found:
         return ("❌ لم يصل إلى هذا البريد إشعار من Google بأنه بريد استرداد لهذا الحساب.\n"
                 "تأكد أنك وضعته بالضبط على الحساب، وانتظر دقيقة ثم أعد الفحص.\n"
-                f"📬 رسائل Google في وارده: {len(seen)}\n\n"
+                f"📬 قرأتُ {scanned} رسالة من كل مجلدات البريد، ورسائل Google الجديدة بينها: {len(seen)}\n\n"
                 f"{_recovery_creds_block(request)}\n\n"
                 f"📮 بريد الاسترداد المُدخل:\n<code>{tg_html_escape(rec['email'])}</code>",
                 _recovery_kb(target_uid, token, retry))
@@ -3593,17 +3649,54 @@ async def admin_recovery_reset(update: Update, context: ContextTypes.DEFAULT_TYP
     await admin_recovery_step(update, context, target_uid, token)
 
 
+async def recovery_admins_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """للمالك: يحدد المشرفين الذين يُطبَّق عليهم شرط بريد الاسترداد."""
+    query = update.callback_query
+    if query.from_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    selected = recovery_check_admins()
+    admins = sorted(load_admins())
+    buttons = [(f"{'✅' if a in selected else '⬜'} {a}", f"recovery_admin_toggle:{a}") for a in admins]
+    buttons.append(("🔙 الإدارية", "admin_management"))
+    await query.edit_message_text(
+        "📮 *شرط بريد الاسترداد*\n\n"
+        "✅ = يُطبَّق عليه الشرط (يرسل بريد الاسترداد ويفحصه البوت قبل الإكمال)\n"
+        "⬜ = بالطريقة القديمة (بدون هذا الشرط)\n\n"
+        "اضغط اسم المشرف للتبديل." + ("" if admins else "\n\n_لا يوجد أدمن حالياً_"),
+        parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
+
+
+async def recovery_admin_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.from_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    try:
+        admin_id = int(query.data.split(":")[1])
+    except (IndexError, ValueError):
+        return
+    selected = recovery_check_admins()
+    selected.symmetric_difference_update({admin_id})
+    config = load_config()
+    config["recovery_check_admins"] = sorted(selected)
+    save_config(config)
+    await recovery_admins_menu(update, context)
+
+
 async def recovery_check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/recovery_check [on|off] — للمالك: تشغيل/إيقاف شرط بريد الاسترداد."""
+    """/recovery_check [off] — للمالك: عرض المشرفين المطبَّق عليهم الشرط، أو إلغاؤه عن الجميع."""
     if update.effective_user.id != OWNER_ID:
         return
-    arg = (context.args[0].lower() if context.args else "")
     config = load_config()
-    if arg in ("on", "off"):
-        config["recovery_check_enabled"] = (arg == "on")
+    if context.args and context.args[0].lower() == "off":
+        config["recovery_check_admins"] = []
         save_config(config)
-    state = "مفعّل ✅" if config.get("recovery_check_enabled", True) else "متوقف ⛔"
-    await update.message.reply_text(f"📮 شرط بريد الاسترداد للمشرفين: {state}\nللتغيير: /recovery_check on أو /recovery_check off")
+    ids = recovery_check_admins() if not (context.args and context.args[0].lower() == "off") else set()
+    shown = "، ".join(str(i) for i in sorted(ids)) or "لا أحد (الطريقة القديمة للجميع)"
+    await update.message.reply_text(
+        f"📮 شرط بريد الاسترداد مطبَّق على: {shown}\n"
+        "التحديد من: الإدارية ← شرط بريد الاسترداد. ولإلغائه عن الجميع: /recovery_check off")
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]
