@@ -3314,6 +3314,17 @@ async def pick_recovery_mailbox(exclude_email: str, skip: tuple = ()) -> Optiona
     return None
 
 
+RECOVERY_KEYWORDS = (
+    "recovery", "verify", "verification", "confirm", "backup", "alternate", "security info",
+    "استرداد", "الاسترداد", "استعادة", "تحقق", "التحقق", "تأكيد", "احتياطي", "رمز",
+)
+
+
+def _looks_like_recovery_notice(text: str) -> bool:
+    low = text.lower()
+    return any(k in low for k in RECOVERY_KEYWORDS)
+
+
 def _mentions_account(text: str, local: str, domain: str) -> bool:
     low = text.lower()
     if f"{local}@{domain}" in low:
@@ -3325,13 +3336,19 @@ def _mentions_account(text: str, local: str, domain: str) -> bool:
 
 
 def _search_recovery_notice_sync(mailbox: str, app_pass: str, target_email: str, since_iso: str):
-    """يرجع (وُجد؟، عنوان الرسالة) بعد البحث في وارد بريد الاسترداد عن رسالة Google تخص الحساب."""
+    """يرجع (وُجد؟، عنوان الرسالة، قائمة رسائل Google التي وصلت بعد التحديد للتشخيص).
+
+    يُقبل الإشعار إن (1) ذكر الحساب (كاملاً أو مخفياً)، أو (2) كانت رسالة Google جديدة وصلت بعد تحديد
+    البريد وتبدو رسالة استرداد/تحقق. البريد محجوز لطلب واحد فقط فلا يُخلط مع غيره.
+    """
     import email as emaillib
     from email.header import decode_header, make_header
     from email.utils import parsedate_to_datetime
     host, port = get_imap_host(mailbox)
     since = datetime.fromisoformat(since_iso) - timedelta(minutes=2)
     local, _, domain = str(target_email).strip().lower().partition("@")
+    seen = []
+    loose_hit = ""
     with imaplib.IMAP4_SSL(host, port, ssl_context=ssl.create_default_context(), timeout=20) as imap:
         imap.login(mailbox, app_pass)
         for folder in RECOVERY_FOLDERS:
@@ -3358,7 +3375,8 @@ def _search_recovery_notice_sync(mailbox: str, app_pass: str, target_email: str,
                         continue
                 except Exception:
                     pass
-                if "google" not in str(msg.get("From", "")).lower():
+                sender = str(msg.get("From", "")).lower()
+                if "google" not in sender:
                     continue
                 try:
                     subject = str(make_header(decode_header(msg.get("Subject", ""))))
@@ -3369,9 +3387,15 @@ def _search_recovery_notice_sync(mailbox: str, app_pass: str, target_email: str,
                     if part.get_content_type() in ("text/plain", "text/html"):
                         payload = part.get_payload(decode=True) or b""
                         chunks.append(payload.decode(part.get_content_charset() or "utf-8", errors="replace"))
-                if _mentions_account(" ".join(chunks), local, domain):
-                    return True, subject
-    return False, ""
+                text = " ".join(chunks)
+                seen.append(f"{folder}: {subject[:80]}")
+                if _mentions_account(text, local, domain):
+                    return True, subject, seen
+                if not loose_hit and _looks_like_recovery_notice(text):
+                    loose_hit = subject
+    if loose_hit:
+        return True, loose_hit, seen
+    return False, "", seen
 
 
 def _recovery_creds_block(request: dict) -> str:
@@ -3462,7 +3486,7 @@ async def admin_recovery_check(update: Update, context: ContextTypes.DEFAULT_TYP
     retry = [("🔄 افحص مرة أخرى", f"admin_recovery_check:{target_uid}:{token}"),
              ("🔁 بريد استرداد آخر", f"admin_recovery_reset:{target_uid}:{token}")]
     try:
-        found, subject = await asyncio.wait_for(
+        found, subject, seen = await asyncio.wait_for(
             asyncio.to_thread(_search_recovery_notice_sync, rec["email"], rec["app_pass"],
                               request.get("email", ""), rec.get("assigned_at") or datetime.now(timezone.utc).isoformat()),
             timeout=60)
@@ -3472,10 +3496,13 @@ async def admin_recovery_check(update: Update, context: ContextTypes.DEFAULT_TYP
             "⚠️ تعذّر فحص صندوق الوارد الآن (مشكلة اتصال أو IMAP). أعد المحاولة بعد قليل.",
             reply_markup=_recovery_kb(target_uid, token, retry))
         return
+    logger.info("recovery check mailbox=%s target=%s found=%s google_mails_after_assign=%s",
+                rec.get("email"), request.get("email"), found, seen[:6])
     if not found:
         await query.edit_message_text(
             "❌ لم يصل بعد إشعار من Google بأن هذا البريد صار بريد استرداد للحساب.\n"
-            "تأكد أنك وضعت البريد المطلوب بالضبط، وانتظر دقيقة ثم أعد الفحص.\n\n"
+            "تأكد أنك وضعت البريد المطلوب بالضبط، وانتظر دقيقة ثم أعد الفحص.\n"
+            f"📬 رسائل Google التي وصلت للبريد بعد تحديده: {len(seen)}\n\n"
             f"{_recovery_creds_block(request)}\n\n"
             f"➡️ بريد الاسترداد المطلوب:\n<code>{tg_html_escape(rec['email'])}</code>",
             parse_mode=ParseMode.HTML,
