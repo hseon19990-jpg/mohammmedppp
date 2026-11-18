@@ -415,8 +415,6 @@ def _build_email_record_report(match: dict, position: int, total: int) -> str:
 
     acc_type = rec.get("account_type", "old")
     type_text = "🆕 جديد" if acc_type == "new" else "📝 قديم"
-    if rec.get("acceptance_mode") == "recovery_only":
-        type_text = "📮 بريد الاسترداد"
     lines.append(f"<b>نوع الإيميل:</b> {type_text}")
 
     display_name = rec.get("user_name") or user_data.get("user_name") or "غير معروف"
@@ -510,7 +508,7 @@ def _build_email_record_report(match: dict, position: int, total: int) -> str:
         if rec.get("completed_at"):
             lines.append(f"  • وقت الإكمال: <code>{tg_html_escape(_format_iso_time(rec.get('completed_at')))}</code>")
         if rec.get("acceptance_mode"):
-            mode_map = {"leave_video": "📹 مع فيديو المغادرة", "automatic": "✅ تلقائي", "recovery_only": "📮 ببريد الاسترداد فقط"}
+            mode_map = {"leave_video": "📹 مع فيديو المغادرة", "automatic": "✅ تلقائي"}
             lines.append(f"  • طريقة القبول: {mode_map.get(rec.get('acceptance_mode'), rec.get('acceptance_mode'))}")
         if rec.get("admin_bonus") is not None:
             try:
@@ -783,7 +781,6 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         maintenance_toggle_button(),
         ("🔗 رابط الدعم", "support_link_settings"),
         ("👥 الإدارية", "admin_management"),
-        ("💵 مكافأة بريد الاسترداد", "recovery_reward_set"),
         ("🙋 التطوع للأدمن", "volunteer_settings"),
         ("🔑 إدارة APIs", "apis_menu"),
         ("🤖 الذكاء الاصطناعي", "ai_settings"),
@@ -1083,10 +1080,107 @@ async def daily_gift_settings(update: Update, context: ContextTypes.DEFAULT_TYPE
         (toggle_label, "daily_gift_toggle"),
         ("📧 تعديل عدد الإيميلات المطلوبة", "daily_gift_set_emails"),
         ("💰 تعديل المكافأة", "daily_gift_set_reward"),
+        ("📊 إحصائية الهدية اليومية", "daily_gift_stats"),
         ("🔙 إعدادات المالك", "owner_panel"),
     ]
     await query.edit_message_text(_daily_gift_settings_text(), parse_mode=ParseMode.MARKDOWN,
                                   reply_markup=kb_vertical(buttons))
+
+
+# ==================== DAILY GIFT STATS ====================
+def _gift_user_label(uid, ud: dict) -> str:
+    name = username = ""
+    for coll in ("approved_accounts", "pending_requests", "rejected_requests"):
+        for rec in ud.get(coll, []) or []:
+            name = name or str(rec.get("user_name") or "")
+            username = username or str(rec.get("user_username") or "")
+        if name and username:
+            break
+    label = f"<code>{uid}</code>"
+    if name:
+        label += f" {tg_html_escape(name[:24])}"
+    if username and username.lower() not in ("none", "unknown"):
+        label += f" @{tg_html_escape(username.lstrip('@'))}"
+    return label
+
+
+def collect_daily_gift_stats() -> dict:
+    """يجمع من كل المستخدمين: من استلم هدية اليوم، ومن هو في طريقه إليها، وإجمالي كل الأيام."""
+    gift = get_daily_gift_config()
+    today = get_iraq_date_str()
+    stats = {"gift": gift, "today": today, "claimed": [], "progress": [],
+             "all_time_count": 0, "all_time_amount": 0.0, "days": {}}
+    for uid, ud in load_json_readonly(USERS_DB).items():
+        if not isinstance(ud, dict):
+            continue
+        for h in ud.get("daily_gift_history") or []:
+            try:
+                amt = float(h.get("amount", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            stats["all_time_count"] += 1
+            stats["all_time_amount"] += amt
+            day = stats["days"].setdefault(str(h.get("date")), [0, 0.0])
+            day[0] += 1
+            day[1] += amt
+        pr = ud.get("daily_gift_progress") or {}
+        if not isinstance(pr, dict) or pr.get("date") != today:
+            continue
+        count = int(pr.get("count", 0) or 0)
+        if pr.get("claimed"):
+            try:
+                amt = float(pr.get("claimed_amount") or gift["reward"])
+            except (TypeError, ValueError):
+                amt = gift["reward"]
+            stats["claimed"].append((str(pr.get("claimed_at") or ""), uid, ud, amt))
+        elif count > 0:
+            stats["progress"].append((count, uid, ud))
+    stats["claimed"].sort(key=lambda x: x[0], reverse=True)
+    stats["progress"].sort(key=lambda x: x[0], reverse=True)
+    return stats
+
+
+async def daily_gift_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    try:
+        st = collect_daily_gift_stats()
+        gift = st["gift"]
+        required = gift["emails_required"]
+        paid_today = sum(c[3] for c in st["claimed"])
+        lines = ["📊 <b>إحصائية الهدية اليومية</b>",
+                 f"📅 اليوم (توقيت العراق): <code>{st['today']}</code>",
+                 f"📌 الحالة: {'🟢 مفعلة' if gift['enabled'] else '🔴 معطلة'}"
+                 f" — المطلوب <b>{required}</b> إيميل، المكافأة <b>${gift['reward']:.2f}</b>",
+                 "",
+                 f"🎁 <b>استلموا هدية اليوم:</b> {len(st['claimed'])} عضو (إجمالي ${paid_today:.2f})"]
+        limit = 25
+        for _, uid, ud, amt in st["claimed"][:limit]:
+            lines.append(f"  ✅ {_gift_user_label(uid, ud)} — ${amt:.2f}")
+        if len(st["claimed"]) > limit:
+            lines.append(f"  … و{len(st['claimed']) - limit} آخرين")
+        lines += ["", f"⏳ <b>في الطريق للهدية (لم يكملوا بعد):</b> {len(st['progress'])} عضو"]
+        for count, uid, ud in st["progress"][:limit]:
+            left = max(0, required - count)
+            lines.append(f"  🔸 {_gift_user_label(uid, ud)} — {count}/{required} (باقي {left})")
+        if len(st["progress"]) > limit:
+            lines.append(f"  … و{len(st['progress']) - limit} آخرين")
+        lines += ["", f"📈 <b>الإجمالي منذ تفعيل السجل:</b> {st['all_time_count']} هدية — ${st['all_time_amount']:.2f}"]
+        recent = sorted(st["days"].items(), reverse=True)[:7]
+        for day, (n, amt) in recent:
+            lines.append(f"  • {day}: {n} هدية (${amt:.2f})")
+        text = "\n".join(lines)
+        if len(text) > 4000:
+            text = text[:3990] + "\n…"
+        buttons = [("🔄 تحديث", "daily_gift_stats"), ("🔙 إعدادات الهدية", "daily_gift_settings")]
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
+    except Exception as exc:
+        if "not modified" in str(exc).lower():
+            return
+        logger.exception("daily_gift_stats failed")
+        await query.message.reply_text(f"⚠️ تعذر عرض الإحصائية: {exc}")
 
 
 async def daily_gift_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):

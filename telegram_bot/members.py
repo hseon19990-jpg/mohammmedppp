@@ -286,6 +286,38 @@ async def view_member_rejected_emails(update: Update, context: ContextTypes.DEFA
 
 
 # ==================== EDIT MY ACCOUNTS ====================
+# إصلاحات: (1) الأزرار تعتمد على توكن ثابت للحساب بدل رقم الترتيب الذي يتغيّر عند معالجة المشرفين
+# لحسابات أخرى (كان يسبب تعديل حساب خاطئ)، (2) تنظيف كل حالات الإدخال القديمة التي كانت تلتقط
+# النص قبل معالج التعديل، (3) تحقق من صحة القيم، (4) تحديث has_totp/has_app_pass والسعر عند الإضافة.
+_EDIT_STALE_KEYS = (
+    "mode", "store_action", "buy_flow", "crypto_withdraw", "master_balance",
+    "tg_lion_search_page", "ai_notes_step", "ai_key_step", "api_add_step",
+    "contest_build_step", "contest_build", "sell_new_email", "account_type",
+    "admin_approval_step", "admin_completing_uid", "admin_completing_index",
+    "admin_completing_token", "approval_step", "approval_uid", "approval_index",
+    "approval_token", "approval_data", "reject_uid", "reject_index", "reject_reason",
+    "deduct_uid", "deduct_token", "give_uid", "give_index",
+    "reject_approved_uid", "reject_approved_token", "pending_video_type", "setting_tier",
+)
+
+
+def _edit_field_names(uid: int) -> dict:
+    return {
+        "password": t(uid, "edit_field_password"),
+        "totp": t(uid, "edit_field_totp"),
+        "app_pass": t(uid, "edit_field_app_pass"),
+    }
+
+
+def _edit_tier_amount(request: dict) -> float:
+    prices = get_tier_prices(request.get("account_type", "old"))
+    if request.get("has_totp") and request.get("has_app_pass"):
+        return float(prices["tier_3"])
+    if request.get("has_totp"):
+        return float(prices["tier_2"])
+    return float(prices["tier_1"])
+
+
 async def edit_my_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_forced_channel(update, context):
         return
@@ -299,11 +331,17 @@ async def edit_my_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                       reply_markup=kb_single(t(uid, "main_menu"), "main_menu"))
         return
     buttons = []
-    for idx, req in enumerate(pending):
-        buttons.append((f"✏️ {req.get('email', '')}", f"edit_pending:{uid}:{idx}"))
+    for req in pending:
+        buttons.append((f"✏️ {req.get('email', '')}",
+                        f"edit_pending:{uid}:{account_callback_token(req.get('email', ''))}"))
     buttons.append((t(uid, "main_menu"), "main_menu"))
-    await query.edit_message_text(t(uid, "edit_title"), parse_mode=ParseMode.MARKDOWN,
+    await query.edit_message_text(t(uid, "edit_title"), parse_mode=ParseMode.HTML,
                                   reply_markup=kb_vertical(buttons))
+
+
+def _edit_guard_owner(uid: int, target_uid: int) -> bool:
+    """العضو يعدّل حساباته فقط."""
+    return uid == target_uid
 
 
 async def edit_pending_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -314,26 +352,28 @@ async def edit_pending_account(update: Update, context: ContextTypes.DEFAULT_TYP
     uid = query.from_user.id
     parts = query.data.split(":")
     target_uid = int(parts[1])
-    index = int(parts[2])
+    if not _edit_guard_owner(uid, target_uid):
+        await query.answer("🚫", show_alert=True)
+        return
     user_data = get_user(target_uid)
-    pending = user_data.get("pending_requests", [])
-    if index >= len(pending):
+    match = find_pending_request(user_data, parts[2])
+    if match is None:
         await query.edit_message_text(t(uid, "edit_missing"),
                                       reply_markup=kb_single(t(uid, "edit_btn_back"), "edit_my_accounts"))
         return
-    email = pending[index].get("email", "")
-    context.user_data["editing_email"] = email
-    context.user_data["editing_index"] = index
+    _, request = match
+    email = request.get("email", "")
+    token = account_callback_token(email)
     buttons = [
-        (t(uid, "edit_btn_password"), f"edit_field:password:{target_uid}:{index}"),
-        (t(uid, "edit_btn_totp"), f"edit_field:totp:{target_uid}:{index}"),
-        (t(uid, "edit_btn_app_pass"), f"edit_field:app_pass:{target_uid}:{index}"),
-        (t(uid, "edit_btn_delete"), f"delete_pending:{target_uid}:{index}"),
+        (t(uid, "edit_btn_password"), f"edit_field:password:{target_uid}:{token}"),
+        (t(uid, "edit_btn_totp"), f"edit_field:totp:{target_uid}:{token}"),
+        (t(uid, "edit_btn_app_pass"), f"edit_field:app_pass:{target_uid}:{token}"),
+        (t(uid, "edit_btn_delete"), f"delete_pending:{target_uid}:{token}"),
         (t(uid, "edit_btn_back"), "edit_my_accounts"),
     ]
     await query.edit_message_text(
-        t(uid, "edit_account_title", email=email),
-        parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
+        t(uid, "edit_account_title", email=tg_html_escape(email)),
+        parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
 
 
 async def edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -345,27 +385,31 @@ async def edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts = query.data.split(":")
     field = parts[1]
     target_uid = int(parts[2])
-    index = int(parts[3])
+    if field not in ("password", "totp", "app_pass") or not _edit_guard_owner(uid, target_uid):
+        await query.answer("🚫", show_alert=True)
+        return
     user_data = get_user(target_uid)
-    pending = user_data.get("pending_requests", [])
-    if index >= len(pending):
+    match = find_pending_request(user_data, parts[3])
+    if match is None:
         await query.edit_message_text(t(uid, "edit_missing"),
                                       reply_markup=kb_single(t(uid, "edit_btn_back"), "edit_my_accounts"))
         return
-    email = pending[index].get("email", "")
+    email = match[1].get("email", "")
+    token = account_callback_token(email)
+    # أي حالة إدخال قديمة عالقة كانت تلتقط الرسالة قبل معالج التعديل؛ ننظفها هنا
+    for key in _EDIT_STALE_KEYS:
+        context.user_data.pop(key, None)
+    PENDING_PURCHASES.pop(uid, None)
     context.user_data["editing_field"] = field
     context.user_data["editing_uid"] = target_uid
-    context.user_data["editing_index"] = index
-    field_names = {
-        "password": t(uid, "edit_field_password"),
-        "totp": t(uid, "edit_field_totp"),
-        "app_pass": t(uid, "edit_field_app_pass"),
-    }
-    await query.edit_message_text(
-        t(uid, "edit_prompt_value", field=field_names.get(field, field), email=email),
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb_single(t(uid, "btn_cancel"), f"edit_pending:{target_uid}:{index}"))
+    context.user_data["editing_token"] = token
+    context.user_data["editing_email"] = email
     context.user_data["step"] = "editing_field"
+    await query.edit_message_text(
+        t(uid, "edit_prompt_value", field=_edit_field_names(uid).get(field, field),
+          email=tg_html_escape(email)),
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_single(t(uid, "btn_cancel"), f"edit_pending:{target_uid}:{token}"))
 
 
 async def delete_pending_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -376,58 +420,110 @@ async def delete_pending_account(update: Update, context: ContextTypes.DEFAULT_T
     uid = query.from_user.id
     parts = query.data.split(":")
     target_uid = int(parts[1])
-    index = int(parts[2])
+    if not _edit_guard_owner(uid, target_uid):
+        await query.answer("🚫", show_alert=True)
+        return
     user_data = get_user(target_uid)
-    pending = user_data.get("pending_requests", [])
-    if index >= len(pending):
+    match = find_pending_request(user_data, parts[2])
+    if match is None:
         await query.edit_message_text(t(uid, "edit_missing"),
                                       reply_markup=kb_single(t(uid, "edit_btn_back"), "edit_my_accounts"))
         return
-    request = pending[index]
+    index, request = match
+    pending = user_data.get("pending_requests", [])
     pending.pop(index)
     user_data["pending_requests"] = pending
     user_data["pending_balance"] = clamp_money(
         float(user_data.get("pending_balance", 0.0)) - float(request.get("amount", 0.0)))
     save_user(target_uid, user_data)
     await query.edit_message_text(
-        t(uid, "edit_deleted", email=request.get('email', '')),
-        parse_mode=ParseMode.MARKDOWN,
+        t(uid, "edit_deleted", email=tg_html_escape(request.get('email', ''))),
+        parse_mode=ParseMode.HTML,
         reply_markup=kb_single(t(uid, "edit_btn_back"), "edit_my_accounts"))
 
 
 async def handle_edit_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
+    text = (update.message.text or "").strip()
     uid = update.effective_user.id
     field = context.user_data.get("editing_field")
     editing_uid = context.user_data.get("editing_uid")
-    index = context.user_data.get("editing_index")
-    if not field or editing_uid is None or index is None:
-        await update.message.reply_text("⚠️ Error.")
-        return
-    user_data = get_user(editing_uid)
-    pending = user_data.get("pending_requests", [])
-    if index >= len(pending):
+    token = context.user_data.get("editing_token")
+    if not field or editing_uid is None or not token or editing_uid != uid:
         clear_edit_state(context)
-        await update.message.reply_text(t(uid, "edit_missing"))
+        context.user_data.pop("editing_token", None)
+        await update.message.reply_text(
+            t(uid, "edit_missing"), reply_markup=kb_single(t(uid, "edit_btn_back"), "edit_my_accounts"))
         return
-    pending[index][field] = text
+    cancel_kb = kb_single(t(uid, "btn_cancel"), f"edit_pending:{editing_uid}:{token}")
+    user_data = get_user(editing_uid)
+    match = find_pending_request(user_data, token)
+    if match is None:
+        clear_edit_state(context)
+        context.user_data.pop("editing_token", None)
+        await update.message.reply_text(
+            t(uid, "edit_missing"), reply_markup=kb_single(t(uid, "edit_btn_back"), "edit_my_accounts"))
+        return
+    index, request = match
+
+    # ── التحقق من القيمة (يبقى المستخدم في وضع التعديل ليعيد الإرسال) ──
+    if field == "totp":
+        if not validate_totp_secret(text):
+            await update.message.reply_text(t(uid, "add_totp_invalid"), reply_markup=cancel_kb)
+            return
+        value = text.replace(" ", "").upper()
+    elif field == "app_pass":
+        if not validate_app_password(text):
+            await update.message.reply_text(t(uid, "add_app_pass_invalid"), reply_markup=cancel_kb)
+            return
+        value = text.replace(" ", "")
+        own = str(request.get("app_pass", "") or "").replace(" ", "").upper()
+        if value.upper() != own and has_active_app_password(value):
+            await update.message.reply_text(t(uid, "add_app_pass_used"), reply_markup=cancel_kb)
+            return
+    else:
+        value = text
+        if not value:
+            await update.message.reply_text("⚠️", reply_markup=cancel_kb)
+            return
+        if value != str(request.get("password", "") or "") and has_active_account_password(value):
+            await update.message.reply_text(t(uid, "add_password_used"), reply_markup=cancel_kb)
+            return
+
+    pending = user_data.get("pending_requests", [])
+    rec = pending[index]
+    rec[field] = value
+    if field == "totp":
+        rec["has_totp"] = True
+    elif field == "app_pass":
+        rec["has_app_pass"] = True
+    # تغيير بيانات الحساب يُبطل تحقق بريد الاسترداد السابق (يعيده المشرف على البيانات الجديدة)
+    if field == "password" and rec.get("recovery_verified"):
+        rec.pop("recovery_verified", None)
+        rec.pop("recovery_verified_at", None)
+    # رفع المبلغ إذا أضاف العضو مستوى أعلى (2FA أو كلمة مرور التطبيق)
+    if field in ("totp", "app_pass"):
+        old_amount = float(rec.get("amount", 0.0) or 0.0)
+        new_amount = _edit_tier_amount(rec)
+        if new_amount > old_amount:
+            rec["amount"] = new_amount
+            if "requested_amount" in rec:
+                rec["requested_amount"] = new_amount
+            user_data["pending_balance"] = clamp_money(
+                float(user_data.get("pending_balance", 0.0)) + (new_amount - old_amount))
+    rec["edited_at"] = datetime.now(timezone.utc).isoformat()
     user_data["pending_requests"] = pending
     save_user(editing_uid, user_data)
     try:
         await update.message.delete()
     except Exception:
         pass
-    field_names = {
-        "password": t(uid, "edit_field_password"),
-        "totp": t(uid, "edit_field_totp"),
-        "app_pass": t(uid, "edit_field_app_pass"),
-    }
-    for key in ("editing_field", "editing_uid", "editing_index", "step"):
-        context.user_data.pop(key, None)
+    email = rec.get('email', '')
+    clear_edit_state(context)
+    context.user_data.pop("editing_token", None)
     await update.message.reply_text(
-        t(uid, "edit_success", field=field_names.get(field, field),
-          email=pending[index].get('email', '')),
-        parse_mode=ParseMode.MARKDOWN,
+        t(uid, "edit_success", field=_edit_field_names(uid).get(field, field),
+          email=tg_html_escape(email)),
+        parse_mode=ParseMode.HTML,
         reply_markup=kb_single(t(uid, "edit_btn_back"), "edit_my_accounts"))
 
 

@@ -225,8 +225,6 @@ async def admin_request_detail(update: Update, context: ContextTypes.DEFAULT_TYP
     original_amount = cents_to_money(original_amount_cents)
     full_price = cents_to_money(full_price_cents)
     admin_bonus = cents_to_money(max(0, full_price_cents - original_amount_cents))
-    if recovery_only_applies(uid):
-        admin_bonus = get_recovery_admin_reward()
 
     type_text = t(uid, "appr_type_new") if acc_type == "new" else t(uid, "appr_type_old")
     msg = t(uid, "admin_req_detail_title", type=type_text)
@@ -252,9 +250,7 @@ async def admin_request_detail(update: Update, context: ContextTypes.DEFAULT_TYP
         buttons.append((t(uid, "appr_show_code"), f"admin_show_code:{target_uid}:{account_callback_token(email)}"))
 
     # يمكن للأدمن إكمال الإيميل (قديم أو جديد) إذا كان ناقصاً
-    if recovery_only_applies(uid):
-        buttons.append(("📮 قبول ببريد الاسترداد", f"admin_complete_start:{target_uid}:{account_callback_token(email)}"))
-    elif not has_totp:
+    if not has_totp:
         buttons.append((t(uid, "appr_complete_both"), f"admin_complete_start:{target_uid}:{account_callback_token(email)}"))
     elif not has_app_pass:
         buttons.append((t(uid, "appr_complete_app"), f"admin_complete_start:{target_uid}:{account_callback_token(email)}"))
@@ -345,14 +341,6 @@ async def admin_complete_start(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     index, request = match
 
-    if recovery_only_applies(uid):
-        if not request.get("recovery_verified"):
-            await admin_recovery_step(update, context, target_uid, token)
-        else:
-            await admin_verify_and_store(update, context, target_uid, index,
-                                         hold_seconds=LEAVE_HOLD_SECONDS, recovery_only=True)
-        return
-
     if recovery_check_applies(uid) and not request.get("recovery_verified"):
         await admin_recovery_step(update, context, target_uid, token)
         return
@@ -400,7 +388,17 @@ async def _recovery_gate_for_input(update: Update, context: ContextTypes.DEFAULT
     if request is None or request.get("recovery_verified"):
         return False
     req_token = account_callback_token(request.get("email", ""))
-    await admin_recovery_step(update, context, target_uid, req_token)
+    context.user_data["admin_completing_uid"] = target_uid
+    context.user_data["admin_completing_index"] = index
+    context.user_data["admin_completing_token"] = req_token
+    context.user_data["admin_approval_step"] = "waiting_recovery_email"
+    await update.message.reply_text(
+        "📮 <b>الخطوة الأولى: بريد الاسترداد</b>\n\n"
+        f"{_recovery_creds_block(request)}\n\n"
+        "➡️ يجب وضع بريد استرداد للحساب أولاً، ثم <b>أرسل لي هنا بريد الاسترداد الذي وضعته</b>.\n"
+        "⚠️ يجب أن يكون من الحسابات التي يملكها البوت (له IMAP يعمل)، ولم يُستعمل من قبل.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=_recovery_kb(target_uid, req_token))
     return True
 
 
@@ -568,13 +566,6 @@ async def admin_accept_completed(update: Update, context: ContextTypes.DEFAULT_T
             reply_markup=kb_single(t(uid, "appr_btn_requests"), "admin_requests:0"))
         return
     index, _req = match
-    if recovery_only_applies(uid):
-        if not _req.get("recovery_verified"):
-            await admin_recovery_step(update, context, target_uid, token)
-        else:
-            await admin_verify_and_store(update, context, target_uid, index,
-                                         hold_seconds=LEAVE_HOLD_SECONDS, recovery_only=True)
-        return
     if recovery_check_applies(uid) and not _req.get("recovery_verified"):
         await admin_recovery_step(update, context, target_uid, token)
         return
@@ -583,8 +574,7 @@ async def admin_accept_completed(update: Update, context: ContextTypes.DEFAULT_T
 
 async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                   target_uid: int, index: int,
-                                  hold_seconds: int = LEAVE_HOLD_SECONDS,
-                                  recovery_only: bool = False):
+                                  hold_seconds: int = LEAVE_HOLD_SECONDS):
     from telegram_bot.members import schedule_leave_check
     admin_id = update.effective_user.id
     reply_target = update.effective_message
@@ -600,33 +590,24 @@ async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_T
     app_pass = request.get("app_pass", "")
     acc_type = request.get("account_type", "old")
 
-    if recovery_only:
-        # قبول ببريد الاسترداد فقط: لا رمز مصادقة ولا App Password؛ التحقق تم عبر صندوق بريد الاسترداد
-        if not email or not password or not request.get("recovery_verified"):
-            await reply_target.reply_text(t(admin_id, "appr_incomplete"))
-            return
-        progress_msg = None
-        verify_result = {"imap_ok": True, "level": "recovery", "badge": "📮",
-                         "message": "Recovery email verified by bot", "totp_ok": False}
-    else:
-        if not email or not password or not totp or not app_pass:
-            await reply_target.reply_text(t(admin_id, "appr_incomplete"))
-            return
+    if not email or not password or not totp or not app_pass:
+        await reply_target.reply_text(t(admin_id, "appr_incomplete"))
+        return
 
-        allowed, wait = imap_rate_ok(email)
-        if not allowed:
-            await reply_target.reply_text(
-                t(admin_id, "add_rate_wait", wait=wait),
-                reply_markup=kb_single(t(admin_id, "appr_btn_requests"), "admin_requests:0"))
-            return
-        imap_rate_mark(email)
+    allowed, wait = imap_rate_ok(email)
+    if not allowed:
+        await reply_target.reply_text(
+            t(admin_id, "add_rate_wait", wait=wait),
+            reply_markup=kb_single(t(admin_id, "appr_btn_requests"), "admin_requests:0"))
+        return
+    imap_rate_mark(email)
 
-        progress_msg = await reply_target.reply_text(
-            t(admin_id, "appr_verifying_imap", email=email),
-            parse_mode=ParseMode.MARKDOWN)
+    progress_msg = await reply_target.reply_text(
+        t(admin_id, "appr_verifying_imap", email=email),
+        parse_mode=ParseMode.MARKDOWN)
 
-        verify_result = await verify_account_credentials(
-            email=email, password=password, app_pass=app_pass, totp_secret=totp)
+    verify_result = await verify_account_credentials(
+        email=email, password=password, app_pass=app_pass, totp_secret=totp)
 
     if not verify_result["imap_ok"]:
         try:
@@ -664,8 +645,6 @@ async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_T
     full_price_cents = money_to_cents(get_tier_prices(acc_type)["tier_3"])
     original_amount = cents_to_money(original_amount_cents)
     admin_bonus = cents_to_money(max(0, full_price_cents - original_amount_cents))
-    if recovery_only:
-        admin_bonus = get_recovery_admin_reward()   # مكافأة ثابتة يحددها المالك (افتراضي 0.02$)
 
     # ═══ NEW: تسجيل نشاط الأدمن ═══
     record_admin_activity(admin_id, "accept")
@@ -724,15 +703,6 @@ async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_T
             "verified_by": "admin_completion", "admin_id": admin_id,
         },
     }
-
-    if recovery_only:
-        account_record.update({
-            "acceptance_mode": "recovery_only", "skip_recheck": True, "auto_verified": False,
-            "has_totp": bool(totp), "has_app_pass": bool(app_pass),
-            "recovery_mailbox": str((request.get("recovery") or {}).get("email", "")),
-        })
-        account_record["verification"].update({"imap_ok": False, "verified_by": "recovery_email",
-                                               "recovery_verified": True})
 
     user_data.setdefault("approved_accounts", []).append(account_record)
     user_data["pending_balance"] = clamp_money(float(user_data.get("pending_balance", 0.0)) - original_amount)
@@ -803,11 +773,10 @@ async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_T
     except Exception:
         pass
 
-    if progress_msg is not None:
-        try:
-            await progress_msg.delete()
-        except Exception:
-            pass
+    try:
+        await progress_msg.delete()
+    except Exception:
+        pass
 
     try:
         await context.bot.send_message(
@@ -1347,7 +1316,7 @@ async def view_approved_requests(update: Update, context: ContextTypes.DEFAULT_T
         display_name = f"{user_name} (@{user_username})" if user_username != "None" else user_name
         email_display = acc.get('email', '')[:15] + "..." if len(acc.get('email', '')) > 15 else acc.get('email', '')
         acc_type = acc.get("account_type", "old")
-        type_icon = "📮" if _is_recovery_only(acc) else ("🆕" if acc_type == "new" else "📝")
+        type_icon = "🆕" if acc_type == "new" else "📝"
         return (f"{type_icon}{tier_icon} {email_display} - {display_name[:12]} (${acc.get('amount', 0):.2f})",
                 f"approved_detail:{acc['user_id']}:{account_callback_token(acc.get('email', ''))}")
 
@@ -1390,8 +1359,6 @@ async def approved_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     acc_type = account.get("account_type", "old")
     type_text = t(uid, "appr_type_new") if acc_type == "new" else t(uid, "appr_type_old")
-    if _is_recovery_only(account):
-        type_text = "📮 بريد الاسترداد"
 
     msg = t(uid, "owner_approved_detail_title", type=type_text)
     msg += t(uid, "admin_req_detail_seller", name=tg_html_escape(account.get('user_name', 'unknown')), username=tg_html_escape(account.get('user_username', 'none')))
@@ -1861,8 +1828,6 @@ async def all_accounts_section(update: Update, context: ContextTypes.DEFAULT_TYP
         (t(uid, "accounts_btn_all_new"), "all_new"),
         (t(uid, "accounts_btn_unextracted_new"), "unextracted_new"),
         (t(uid, "accounts_btn_unextracted_old"), "unextracted_old"),
-        ("📮 الإيميلات مع بريد الاسترداد غير المستخرجة", "unextracted_recovery"),
-        ("📮 بريد الاسترداد جميعاً", "all_recovery"),
         (t(uid, "accounts_btn_hold"), "hold_accounts"),
         ("❄️ تجميد / فتح الإفراج", "freeze_menu"),
         ("🗑 ازالة الايميل من الاستخراج", "extraction_remove_start"),
@@ -1925,7 +1890,7 @@ async def all_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE, acc_t
     for target_uid, encrypted_data in users.items():
         data = decrypt_user_data(encrypted_data)
         for acc in data.get("approved_accounts", []):
-            atype = _section_of(acc)
+            atype = acc.get("account_type", "old")
             if acc_type == "all" or atype == acc_type:
                 copy = dict(acc)
                 copy["user_id"] = target_uid
@@ -1936,7 +1901,7 @@ async def all_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE, acc_t
                                       reply_markup=kb_single(t(uid, "accounts_title_admin"), "all_accounts_section"))
         return
 
-    type_name = _type_label(uid, acc_type)
+    type_name = t(uid, "accounts_type_old") if acc_type == "old" else t(uid, "accounts_type_new") if acc_type == "new" else t(uid, "accounts_type_all")
     total = len(all_accs)
     msg = t(uid, "accounts_all_title", type=type_name, count=total)
     for idx, acc in enumerate(all_accs[:10], 1):
@@ -1944,8 +1909,6 @@ async def all_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE, acc_t
             tier_icon = "🔴"
         else:
             tier_icon = "🟢" if acc.get("has_app_pass") else "🟡" if acc.get("has_totp") else "🔵"
-        if _is_recovery_only(acc):
-            tier_icon = "📮"
         msg += t(uid, "accounts_all_item", idx=idx, icon=tier_icon, email=acc.get('email', ''), uid=acc.get('user_id', ''), amount=acc.get('amount', 0))
     if total > 10:
         msg += t(uid, "accounts_hold_more", total=total)
@@ -1969,7 +1932,7 @@ async def unextracted_accounts(update: Update, context: ContextTypes.DEFAULT_TYP
         data = decrypt_user_data(encrypted_data)
         for idx, acc in enumerate(_extraction_pool(data, acc_type)):
             if not acc.get("extracted", False) and _normal_extractable(acc):
-                atype = _section_of(acc)
+                atype = acc.get("account_type", "old")
                 if acc_type == "all" or atype == acc_type:
                     copy = dict(acc)
                     copy["user_id"] = target_uid
@@ -1981,7 +1944,7 @@ async def unextracted_accounts(update: Update, context: ContextTypes.DEFAULT_TYP
                                       reply_markup=kb_single(t(uid, "accounts_title_admin"), "all_accounts_section"))
         return
 
-    type_name = _type_label(uid, acc_type)
+    type_name = t(uid, "accounts_type_old") if acc_type == "old" else t(uid, "accounts_type_new")
     total = len(unextracted)
     msg = t(uid, "accounts_unextracted_title", type=type_name, count=total)
     for idx, acc in enumerate(unextracted[:10], 1):
@@ -1989,8 +1952,6 @@ async def unextracted_accounts(update: Update, context: ContextTypes.DEFAULT_TYP
             tier_icon = "🔴"
         else:
             tier_icon = "🟢" if acc.get("has_app_pass") else "🟡" if acc.get("has_totp") else "🔵"
-        if _is_recovery_only(acc):
-            tier_icon = "📮"
         msg += t(uid, "accounts_unextracted_item", idx=idx, icon=tier_icon, email=acc.get('email', ''), uid=acc.get('user_id', ''))
     if total > 10:
         msg += t(uid, "accounts_hold_more", total=total)
@@ -2055,9 +2016,6 @@ def build_accounts_export(title: str, accounts: list) -> bytes:
         email = str(acc.get('email', ''))
         password = str(acc.get('password', ''))
         totp = str(acc.get('totp', ''))
-        if _is_recovery_only(acc):
-            lines.append(f"{email}:{password}:{acc.get('recovery_mailbox', '')}:{totp}")
-            continue
         app_pass = str(acc.get('app_pass', ''))
         if app_pass and " " not in app_pass and len(app_pass) == 16:
             app_pass = format_app_password(app_pass)
@@ -2085,13 +2043,13 @@ async def export_all_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE
         for acc in _extraction_pool(data, acc_type):
             if acc.get("removed_from_extraction"):
                 continue
-            atype = _section_of(acc)
+            atype = acc.get("account_type", "old")
             if acc_type == "all" or atype == acc_type:
                 all_accs.append(acc)
     if not all_accs:
         await query.edit_message_text(t(uid, "accounts_no_type", type=acc_type))
         return
-    type_name = _type_label(uid, acc_type)
+    type_name = t(uid, "accounts_type_old") if acc_type == "old" else t(uid, "accounts_type_new") if acc_type == "new" else t(uid, "accounts_type_all")
     await send_accounts_export(context, all_accs, f"all_{acc_type}.txt", type_name)
     await query.edit_message_text(t(uid, "accounts_export_success", count=len(all_accs)),
                                   reply_markup=kb_single(t(uid, "accounts_title_admin"), "all_accounts_section"))
@@ -2109,20 +2067,20 @@ async def export_unextracted(update: Update, context: ContextTypes.DEFAULT_TYPE,
         data = decrypt_user_data(encrypted_data)
         for acc in _extraction_pool(data, acc_type):
             if not acc.get("extracted", False) and _normal_extractable(acc):
-                atype = _section_of(acc)
+                atype = acc.get("account_type", "old")
                 if acc_type == "all" or atype == acc_type:
                     unextracted.append(acc)
     if not unextracted:
         await query.edit_message_text(t(uid, "accounts_none_unextracted", type=acc_type))
         return
-    type_name = _type_label(uid, acc_type)
+    type_name = t(uid, "accounts_type_old") if acc_type == "old" else t(uid, "accounts_type_new")
     await send_accounts_export(context, unextracted, f"unextracted_{acc_type}.txt", type_name)
     for target_uid, encrypted_data in users.items():
         data = decrypt_user_data(encrypted_data)
         changed = False
         for acc in _extraction_pool(data, acc_type):
             if not acc.get("extracted", False) and _normal_extractable(acc):
-                atype = _section_of(acc)
+                atype = acc.get("account_type", "old")
                 if acc_type == "all" or atype == acc_type:
                     acc["extracted"] = True
                     changed = True
@@ -2517,26 +2475,6 @@ def _is_recovery_account(acc: dict) -> bool:
     return acc.get("acceptance_mode") == "recovery_email" or bool(acc.get("recovery_email"))
 
 
-def _is_recovery_only(acc: dict) -> bool:
-    """حساب قُبل «ببريد الاسترداد فقط» (القسم الثالث: بريد الاسترداد)."""
-    return acc.get("acceptance_mode") == "recovery_only"
-
-
-def _section_of(acc: dict) -> str:
-    """القسم الوحيد الذي يظهر فيه الحساب: recovery أو old أو new (لا يتكرر في قسمين)."""
-    return "recovery" if _is_recovery_only(acc) else acc.get("account_type", "old")
-
-
-def _type_label(uid: int, acc_type: str) -> str:
-    if acc_type == "recovery":
-        return "📮 بريد الاسترداد"
-    if acc_type == "old":
-        return t(uid, "accounts_type_old")
-    if acc_type == "new":
-        return t(uid, "accounts_type_new")
-    return t(uid, "accounts_type_all")
-
-
 def _passed_first_imap(acc: dict) -> bool:
     """نجح في فحص IMAP الأول (نتيجة الفحص الثاني لا تهم)."""
     if _is_recovery_account(acc):
@@ -2556,7 +2494,7 @@ def _extraction_eligible(acc: dict) -> bool:
 
 def _normal_extractable(acc: dict) -> bool:
     """يظهر في الاستخراج: غير محذوف منه، نجح في IMAP الأول، ومكتمل."""
-    return not acc.get("removed_from_extraction") and (_is_recovery_only(acc) or _extraction_eligible(acc))
+    return not acc.get("removed_from_extraction") and _extraction_eligible(acc)
 
 
 def _extraction_pool(data: dict, acc_type: str = "all") -> list:
@@ -2564,10 +2502,7 @@ def _extraction_pool(data: dict, acc_type: str = "all") -> list:
     حصراً الحسابات التي نجحت في IMAP الأول ومكتملة (ايميل+باسورد+مصادقة).
     تبقى في القوائم سواء نجحت أو فشلت في الفحص الثاني (24 ساعة):
     الفاشلة في الثاني تُجمع من المرفوضة للنوع الجديد."""
-    approved = data.get("approved_accounts", []) or []
-    if acc_type == "recovery":
-        return [a for a in approved if _is_recovery_only(a)]
-    pool = [a for a in approved if not _is_recovery_only(a) and _extraction_eligible(a)]
+    pool = [a for a in (data.get("approved_accounts", []) or []) if _extraction_eligible(a)]
     if acc_type == "new":
         for rec in data.get("rejected_requests", []) or []:
             if rec.get("rejected_from_approved") and (
@@ -2756,7 +2691,7 @@ async def handle_extraction_remove_input(update: Update, context: ContextTypes.D
     for target_uid, encrypted_data in users.items():
         data = decrypt_user_data(encrypted_data)
         changed = False
-        for acc in _extraction_pool(data, "new") + _extraction_pool(data, "recovery"):
+        for acc in _extraction_pool(data, "new"):
             key = normalize_email(acc.get("email", ""))
             if key in wanted:
                 acc["removed_from_extraction"] = True
@@ -2968,7 +2903,6 @@ _REVIVE_DROP_KEYS = (
     "approved_with_leave", "leave_confirmed", "leave_confirmed_at", "approval_time",
     "release_at", "hold_seconds", "admin_bonus_status", "admin_bonus", "extracted",
     "removed_from_extraction", "acceptance_mode", "auto_verified",
-    "skip_recheck", "recovery_mailbox",
 )
 
 
@@ -2976,8 +2910,20 @@ def _rej_is_owner(uid: int) -> bool:
     return uid == OWNER_ID
 
 
+_REJ_LAST_TYPE: dict = {}   # آخر قسم (old/new) فتحه مشرف بريد الاسترداد، ليعود إليه زر الرجوع
+
+
+def _rej_split_applies(uid: int) -> bool:
+    """تقسيم المرفوضة (قديم/جديد) يراه فقط المشرف المفعّل له شرط بريد الاسترداد."""
+    return uid != OWNER_ID and recovery_check_applies(uid)
+
+
 def _rej_list_cb(uid: int) -> str:
-    return "view_rejected:0" if uid == OWNER_ID else "admin_rejected:0"
+    if uid == OWNER_ID:
+        return "view_rejected:0"
+    if _rej_split_applies(uid) and _REJ_LAST_TYPE.get(uid) in ("old", "new"):
+        return f"admin_rejected_t:{_REJ_LAST_TYPE[uid]}:0"
+    return "admin_rejected:0"
 
 
 def _find_rejected(user_data: dict, token: str) -> Optional[Tuple[int, dict]]:
@@ -3035,44 +2981,52 @@ async def _rej_guard(query, actor_id: int) -> bool:
     return True
 
 
-async def _show_rejected_list(update: Update, context: ContextTypes.DEFAULT_TYPE, rtype: Optional[str] = None):
+async def _show_rejected_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     uid = query.from_user.id
     if not await _rej_guard(query, uid):
         return
     owner = _rej_is_owner(uid)
     prefix = "view_rejected" if owner else "admin_rejected"
-    # التقسيم (قديمة/جديدة) لا يراه إلا المشرفون الممنوحون ميزة بريد الاسترداد
-    split_allowed = (not owner) and recovery_mode_of(uid) != "off"
-    if not split_allowed:
-        rtype = None
-    elif rtype in ("old", "new"):
-        prefix = f"admin_rejected_{rtype}"
     back = ("approval_requests", t(uid, "appr_title")) if owner else ("admin_settings", t(uid, "admin_btn_settings"))
+    parts = query.data.split(":")
+    type_filter = None
+    split = _rej_split_applies(uid)
+    if parts[0] == "admin_rejected_t":
+        # قسم محدد: يُقبل فقط لمن يملك صلاحية التقسيم (تحقق من جهة الخادم وليس من الزر)
+        if not split or len(parts) < 2 or parts[1] not in ("old", "new"):
+            await query.answer("🚫", show_alert=True)
+            return
+        type_filter = parts[1]
+        prefix = f"admin_rejected_t:{type_filter}"
+        _REJ_LAST_TYPE[uid] = type_filter
+        page_raw = parts[2] if len(parts) > 2 else "0"
+    else:
+        page_raw = parts[1] if len(parts) > 1 else "0"
     try:
-        page = int(query.data.split(":")[1])
-    except (IndexError, ValueError):
+        page = int(page_raw)
+    except ValueError:
         page = 0
     rejected = [r for r in _collect_all("rejected_requests", sort_order="newest") if is_visible_rejected(r)]
-    if split_allowed and rtype is None:
+    if split and type_filter is None:
+        _REJ_LAST_TYPE.pop(uid, None)
         n_new = sum(1 for r in rejected if r.get("account_type") == "new")
         n_old = len(rejected) - n_new
         await query.edit_message_text(
-            "❌ الحسابات المرفوضة",
+            "❌ <b>الحسابات المرفوضة</b>\n\nاختر القسم:",
+            parse_mode=ParseMode.HTML,
             reply_markup=kb_vertical([
-                (f"📝 الحسابات المرفوضة للإيميلات القديمة ({n_old})", "admin_rejected_old:0"),
-                (f"🆕 الحسابات المرفوضة للإيميلات الجديدة ({n_new})", "admin_rejected_new:0"),
+                (f"📝 المرفوضة للإيميلات القديمة ({n_old})", "admin_rejected_t:old:0"),
+                (f"🆕 المرفوضة للإيميلات الجديدة ({n_new})", "admin_rejected_t:new:0"),
                 (back[1], back[0]),
             ]))
         return
-    if rtype == "new":
-        rejected = [r for r in rejected if r.get("account_type") == "new"]
-    elif rtype == "old":
-        rejected = [r for r in rejected if r.get("account_type") != "new"]
+    if type_filter:
+        rejected = [r for r in rejected
+                    if (r.get("account_type") == "new") == (type_filter == "new")]
+        back = ("admin_rejected:0", "🔙 أقسام المرفوضة")
     if not rejected:
-        back_cb = "admin_rejected:0" if rtype else back[0]
-        back_tx = "🔙 المرفوضة" if rtype else back[1]
-        await query.edit_message_text(t(uid, "appr_empty"), reply_markup=kb_single(back_tx, back_cb))
+        await query.edit_message_text(t(uid, "appr_empty"), reply_markup=kb_single(back[1], back[0]))
         return
 
     def label(rej):
@@ -3090,7 +3044,7 @@ async def _show_rejected_list(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"rej_view:{rej['user_id']}:{account_callback_token(email)}")
 
     buttons = paginate_buttons(rejected, page, prefix, label)
-    buttons.append(("🔙 المرفوضة", "admin_rejected:0") if rtype else (back[1], back[0]))
+    buttons.append((back[1], back[0]))
     await query.edit_message_text(
         t(uid, "appr_rejected_title", count=len(rejected)),
         parse_mode=ParseMode.MARKDOWN, reply_markup=kb_vertical(buttons))
@@ -3098,14 +3052,6 @@ async def _show_rejected_list(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def admin_rejected_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _show_rejected_list(update, context)
-
-
-async def admin_rejected_old_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await _show_rejected_list(update, context, "old")
-
-
-async def admin_rejected_new_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await _show_rejected_list(update, context, "new")
 
 
 async def view_rejected_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3390,46 +3336,6 @@ def recovery_check_applies(admin_id: int) -> bool:
     return admin_id != OWNER_ID and int(admin_id) in recovery_check_admins()
 
 
-RECOVERY_ADMIN_REWARD_DEFAULT = 0.02   # مكافأة المشرف عن كل إيميل يُقبل ببريد الاسترداد فقط (يغيّرها المالك)
-
-
-def recovery_only_admins() -> set:
-    """المشرفون الذين يقبلون «ببريد الاسترداد فقط» (بدون رمز مصادقة). يحددهم المالك."""
-    raw = load_config().get("recovery_only_admins", [])
-    out = set()
-    for x in raw if isinstance(raw, list) else []:
-        try:
-            out.add(int(x))
-        except (TypeError, ValueError):
-            continue
-    return out
-
-
-def recovery_mode_of(admin_id: int) -> str:
-    """off = الطريقة القديمة | totp = بريد الاسترداد ثم رمز المصادقة | only = بريد الاسترداد فقط."""
-    try:
-        aid = int(admin_id)
-    except (TypeError, ValueError):
-        return "off"
-    if aid == OWNER_ID:
-        return "off"
-    if aid in recovery_check_admins():
-        return "only" if aid in recovery_only_admins() else "totp"
-    return "off"
-
-
-def recovery_only_applies(admin_id: int) -> bool:
-    return recovery_mode_of(admin_id) == "only"
-
-
-def get_recovery_admin_reward() -> float:
-    try:
-        value = float(load_config().get("recovery_admin_reward", RECOVERY_ADMIN_REWARD_DEFAULT))
-    except (TypeError, ValueError):
-        value = RECOVERY_ADMIN_REWARD_DEFAULT
-    return round(max(0.0, value), 2)
-
-
 def _recovery_candidates(exclude_email: str) -> list:
     exclude = normalize_email(exclude_email)
     found = []
@@ -3658,79 +3564,27 @@ def _recovery_kb(target_uid: int, token: str, extra: list = None):
     return kb_vertical(rows)
 
 
-def _recovery_verify_button(target_uid: int, token: str) -> list:
-    return [("✅ التحقق", f"admin_recovery_check:{target_uid}:{token}")]
-
-
-async def _recovery_send(update: Update, text: str, markup=None):
-    """يعدّل رسالة الزر إن كان الاستدعاء من زر، وإلا يرسل رسالة جديدة."""
-    query = update.callback_query
-    if query is not None:
-        try:
-            await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
-            return
-        except Exception as exc:
-            if "not modified" in str(exc).lower():
-                return
-    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
-
-
-def _recovery_instructions_text(uid: int, request: dict, rec: dict) -> str:
-    only = recovery_only_applies(uid)
-    after = ("بعد التأكيد يُقبل الحساب مباشرة (قبول ببريد الاسترداد فقط)."
-             if only else "بعد التأكيد سيطلب منك البوت رمز المصادقة.")
-    return (
-        "📮 <b>الخطوة الأولى: بريد الاسترداد</b>\n\n"
-        f"{_recovery_creds_block(request)}\n\n"
-        "📮 <b>بريد الاسترداد المخصّص لهذا الحساب:</b>\n"
-        f"<code>{tg_html_escape(rec.get('email', ''))}</code>\n\n"
-        "1️⃣ أضف هذا البريد كبريد استرداد للحساب.\n"
-        "2️⃣ سجّل خروجاً من الحساب ثم ارجع، واضغط «نسيت كلمة المرور» واطلب إرسال الرمز إلى بريد الاسترداد.\n"
-        "3️⃣ اضغط زر <b>✅ التحقق</b> هنا.\n\n"
-        f"ℹ️ {after}\n"
-        "🔒 هذا البريد مربوط بهذا الحساب فقط ولا يمكن تغييره.")
-
-
 async def admin_recovery_step(update: Update, context: ContextTypes.DEFAULT_TYPE, target_uid: int, token: str):
-    """الخطوة الأولى: البوت (لا المشرف) يحدد بريد الاسترداد: يتأكد من IMAP لبريد واحد فقط ويقيّد المشرف به."""
-    uid = update.effective_user.id
+    """الخطوة الأولى: يعرض البوت بيانات الحساب ويطلب من المشرف إرسال بريد الاسترداد الذي وضعه."""
+    query = update.callback_query
     user_data = get_user(target_uid)
     match = find_pending_request(user_data, token)
     if match is None:
-        await _recovery_send(update, "⚠️ الطلب غير موجود.", kb_single("🔙 الطلبات", "admin_requests:0"))
+        await query.edit_message_text("⚠️ الطلب غير موجود.", reply_markup=kb_single("🔙 الطلبات", "admin_requests:0"))
         return
     index, request = match
     context.user_data["admin_completing_uid"] = target_uid
     context.user_data["admin_completing_index"] = index
     context.user_data["admin_completing_token"] = token
     context.user_data["admin_approval_step"] = "waiting_recovery_email"
-
-    rec = request.get("recovery") or {}
-    if not (rec.get("email") and rec.get("app_pass")):
-        await _recovery_send(update, "🔎 جاري تحديد بريد الاسترداد والتأكد من IMAP...", None)
-        picked = await pick_recovery_mailbox(request.get("email", ""))
-        if not picked:
-            await _recovery_send(
-                update,
-                "⚠️ لا يوجد حالياً بريد استرداد متاح (يعمل له IMAP). حاول لاحقاً أو راسل المالك.",
-                _recovery_kb(target_uid, token))
-            return
-        user_data = get_user(target_uid)
-        match = find_pending_request(user_data, token)
-        if match is None:
-            await _recovery_send(update, "⚠️ الطلب غير موجود.", kb_single("🔙 الطلبات", "admin_requests:0"))
-            return
-        index, request = match
-        rec = {"email": picked["email"], "app_pass": picked["app_pass"],
-               "assigned_at": datetime.now(timezone.utc).isoformat()}
-        pending = user_data.get("pending_requests", [])
-        pending[index]["recovery"] = rec
-        user_data["pending_requests"] = pending
-        save_user(target_uid, user_data)
-        request = pending[index]
-
-    await _recovery_send(update, _recovery_instructions_text(uid, request, rec),
-                         _recovery_kb(target_uid, token, _recovery_verify_button(target_uid, token)))
+    await query.edit_message_text(
+        "📮 <b>الخطوة الأولى: بريد الاسترداد</b>\n\n"
+        f"{_recovery_creds_block(request)}\n\n"
+        "➡️ ضع بريد استرداد للحساب، ثم <b>أرسل لي هنا بريد الاسترداد الذي وضعته</b>.\n"
+        "⚠️ يجب أن يكون من الحسابات التي يملكها البوت (له IMAP يعمل)، ولم يُستعمل من قبل.\n"
+        "سيفحص البوت صندوق وارده ليتأكد أنه صار بريد استرداد لهذا الحساب.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=_recovery_kb(target_uid, token))
 
 
 async def admin_recovery_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3743,7 +3597,7 @@ async def admin_recovery_start(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def handle_admin_recovery_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """البوت هو من يحدد بريد الاسترداد، فأي نص يرسله المشرف هنا يُجاب بتذكير بالخطوات."""
+    """يستقبل بريد الاسترداد من المشرف، يتحقق أنه ضمن حسابات البوت، ثم يفحص وارده."""
     uid = update.effective_user.id
     text = (update.message.text or "").strip()
     target_uid = context.user_data.get("admin_completing_uid")
@@ -3757,21 +3611,68 @@ async def handle_admin_recovery_input(update: Update, context: ContextTypes.DEFA
     if target_uid is None or not token:
         await update.message.reply_text(t(uid, "msg_error"))
         return
-    await update.message.reply_text(
-        "📮 البوت هو من خصّص لك بريد الاسترداد، فلا حاجة لإرسال بريد.\n"
-        "نفّذ الخطوات ثم اضغط «✅ التحقق».",
-        reply_markup=_recovery_kb(target_uid, token, _recovery_verify_button(target_uid, token)))
-
-
-async def _recovery_check_core(target_uid: int, token: str):
-    """يفحص وارد بريد الاسترداد المحفوظ في الطلب. يرجع (نص HTML، لوحة أزرار، نجح؟)."""
     user_data = get_user(target_uid)
     match = find_pending_request(user_data, token)
     if match is None:
-        return "⚠️ الطلب غير موجود.", kb_single("🔙 الطلبات", "admin_requests:0"), False
+        await update.message.reply_text(t(uid, "appr_not_found"))
+        return
+    index, request = match
+    again = _recovery_kb(target_uid, token)
+    mail = text.strip().lower()
+    if "@" not in mail or " " in mail:
+        await update.message.reply_text("⚠️ أرسل بريد الاسترداد بشكل صحيح (مثال: name@gmail.com).", reply_markup=again)
+        return
+    key = normalize_email(mail)
+    if key == normalize_email(request.get("email", "")):
+        await update.message.reply_text("⚠️ لا يمكن أن يكون بريد الاسترداد هو نفس الحساب.", reply_markup=again)
+        return
+    cands = await asyncio.to_thread(_recovery_candidates, request.get("email", ""))
+    owned = {normalize_email(m): (m, p) for m, p in cands}
+    if key not in owned:
+        await update.message.reply_text(
+            "❌ هذا البريد ليس من الحسابات التي يملكها البوت. استخدم بريداً من حسابات البوت المقبولة.",
+            reply_markup=again)
+        return
+    used = _recovery_used_map()
+    exhausted = all(normalize_email(m) in used for m, _ in cands)
+    if key in used and not exhausted:
+        await update.message.reply_text(
+            "❌ هذا البريد استُعمل من قبل كبريد استرداد. اختر بريداً آخر لم يُستعمل.", reply_markup=again)
+        return
+    res = _RECOVERY_RESERVED.get(key)
+    if res and res["until"] > time.time() and res["for"] != normalize_email(request.get("email", "")):
+        await update.message.reply_text("❌ هذا البريد محجوز الآن لطلب آخر. اختر بريداً آخر.", reply_markup=again)
+        return
+    mailbox, app_pass = owned[key]
+    ok, msg = await asyncio.to_thread(_imap_login_sync, mailbox, app_pass)
+    if not ok:
+        await update.message.reply_text("❌ لا يعمل IMAP لهذا البريد حالياً، اختر بريداً آخر.", reply_markup=again)
+        return
+    rec = {"email": mailbox, "app_pass": app_pass, "assigned_at": datetime.now(timezone.utc).isoformat()}
+    user_data = get_user(target_uid)
+    match = find_pending_request(user_data, token)
+    if match is not None:
+        pending = user_data.get("pending_requests", [])
+        pending[match[0]]["recovery"] = rec
+        user_data["pending_requests"] = pending
+        save_user(target_uid, user_data)
+    _RECOVERY_RESERVED[key] = {"until": time.time() + 1800, "for": normalize_email(request.get("email", ""))}
+    context.user_data.pop("admin_approval_step", None)
+    progress = await update.message.reply_text("🔎 جاري فحص صندوق وارد بريد الاسترداد... قد يستغرق بضع ثوانٍ.")
+    body, markup = await _recovery_check_core(target_uid, token)
+    await progress.edit_text(body, parse_mode=ParseMode.HTML, reply_markup=markup)
+
+
+async def _recovery_check_core(target_uid: int, token: str):
+    """يفحص وارد بريد الاسترداد المحفوظ في الطلب. يرجع (نص HTML، لوحة أزرار)."""
+    user_data = get_user(target_uid)
+    match = find_pending_request(user_data, token)
+    if match is None:
+        return "⚠️ الطلب غير موجود.", kb_single("🔙 الطلبات", "admin_requests:0")
     index, request = match
     rec = request.get("recovery") or {}
-    retry = _recovery_verify_button(target_uid, token)
+    retry = [("🔄 افحص مرة أخرى", f"admin_recovery_check:{target_uid}:{token}"),
+             ("✏️ بريد استرداد آخر", f"admin_recovery_reset:{target_uid}:{token}")]
     try:
         since = datetime.fromisoformat(rec.get("assigned_at") or datetime.now(timezone.utc).isoformat()) - timedelta(minutes=60)
         found, subject, seen, scanned = await asyncio.wait_for(
@@ -3780,56 +3681,27 @@ async def _recovery_check_core(target_uid: int, token: str):
             timeout=3700)
     except Exception as exc:
         logger.warning("recovery check failed for %s: %s", request.get("email"), exc)
-        return ("⚠️ تعذّر الفحص الآن (مشكلة اتصال أو IMAP). أعد الضغط على «✅ التحقق» بعد قليل.",
-                _recovery_kb(target_uid, token, retry), False)
+        return ("⚠️ تعذّر فحص صندوق الوارد الآن (مشكلة اتصال أو IMAP). أعد المحاولة بعد قليل.",
+                _recovery_kb(target_uid, token, retry))
     logger.info("recovery check mailbox=%s target=%s found=%s scanned=%s google_mails=%s",
                 rec.get("email"), request.get("email"), found, scanned, seen[:6])
     if not found:
-        return ("❌ لم يتأكد البوت بعد.\n"
-                "تأكد أنك أضفت بريد الاسترداد، ثم سجّلت خروجاً وطلبت «نسيت كلمة المرور» بإرسال الرمز إلى بريد الاسترداد، "
-                "وانتظر دقيقة ثم اضغط «✅ التحقق».\n\n"
+        return ("❌ لم يصل إلى هذا البريد إشعار من Google بأنه بريد استرداد لهذا الحساب.\n"
+                "تأكد أنك وضعته بالضبط على الحساب، وانتظر دقيقة ثم أعد الفحص.\n"
+                f"📬 قرأتُ {scanned} رسالة من كل مجلدات البريد، ورسائل Google الجديدة بينها: {len(seen)}\n\n"
                 f"{_recovery_creds_block(request)}\n\n"
-                f"📮 بريد الاسترداد المخصّص لك:\n<code>{tg_html_escape(rec.get('email', ''))}</code>",
-                _recovery_kb(target_uid, token, retry), False)
+                f"📮 بريد الاسترداد المُدخل:\n<code>{tg_html_escape(rec['email'])}</code>",
+                _recovery_kb(target_uid, token, retry))
     pending = user_data.get("pending_requests", [])
     mark_recovery_used(rec["email"], request.get("email", ""))
     pending[index]["recovery_verified"] = True
     pending[index]["recovery_verified_at"] = datetime.now(timezone.utc).isoformat()
     user_data["pending_requests"] = pending
     save_user(target_uid, user_data)
-    return "✅ تم التأكيد: بريد الاسترداد مربوط بالحساب.", _recovery_kb(target_uid, token), True
-
-
-async def _after_recovery_verified(update: Update, context: ContextTypes.DEFAULT_TYPE, target_uid: int, token: str):
-    """بعد التأكيد: قبول مباشر (وضع بريد الاسترداد فقط) أو طلب رمز المصادقة (الوضع الثاني)."""
-    uid = update.effective_user.id
-    user_data = get_user(target_uid)
-    match = find_pending_request(user_data, token)
-    if match is None:
-        return
-    index, request = match
-    if recovery_only_applies(uid):
-        await admin_verify_and_store(update, context, target_uid, index,
-                                     hold_seconds=LEAVE_HOLD_SECONDS, recovery_only=True)
-        return
-    msg = update.effective_message
-    req_token = account_callback_token(request.get("email", ""))
-    context.user_data["admin_completing_uid"] = target_uid
-    context.user_data["admin_completing_index"] = index
-    context.user_data["admin_completing_token"] = req_token
-    detail_cb = f"admin_request_detail:{target_uid}:{req_token}"
-    if not request.get("has_totp", False):
-        context.user_data["admin_approval_step"] = "waiting_totp"
-        await msg.reply_text(t(uid, "appr_waiting_totp_step", email=request.get("email", "")),
-                             parse_mode=ParseMode.MARKDOWN,
-                             reply_markup=kb_single(t(uid, "btn_cancel"), detail_cb))
-    elif not request.get("has_app_pass", False):
-        context.user_data["admin_approval_step"] = "waiting_app_pass"
-        await msg.reply_text(t(uid, "appr_waiting_app_step", email=request.get("email", "")),
-                             parse_mode=ParseMode.MARKDOWN,
-                             reply_markup=kb_single(t(uid, "btn_cancel"), detail_cb))
-    else:
-        await prompt_admin_acceptance_choice(update, context, target_uid, index)
+    complete = all(request.get(f) for f in ("totp", "app_pass"))
+    nxt = (("➡️ متابعة التحقق", f"admin_accept_auto:{target_uid}:{token}") if complete
+           else ("➡️ متابعة الإكمال", f"admin_complete_start:{target_uid}:{token}"))
+    return "✅ تأكد بريد الاسترداد: وصل إشعار Google. تابع الإكمال.", _recovery_kb(target_uid, token, [nxt])
 
 
 async def admin_recovery_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3847,51 +3719,45 @@ async def admin_recovery_check(update: Update, context: ContextTypes.DEFAULT_TYP
     if not rec.get("email") or not rec.get("app_pass"):
         await admin_recovery_step(update, context, target_uid, token)
         return
-    if match[1].get("recovery_verified"):
-        await query.answer("✅ تم التأكيد سابقاً.")
-        await _after_recovery_verified(update, context, target_uid, token)
-        return
-    await query.edit_message_text("🔎 جاري التحقق... قد يستغرق بضع ثوانٍ.")
-    body, markup, ok = await _recovery_check_core(target_uid, token)
+    await query.edit_message_text("🔎 جاري فحص صندوق وارد بريد الاسترداد... قد يستغرق بضع ثوانٍ.")
+    body, markup = await _recovery_check_core(target_uid, token)
     await query.edit_message_text(body, parse_mode=ParseMode.HTML, reply_markup=markup)
-    if ok:
-        await _after_recovery_verified(update, context, target_uid, token)
 
 
 async def admin_recovery_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """لم يعد المشرف يختار بريداً آخر: البوت يقيّده بواحد. يبقى الزر القديم يعيد عرض نفس البريد."""
     query = update.callback_query
     if not is_admin(query.from_user.id):
         await query.answer("🚫", show_alert=True)
         return
     parts = query.data.split(":")
-    await admin_recovery_step(update, context, int(parts[1]), parts[2])
-
-
-_RECOVERY_MODE_ICON = {"off": "⬜", "totp": "🔐", "only": "📮"}
-_RECOVERY_MODE_NEXT = {"off": "totp", "totp": "only", "only": "off"}
+    target_uid, token = int(parts[1]), parts[2]
+    user_data = get_user(target_uid)
+    match = find_pending_request(user_data, token)
+    if match is not None:
+        pending = user_data.get("pending_requests", [])
+        old_rec = pending[match[0]].pop("recovery", None) or {}
+        if old_rec.get("email"):
+            _RECOVERY_RESERVED.pop(normalize_email(old_rec["email"]), None)
+        user_data["pending_requests"] = pending
+        save_user(target_uid, user_data)
+    await admin_recovery_step(update, context, target_uid, token)
 
 
 async def recovery_admins_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """للمالك: يحدد لكل مشرف طريقة بريد الاسترداد + مكافأة القبول ببريد الاسترداد فقط."""
+    """للمالك: يحدد المشرفين الذين يُطبَّق عليهم شرط بريد الاسترداد."""
     query = update.callback_query
     if query.from_user.id != OWNER_ID:
         await query.answer("🚫 مالك فقط.", show_alert=True)
         return
-    if context.user_data.get("mode") == "set_recovery_reward":
-        context.user_data.pop("mode", None)
     try:
+        selected = recovery_check_admins()
         admins = sorted(int(a) for a in load_admins())
-        reward = get_recovery_admin_reward()
-        buttons = [(f"{_RECOVERY_MODE_ICON[recovery_mode_of(a)]} {a}", f"recovery_admin_toggle:{a}") for a in admins]
-        buttons.append((f"💵 مكافأة بريد الاسترداد: ${reward:.2f}", "recovery_reward_set"))
+        buttons = [(f"{'✅' if a in selected else '⬜'} {a}", f"recovery_admin_toggle:{a}") for a in admins]
         buttons.append(("🔙 الإدارية", "admin_management"))
         text = ("📮 شرط بريد الاسترداد\n\n"
-                "⬜ = الطريقة القديمة (بدون هذا الشرط)\n"
-                "🔐 = بريد استرداد يحدده البوت ثم يُطلب رمز المصادقة\n"
-                f"📮 = قبول ببريد الاسترداد فقط (بدون رمز مصادقة) — مكافأة المشرف ${reward:.2f} لكل إيميل، "
-                "ويدخل الإيميل قسم «بريد الاسترداد» فقط\n\n"
-                "اضغط اسم المشرف لتغيير طريقته (⬜ ← 🔐 ← 📮 ← ⬜)." + ("" if admins else "\n\nلا يوجد أدمن حالياً"))
+                "✅ = يُطبَّق عليه الشرط (يرسل بريد الاسترداد ويفحصه البوت قبل الإكمال)\n"
+                "⬜ = بالطريقة القديمة (بدون هذا الشرط)\n\n"
+                "اضغط اسم المشرف للتبديل." + ("" if admins else "\n\nلا يوجد أدمن حالياً"))
         await query.edit_message_text(text, reply_markup=kb_vertical(buttons))
     except Exception as exc:
         if "not modified" in str(exc).lower():
@@ -3913,60 +3779,16 @@ async def recovery_admin_toggle(update: Update, context: ContextTypes.DEFAULT_TY
     except (IndexError, ValueError):
         return
     try:
-        new_mode = _RECOVERY_MODE_NEXT[recovery_mode_of(admin_id)]
-        check = set(recovery_check_admins())
-        only = set(recovery_only_admins())
-        if new_mode == "off":
-            check.discard(admin_id)
-            only.discard(admin_id)
-        elif new_mode == "totp":
-            check.add(admin_id)
-            only.discard(admin_id)
-        else:
-            check.add(admin_id)
-            only.add(admin_id)
+        selected = set(recovery_check_admins())
+        selected.symmetric_difference_update({admin_id})
         config = dict(load_config())
-        config["recovery_check_admins"] = sorted(check)
-        config["recovery_only_admins"] = sorted(only)
+        config["recovery_check_admins"] = sorted(selected)
         save_config(config)
     except Exception as exc:
         logger.exception("recovery_admin_toggle failed")
         await query.message.reply_text(f"⚠️ تعذر حفظ الإعداد: {exc}")
         return
     await recovery_admins_menu(update, context)
-
-
-async def recovery_reward_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if query.from_user.id != OWNER_ID:
-        await query.answer("🚫 مالك فقط.", show_alert=True)
-        return
-    context.user_data["mode"] = "set_recovery_reward"
-    await query.edit_message_text(
-        "💵 مكافأة المشرف عن كل إيميل يُقبل ببريد الاسترداد فقط\n"
-        f"الحالية: ${get_recovery_admin_reward():.2f}\n\n"
-        "أرسل المبلغ الجديد بالدولار (مثال: 0.02):",
-        reply_markup=kb_single("🔙 إلغاء", "recovery_admins_menu"))
-
-
-async def handle_recovery_reward_input(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
-    if update.effective_user.id != OWNER_ID:
-        return
-    try:
-        value = float(str(text).strip().replace(",", ".").replace("$", ""))
-    except ValueError:
-        await update.message.reply_text("⚠️ أرسل رقماً (مثال: 0.02).")
-        return
-    if value < 0 or value > 100:
-        await update.message.reply_text("⚠️ المبلغ يجب أن يكون بين 0 و 100.")
-        return
-    config = dict(load_config())
-    config["recovery_admin_reward"] = round(value, 2)
-    save_config(config)
-    context.user_data.pop("mode", None)
-    await update.message.reply_text(
-        f"✅ صارت مكافأة المشرف عن كل إيميل ببريد الاسترداد: ${round(value, 2):.2f}",
-        reply_markup=kb_single("🔙 شرط بريد الاسترداد", "recovery_admins_menu"))
 
 
 async def recovery_check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3976,12 +3798,9 @@ async def recovery_check_command(update: Update, context: ContextTypes.DEFAULT_T
     config = load_config()
     if context.args and context.args[0].lower() == "off":
         config["recovery_check_admins"] = []
-        config["recovery_only_admins"] = []
         save_config(config)
     ids = recovery_check_admins() if not (context.args and context.args[0].lower() == "off") else set()
-    only = recovery_only_admins() & ids
-    shown = "، ".join(f"{i}{' (بريد الاسترداد فقط)' if i in only else ''}" for i in sorted(ids)) \
-        or "لا أحد (الطريقة القديمة للجميع)"
+    shown = "، ".join(str(i) for i in sorted(ids)) or "لا أحد (الطريقة القديمة للجميع)"
     await update.message.reply_text(
         f"📮 شرط بريد الاسترداد مطبَّق على: {shown}\n"
         "التحديد من: الإدارية ← شرط بريد الاسترداد. ولإلغائه عن الجميع: /recovery_check off")

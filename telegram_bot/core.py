@@ -799,6 +799,14 @@ async def process_daily_gift_after_approval(context: ContextTypes.DEFAULT_TYPE, 
             add_transaction(user_data, "credit", gift["reward"],
                             f"هدية يومية ({gift['emails_required']} إيميلات)")
             progress["claimed"] = True
+            progress["claimed_at"] = datetime.now(timezone.utc).isoformat()
+            progress["claimed_amount"] = float(gift["reward"])
+            history = user_data.get("daily_gift_history")
+            if not isinstance(history, list):
+                history = []
+            history.append({"date": progress.get("date"), "amount": float(gift["reward"]),
+                            "at": progress["claimed_at"]})
+            user_data["daily_gift_history"] = history[-400:]
             awarded = True
         user_data["daily_gift_progress"] = progress
         save_user(user_id, user_data)
@@ -1855,7 +1863,7 @@ def member_menu_keyboard(buttons: List[Union[tuple, list]]) -> InlineKeyboardMar
 
 
 def clear_edit_state(context: ContextTypes.DEFAULT_TYPE):
-    for key in ("step", "editing_email", "editing_field", "editing_uid", "editing_index"):
+    for key in ("step", "editing_email", "editing_field", "editing_uid", "editing_index", "editing_token"):
         context.user_data.pop(key, None)
 
 
