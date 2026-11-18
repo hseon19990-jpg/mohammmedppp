@@ -249,6 +249,301 @@ def admin_balance_stats(user_data: dict, admin_id: Optional[int] = None) -> dict
     }
 
 
+# ==================== BALANCE TRACE (تتبع رصيد العضو) ====================
+def _acc_tier(rec: dict) -> str:
+    has_totp = bool(rec.get("has_totp") or str(rec.get("totp") or "").strip())
+    has_app = bool(rec.get("has_app_pass") or str(rec.get("app_pass") or "").strip())
+    if has_totp and has_app:
+        return "full"
+    if has_totp:
+        return "totp"
+    return "pass"
+
+
+_TIER_LABELS = {
+    "pass": "🔵 إيميل + باسورد فقط",
+    "totp": "🟣 إيميل + باسورد + رمز مصادقة",
+    "full": "🟢 إيميل + باسورد + رمز مصادقة + كلمة مرور التطبيق",
+}
+
+
+def _to_iraq_dt(iso_value):
+    try:
+        dt = datetime.fromisoformat(str(iso_value))
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt + timedelta(hours=IRAQ_TZ_OFFSET_HOURS)
+
+
+def _ago_text(day_str: str, today_str: str) -> str:
+    try:
+        d = (datetime.strptime(today_str, "%Y-%m-%d") - datetime.strptime(day_str, "%Y-%m-%d")).days
+    except (TypeError, ValueError):
+        return "تاريخ غير معروف"
+    if d <= 0:
+        return "اليوم"
+    if d == 1:
+        return "قبل يوم"
+    if d == 2:
+        return "قبل يومين"
+    if d <= 10:
+        return f"قبل {d} أيام"
+    return f"قبل {d} يوماً"
+
+
+def _classify_ledger(entry: dict):
+    kind = str(entry.get("kind", ""))
+    note = str(entry.get("note", "") or "")
+    if kind == "credit":
+        if note.startswith("هدية يومية"):
+            return "gift"
+        if note.startswith("Granted by owner"):
+            return "grant"
+        if note.startswith("Compensation"):
+            return "comp"
+        if note.startswith("جائزة المسابقة") or note.startswith("جائزة مسابقة"):
+            return "contest"
+        if "API" in note:
+            return "api"
+        return "other_credit"
+    if kind in ("referral", "referral_reversal"):
+        return "referral"
+    if kind == "purchase":
+        return "purchase"
+    if kind == "crypto_withdraw":
+        return "withdraw"
+    if kind == "debit":
+        return "owner_deduct" if note.startswith("Deducted by owner") else "reject_debit"
+    return "other"
+
+
+def build_balance_trace(member_id: int) -> str:
+    ud = get_user(member_id)
+    today = get_iraq_date_str()
+    balance = clamp_money(ud.get("balance", 0.0))
+    hold = clamp_money(ud.get("hold_balance", 0.0))
+
+    # 1) الحسابات: مستلمة (في الرصيد) / معلّقة 24 ساعة / قيد الانتظار — حسب المستوى والنوع
+    released = {k: [0, 0.0, 0, 0] for k in _TIER_LABELS}   # عدد، مبلغ، قديم، جديد
+    holding = {k: [0, 0.0] for k in _TIER_LABELS}
+    for acc in ud.get("approved_accounts", []) or []:
+        if acc.get("rejected_at_24h"):
+            continue
+        amt = float(acc.get("released_amount") or acc.get("amount") or 0.0)
+        tier = _acc_tier(acc)
+        if acc.get("approved_with_leave") and not acc.get("leave_confirmed"):
+            holding[tier][0] += 1
+            holding[tier][1] += amt
+        else:
+            r = released[tier]
+            r[0] += 1
+            r[1] += amt
+            r[3 if acc.get("account_type") == "new" else 2] += 1
+    pending_by = {k: [0, 0.0] for k in _TIER_LABELS}
+    for req in ud.get("pending_requests", []) or []:
+        pending_by[_acc_tier(req)][0] += 1
+        pending_by[_acc_tier(req)][1] += float(req.get("amount", 0.0) or 0.0)
+
+    # 2) سجل الحركات (الدائم + آخر المعاملات) بدون تكرار
+    seen, ledger = set(), []
+    for src in (ud.get("balance_log") or [], ud.get("transactions") or []):
+        for e in src:
+            if not isinstance(e, dict):
+                continue
+            key = (e.get("at"), e.get("kind"), e.get("amount"), e.get("note"))
+            if key in seen:
+                continue
+            seen.add(key)
+            ledger.append(e)
+    buckets = {}
+    for e in ledger:
+        b = _classify_ledger(e)
+        try:
+            amt = float(e.get("amount", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        buckets.setdefault(b, []).append((e, amt))
+
+    def total(name, positive_only=False):
+        vals = [a for _, a in buckets.get(name, [])]
+        if positive_only:
+            vals = [a for a in vals if a > 0]
+        return round(sum(vals), 2)
+
+    def dated(name, limit=10):
+        rows = []
+        for e, amt in buckets.get(name, []):
+            dt = _to_iraq_dt(e.get("at"))
+            day = dt.strftime("%Y-%m-%d") if dt else ""
+            rows.append((day, amt))
+        rows.sort(reverse=True)
+        out = [f"      • {_ago_text(d, today)} ({d}) — ${a:.2f}" for d, a in rows[:limit]]
+        if len(rows) > limit:
+            out.append(f"      … و{len(rows) - limit} أقدم")
+        return out
+
+    # 3) الهدية اليومية: دمج السجل الجديد مع المعاملات القديمة بدون تكرار اليوم
+    gift_days = {}
+    for e, amt in buckets.get("gift", []):
+        dt = _to_iraq_dt(e.get("at"))
+        if dt:
+            gift_days[dt.strftime("%Y-%m-%d")] = amt
+    for h in ud.get("daily_gift_history") or []:
+        day = str(h.get("date") or "")
+        if day and day not in gift_days:
+            try:
+                gift_days[day] = float(h.get("amount", 0) or 0)
+            except (TypeError, ValueError):
+                pass
+    gift_sorted = sorted(gift_days.items(), reverse=True)
+    gift_total = round(sum(a for _, a in gift_sorted), 2)
+
+    sources_accounts = round(sum(v[1] for v in released.values()), 2)
+    ref_net = total("referral")
+    other_credit = total("other_credit")
+    sources_total = round(sources_accounts + gift_total + total("grant") + total("comp") + total("contest")
+                          + total("api") + ref_net + other_credit, 2)
+    spent_known = round(abs(total("purchase")) + abs(total("withdraw")) + abs(total("owner_deduct")), 2)
+    diff = round(balance - (sources_total - spent_known), 2)
+
+    name = next((r.get("user_name") for c in ("approved_accounts", "pending_requests", "rejected_requests")
+                 for r in ud.get(c, []) or [] if r.get("user_name")), "") or "غير معروف"
+    L = ["🧾 <b>تتبع رصيد العضو</b>",
+         f"👤 {tg_html_escape(name)} — <code>{member_id}</code>", "",
+         f"💵 <b>الرصيد الحالي:</b> <code>${balance:.2f}</code>"]
+    if hold > 0:
+        L.append(f"🔒 معلّق (24 ساعة): <code>${hold:.2f}</code>")
+    L += ["", "📥 <b>من أين جاء الرصيد:</b>"]
+    for key, label in _TIER_LABELS.items():
+        n, amt, n_old, n_new = released[key]
+        if n:
+            extra = f" (قديم {n_old} / جديد {n_new})" if n_new else ""
+            L.append(f"{label}\n      ✅ <b>{n}</b> إيميل{extra} = <code>${amt:.2f}</code>")
+    if gift_sorted:
+        L.append(f"🎁 <b>هدية يومية:</b> {len(gift_sorted)} مرة = <code>${gift_total:.2f}</code>")
+        for day, amt in gift_sorted[:15]:
+            L.append(f"      • {_ago_text(day, today)} ({day}) — ${amt:.2f}")
+        if len(gift_sorted) > 15:
+            L.append(f"      … و{len(gift_sorted) - 15} أقدم")
+    simple = [("grant", "🎀 إهداء من المالك"), ("comp", "🩹 تعويض عن طلب مرفوض"),
+              ("contest", "🏆 جوائز المسابقات"), ("api", "🔌 مكافأة إضافة API"),
+              ("other_credit", "➕ إضافات أخرى")]
+    for name_key, label in simple:
+        items = buckets.get(name_key, [])
+        if items:
+            L.append(f"{label}: <b>{len(items)}</b> = <code>${total(name_key):.2f}</code>")
+            if name_key in ("grant", "comp"):
+                L += dated(name_key, 8)
+    ref_items = [x for x in buckets.get("referral", []) if x[1] > 0]
+    if ref_items:
+        L.append(f"👥 إحالات: <b>{len(ref_items)}</b> = <code>${ref_net:.2f}</code>")
+    if sources_total <= 0:
+        L.append("— لا توجد مصادر مسجّلة —")
+    L.append(f"\n📊 <b>مجموع المصادر:</b> <code>${sources_total:.2f}</code>")
+
+    spend_lines = []
+    for key, label in (("purchase", "🛒 مشتريات"), ("withdraw", "💸 سحب كريبتو"),
+                       ("owner_deduct", "➖ خصم من المالك")):
+        if buckets.get(key):
+            spend_lines.append(f"{label}: <b>{len(buckets[key])}</b> = <code>-${abs(total(key)):.2f}</code>")
+    if spend_lines:
+        L += ["", "📤 <b>ما صُرف/خُصم:</b>"] + spend_lines
+    if abs(diff) >= 0.01:
+        L += ["", f"⚖️ فرق غير مفسَّر: <code>{'+' if diff > 0 else '-'}${abs(diff):.2f}</code>\n"
+                  "<i>غالباً من معاملات قديمة لم تكن تُحفظ (السجل الكامل يبدأ من هذا التحديث).</i>"]
+    else:
+        L += ["", "✅ المصادر − المصروف = الرصيد الحالي"]
+
+    if any(h[0] for h in holding.values()) or any(p[0] for p in pending_by.values()):
+        L += ["", "⏳ <b>لم يدخل الرصيد بعد:</b>"]
+        for key, label in _TIER_LABELS.items():
+            if holding[key][0]:
+                L.append(f"🔒 {label}: <b>{holding[key][0]}</b> = ${holding[key][1]:.2f} (فترة 24 ساعة)")
+            if pending_by[key][0]:
+                L.append(f"🕓 {label}: <b>{pending_by[key][0]}</b> = ${pending_by[key][1]:.2f} (قيد المراجعة)")
+    try:
+        if is_admin(member_id):
+            rec = round(float(ud.get("admin_received_balance", 0.0) or 0), 2)
+            L += ["", f"🛠 رصيد مكافآت الإشراف (منفصل عن الرصيد أعلاه): <code>${rec:.2f}</code>"]
+    except Exception:
+        pass
+    return "\n".join(L)
+
+
+def _split_message(text: str, limit: int = 3900) -> list:
+    chunks, cur = [], ""
+    for line in text.split("\n"):
+        if len(cur) + len(line) + 1 > limit and cur:
+            chunks.append(cur)
+            cur = ""
+        cur += line + "\n"
+    if cur.strip():
+        chunks.append(cur)
+    return chunks
+
+
+async def balance_trace_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    context.user_data["step"] = "balance_trace_input"
+    await query.edit_message_text(
+        "🧾 <b>تتبع رصيد عضو</b>\n\nأرسل معرف العضو الرقمي (ID) أو اليوزر مع @،\n"
+        "وسأعرض لك من أين جاء رصيده (كل مستوى بعدده، الهدايا اليومية بتواريخها، الإهداء، الإحالات...).\n\n"
+        "أو أرسل «إلغاء» للعودة.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_single("🔙 لوحة المالك", "owner_panel"))
+
+
+async def _send_balance_trace(message, member_id: int):
+    kb = kb_vertical([("🧾 تتبع رصيد عضو آخر", "balance_trace"),
+                      ("🔎 فحص العضو", "check_member"),
+                      ("🔙 لوحة المالك", "owner_panel")])
+    chunks = _split_message(build_balance_trace(member_id))
+    for i, chunk in enumerate(chunks):
+        await message.reply_text(chunk, parse_mode=ParseMode.HTML,
+                                 reply_markup=kb if i == len(chunks) - 1 else None)
+
+
+async def handle_balance_trace_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        return
+    text = (update.message.text or "").strip()
+    if text.casefold() in {"إلغاء", "الغاء", "cancel"}:
+        context.user_data.pop("step", None)
+        await update.message.reply_text("❌ تم الإلغاء.", reply_markup=kb_single("🔙 لوحة المالك", "owner_panel"))
+        return
+    member_id = resolve_member_id(text)
+    if member_id is None:
+        await update.message.reply_text("⚠️ لم يتم العثور على هذا العضو. أعد الإرسال أو اكتب «إلغاء».")
+        return
+    context.user_data.pop("step", None)
+    try:
+        await _send_balance_trace(update.message, member_id)
+    except Exception as exc:
+        logger.exception("balance trace failed")
+        await update.message.reply_text(f"⚠️ تعذر إنشاء التقرير: {exc}")
+
+
+async def balance_trace_for(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if update.effective_user.id != OWNER_ID:
+        await query.answer("🚫 مالك فقط.", show_alert=True)
+        return
+    try:
+        member_id = int(query.data.split(":")[1])
+    except (IndexError, ValueError):
+        return
+    try:
+        await _send_balance_trace(query.message, member_id)
+    except Exception as exc:
+        logger.exception("balance trace failed")
+        await query.message.reply_text(f"⚠️ تعذر إنشاء التقرير: {exc}")
+
+
 async def check_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if update.effective_user.id != OWNER_ID:
@@ -344,7 +639,8 @@ async def handle_member_check_input(update: Update, context: ContextTypes.DEFAUL
             message += f"\n🚨 <b>دين مستحق على الأدمن:</b> <code>${admin_balances['debt']:.2f}</code>"
     context.user_data.pop("step", None)
     await update.message.reply_text(message, parse_mode=ParseMode.HTML,
-                                    reply_markup=kb_vertical([("🔎 فحص عضو آخر", "check_member"),
+                                    reply_markup=kb_vertical([(f"🧾 تتبع رصيد هذا العضو", f"balance_trace_for:{member_id}"),
+                                                              ("🔎 فحص عضو آخر", "check_member"),
                                                               ("🔙 لوحة المالك", "owner_panel")]))
 
 
@@ -800,6 +1096,7 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ("📊 جميع الحسابات المقبولة", "all_accounts_section"),
         ("📈 إحصائيات المستخدمين", "owner_stats"),
         ("🔎 فحص عضو", "check_member"),
+        ("🧾 تتبع رصيد عضو", "balance_trace"),
         ("🔍 فحص إيميل", "check_email_by_address"),
         ("🔐 فحص IMAP", "imap_check_menu"),
         ("🔗 نظام الإحالة", "referral_settings"),

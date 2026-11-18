@@ -167,6 +167,8 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_give_points_input(update, context); return
     if step == "give_points_by_id_input" or step == "deduct_points_by_id_input":
         await handle_points_by_id_input(update, context); return
+    if step == "balance_trace_input":
+        await handle_balance_trace_input(update, context); return
     if step == "check_member_input":
         await handle_member_check_input(update, context); return
     if step == "editing_field":
@@ -500,6 +502,10 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await admin_completion_cancel(update, context)
     elif data.startswith("admin_show_code:"):
         await admin_show_code(update, context)
+    elif data == "balance_trace":
+        await balance_trace_start(update, context)
+    elif data.startswith("balance_trace_for:"):
+        await balance_trace_for(update, context)
     elif data == "check_member":
         await check_member(update, context)
     elif data == "check_email_by_address":
@@ -850,6 +856,7 @@ async def owner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                ("📊 جميع الحسابات المقبولة", "all_accounts_section"),
                ("📈 إحصائيات المستخدمين", "owner_stats"),
                ("🔎 فحص عضو", "check_member"),
+               ("🧾 تتبع رصيد عضو", "balance_trace"),
                ("🔍 فحص إيميل", "check_email_by_address"),
                ("🔐 فحص IMAP", "imap_check_menu"),
                ("🔗 نظام الإحالة", "referral_settings"),

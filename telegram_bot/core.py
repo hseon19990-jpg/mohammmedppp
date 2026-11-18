@@ -1152,12 +1152,24 @@ def save_user(user_id: int, user_data: dict):
     _LANG_CACHE.pop(user_id, None)
 
 
+_BALANCE_LOG_SKIP = {"hold", "release", "approved_rejection"}
+
+
 def add_transaction(user_data: dict, kind: str, amount: float, note: str = "", email: str = ""):
-    user_data.setdefault("transactions", []).append({
+    entry = {
         "kind": kind, "amount": round(float(amount), 2),
         "note": note[:200], "email": email,
         "at": datetime.now(timezone.utc).isoformat(),
-    })
+    }
+    user_data.setdefault("transactions", []).append(entry)
+    # سجل دائم (لا يُقصّ عند 200) لحركات الرصيد غير المرتبطة بالحسابات: هدايا، إهداء، مسابقات، سحب...
+    # يعتمد عليه "تتبع الرصيد" ليعرض مصدر الرصيد كاملاً حتى للأعضاء كثيري المعاملات.
+    if kind not in _BALANCE_LOG_SKIP and not str(kind).startswith("admin_bonus"):
+        log = user_data.get("balance_log")
+        if not isinstance(log, list):
+            log = []
+        log.append(dict(entry))
+        user_data["balance_log"] = log[-1500:]
 
 
 # ==================== ADMIN PENALTY (NEW) ====================
