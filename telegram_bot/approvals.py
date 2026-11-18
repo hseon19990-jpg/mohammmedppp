@@ -287,6 +287,9 @@ async def admin_show_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer(t(uid, "appr_not_found"), show_alert=True)
         return
     index, request = match
+    if recovery_check_applies(uid) and not request.get("recovery_verified"):
+        await admin_recovery_step(update, context, target_uid, token)
+        return
     email = request.get("email", "")
     totp_secret = request.get("totp", "")
 
@@ -366,6 +369,39 @@ async def admin_complete_start(update: Update, context: ContextTypes.DEFAULT_TYP
                                   reply_markup=kb_single(t(uid, "appr_btn_requests"), "admin_requests:0"))
 
 
+async def _recovery_gate_for_input(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                   target_uid, index, token) -> bool:
+    """للمشرفين المحددين من المالك: لا يُقبل أي إدخال 2FA أو App Password قبل التحقق من بريد الاسترداد.
+    يرجع True إذا حوّل المشرف إلى خطوة بريد الاسترداد (ويجب إيقاف المعالج الحالي)."""
+    uid = update.effective_user.id
+    if not recovery_check_applies(uid):
+        return False
+    user_data = get_user(target_uid)
+    pending = user_data.get("pending_requests", [])
+    request = None
+    if token:
+        match = find_pending_request(user_data, token)
+        if match is not None:
+            index, request = match
+    if request is None and index is not None and 0 <= index < len(pending):
+        request = pending[index]
+    if request is None or request.get("recovery_verified"):
+        return False
+    req_token = account_callback_token(request.get("email", ""))
+    context.user_data["admin_completing_uid"] = target_uid
+    context.user_data["admin_completing_index"] = index
+    context.user_data["admin_completing_token"] = req_token
+    context.user_data["admin_approval_step"] = "waiting_recovery_email"
+    await update.message.reply_text(
+        "📮 <b>الخطوة الأولى: بريد الاسترداد</b>\n\n"
+        f"{_recovery_creds_block(request)}\n\n"
+        "➡️ يجب وضع بريد استرداد للحساب أولاً، ثم <b>أرسل لي هنا بريد الاسترداد الذي وضعته</b>.\n"
+        "⚠️ يجب أن يكون من الحسابات التي يملكها البوت (له IMAP يعمل)، ولم يُستعمل من قبل.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=_recovery_kb(target_uid, req_token))
+    return True
+
+
 async def handle_admin_totp_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     text = update.message.text.strip()
@@ -381,6 +417,8 @@ async def handle_admin_totp_input(update: Update, context: ContextTypes.DEFAULT_
     token = context.user_data.get("admin_completing_token")
     if target_uid is None or (index is None and token is None):
         await update.message.reply_text(t(uid, "msg_error"))
+        return
+    if await _recovery_gate_for_input(update, context, target_uid, index, token):
         return
     cleaned = text.replace(" ", "").upper()
     if len(cleaned) != 32 or not re.match(r'^[A-Z2-7]{32}$', cleaned):
@@ -436,6 +474,8 @@ async def handle_admin_app_pass_input(update: Update, context: ContextTypes.DEFA
     token = context.user_data.get("admin_completing_token")
     if target_uid is None or (index is None and token is None):
         await update.message.reply_text(t(uid, "msg_error"))
+        return
+    if await _recovery_gate_for_input(update, context, target_uid, index, token):
         return
     cleaned = text.replace(" ", "")
     if len(cleaned) != 16 or not re.match(r'^[A-Za-z0-9]{16}$', cleaned):
@@ -2856,6 +2896,7 @@ async def unfreeze_do(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==================== REJECTED SECTION (موحّد للمالك والأدمن) ====================
 # مفاتيح تخص مرحلة الرفض/القبول السابقة وتُزال عند إعادة الطلب إلى المنتظرة
 _REVIVE_DROP_KEYS = (
+    "recovery_verified", "recovery_verified_at", "recovery",
     "reject_reason", "reject_reason_text", "rejected_by", "rejected_by_name",
     "rejected_by_username", "rejected_at", "rejected_from_approved", "rejected_at_24h",
     "final_rejected", "final_rejected_by", "final_rejected_at", "superseded",
