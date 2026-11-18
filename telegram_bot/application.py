@@ -494,6 +494,22 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await admin_recovery_check(update, context)
     elif data.startswith("admin_recovery_reset:"):
         await admin_recovery_reset(update, context)
+    elif data.startswith("admin_recovery_own:"):
+        await admin_recovery_own(update, context)
+    elif data.startswith("admin_recovery_finish_ok:"):
+        await admin_recovery_finish_ok(update, context)
+    elif data.startswith("admin_recovery_finish:"):
+        await admin_recovery_finish(update, context)
+    elif data == "recovery_accounts_menu":
+        await recovery_accounts_menu(update, context)
+    elif data.startswith("rec_acc:"):
+        await recovery_accounts_list(update, context)
+    elif data.startswith("rec_export:"):
+        await recovery_accounts_export(update, context)
+    elif data.startswith("recovery_perm_menu:"):
+        await recovery_perm_menu(update, context)
+    elif data.startswith("recovery_perm_toggle:"):
+        await recovery_perm_toggle(update, context)
     elif data.startswith("admin_complete_start:"):
         await admin_complete_start(update, context)
     elif data.startswith("admin_accept_auto:") or data.startswith("admin_accept_leave:"):
