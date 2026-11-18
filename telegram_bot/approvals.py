@@ -3755,11 +3755,8 @@ RECOVERY_FINISH_ADMIN_BONUS = 0.02   # مكافأة المشرف عند «إنه
 def recovery_perms(admin_id: int) -> dict:
     """صلاحيات مشرف بريد الاسترداد (يحددها المالك): الإكمال (2FA+App Password) والإنهاء (بريد استرداد فقط).
     الافتراضي: كل الصلاحيات (إكمال + تخطي + إنهاء) مفعّلة لأي مشرف يضيفه المالك؛ ويقدر المالك يغلق أي واحدة منها."""
-    cfg = load_config().get("recovery_perms") or {}
-    p = cfg.get(str(admin_id)) if isinstance(cfg, dict) else None
-    p = p if isinstance(p, dict) else {}
-    return {"complete": bool(p.get("complete", True)), "finish": bool(p.get("finish", True)),
-            "skip": bool(p.get("skip", True))}
+    # لا إعدادات منفصلة: أي مشرف يحدده المالك تنفتح له كل الميزات.
+    return {"complete": True, "finish": True, "skip": True}
 
 
 def recovery_can_complete(admin_id: int) -> bool:
@@ -4337,17 +4334,12 @@ async def recovery_admins_menu(update: Update, context: ContextTypes.DEFAULT_TYP
         admins = sorted(int(a) for a in load_admins())
         buttons = []
         for a in admins:
-            row = [(f"{'✅' if a in selected else '⬜'} {a}", f"recovery_admin_toggle:{a}")]
-            if a in selected:
-                perms = recovery_perms(a)
-                row.append((f"⚙️ إكمال{'✅' if perms['complete'] else '⬜'} إنهاء{'✅' if perms['finish'] else '⬜'}",
-                            f"recovery_perm_menu:{a}"))
-            buttons.append(row)
+            buttons.append((f"{'✅' if a in selected else '⬜'} {a}", f"recovery_admin_toggle:{a}"))
         buttons.append(("🔙 الإدارية", "admin_management"))
         text = ("📮 شرط بريد الاسترداد\n\n"
-                "✅ = يُطبَّق عليه الشرط (يرسل بريد الاسترداد ويفحصه البوت قبل الإكمال)\n"
-                "⬜ = بالطريقة القديمة (بدون هذا الشرط)\n\n"
-                "اضغط اسم المشرف للتبديل، وزر ⚙️ لتحديد حق الإكمال وحق الإنهاء." + ("" if admins else "\n\nلا يوجد أدمن حالياً"))
+                "✅ = مشرف بريد الاسترداد: تنفتح له كل الميزات تلقائياً (إكمال، تخطي، إنهاء)\n"
+                "⬜ = بالطريقة القديمة (بدون بريد استرداد)\n\n"
+                "اضغط اسم المشرف للتبديل." + ("" if admins else "\n\nلا يوجد أدمن حالياً"))
         await query.edit_message_text(text, reply_markup=kb_vertical(buttons))
     except Exception as exc:
         if "not modified" in str(exc).lower():
