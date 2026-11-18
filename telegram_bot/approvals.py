@@ -707,6 +707,10 @@ async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_T
             "verified_by": "admin_completion", "admin_id": admin_id,
         },
     }
+    # إذا أجرى المشرف التحقق من بريد الاسترداد قبل الإكمال، نحفظ recovery_mail في السجل
+    _req_rec = request.get("recovery") or {}
+    if request.get("recovery_verified") and _req_rec.get("email"):
+        account_record["recovery_mail"] = _req_rec["email"]
 
     user_data.setdefault("approved_accounts", []).append(account_record)
     user_data["pending_balance"] = clamp_money(float(user_data.get("pending_balance", 0.0)) - original_amount)
@@ -3491,21 +3495,59 @@ def build_recovery_export(accounts: list) -> bytes:
                      for a in accounts).encode("utf-8")
 
 
+def _all_recovery_records(acc_type: str, only_unextracted: bool) -> list:
+    """جميع الحسابات التي تحتوي على recovery_mail — سواء كانت recovery_finish فقط أو مكتملة (option 5).
+    تُرتَّب من الأحدث للأقدم."""
+    out = []
+    for uid_str, enc in load_json(USERS_DB).items():
+        data = decrypt_user_data(enc)
+        for acc in data.get("approved_accounts", []) or []:
+            if not acc.get("recovery_mail") or acc.get("rejected_at_24h"):
+                continue
+            if acc_type != "all" and (acc.get("account_type") == "new") != (acc_type == "new"):
+                continue
+            if only_unextracted and acc.get("extracted_recovery_all"):
+                continue
+            row = dict(acc)
+            row["user_id"] = uid_str
+            out.append(row)
+    return sort_records_newest_first(out)
+
+
+def build_all_recovery_export(accounts: list) -> bytes:
+    """4 خانات: إيميل:باسورد:رمز_المصادقة:بريد_الاسترداد
+    (رمز المصادقة فارغ لحسابات recovery_finish التي لا تملكه)."""
+    return "\n".join(
+        f"{a.get('email', '')}:{a.get('password', '')}:{a.get('totp', '')}:{a.get('recovery_mail', '')}"
+        for a in accounts
+    ).encode("utf-8")
+
+
 async def recovery_accounts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query.from_user.id != OWNER_ID:
         await query.answer("🚫", show_alert=True)
         return
     c = {(sc, ty): len(_recovery_records(ty, sc == "un")) for sc in ("un", "all") for ty in ("old", "new")}
+    ca = {(sc, ty): len(_all_recovery_records(ty, sc == "un")) for sc in ("un", "all") for ty in ("old", "new")}
     buttons = [
-        (f"📮 بريد الاسترداد غير المستخرج — قديم ({c[('un', 'old')]})", "rec_acc:un:old"),
-        (f"📮 بريد الاسترداد غير المستخرج — جديد ({c[('un', 'new')]})", "rec_acc:un:new"),
-        (f"📮 جميع بريد الاسترداد — قديم ({c[('all', 'old')]})", "rec_acc:all:old"),
-        (f"📮 جميع بريد الاسترداد — جديد ({c[('all', 'new')]})", "rec_acc:all:new"),
+        # ─── القسم الأول: إيميل استرداد فقط (بدون TOTP/app_pass) ───
+        (f"📮 استرداد فقط — قديم غير مستخرج ({c[('un', 'old')]})", "rec_acc:un:old"),
+        (f"📮 استرداد فقط — جديد غير مستخرج ({c[('un', 'new')]})", "rec_acc:un:new"),
+        (f"📮 استرداد فقط — جميع قديم ({c[('all', 'old')]})", "rec_acc:all:old"),
+        (f"📮 استرداد فقط — جميع جديد ({c[('all', 'new')]})", "rec_acc:all:new"),
+        # ─── القسم الثاني: جميع الايميلات مع بريد استرداد (بما فيها المكتملة) ───
+        (f"📋 كل الايميلات+استرداد — قديم غير مستخرج ({ca[('un', 'old')]})", "rec_all:un:old"),
+        (f"📋 كل الايميلات+استرداد — جديد غير مستخرج ({ca[('un', 'new')]})", "rec_all:un:new"),
+        (f"📋 كل الايميلات+استرداد — جميع قديم ({ca[('all', 'old')]})", "rec_all:all:old"),
+        (f"📋 كل الايميلات+استرداد — جميع جديد ({ca[('all', 'new')]})", "rec_all:all:new"),
         ("🔙 إدارة الحسابات", "all_accounts_section"),
     ]
-    await query.edit_message_text("📮 <b>بريد الاسترداد</b>\nالصيغة: إيميل:باسورد:بريد_الاسترداد",
-                                  parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
+    await query.edit_message_text(
+        "📮 <b>بريد الاسترداد</b>\n\n"
+        "▪️ <b>استرداد فقط</b>: إيميل:باسورد:بريد_الاسترداد\n"
+        "▪️ <b>كل الايميلات+استرداد</b>: إيميل:باسورد:رمز_المصادقة:بريد_الاسترداد",
+        parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
 
 
 async def recovery_accounts_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3554,6 +3596,69 @@ async def recovery_accounts_export(update: Update, context: ContextTypes.DEFAULT
                 if acc.get("recovery_finish") and (uid_str, normalize_email(acc.get("email", ""))) in wanted \
                         and not acc.get("extracted"):
                     acc["extracted"] = True
+                    changed = True
+            if changed:
+                save_user(int(uid_str), data)
+    await query.edit_message_text(f"✅ تم تصدير {len(rows)} حساب.", reply_markup=back)
+
+
+# ==================== OWNER: ALL ACCOUNTS WITH RECOVERY (SECTION 2) ====================
+async def recovery_all_accounts_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """قائمة جميع الايميلات التي تحتوي على recovery_mail (استرداد فقط + مكتملة بـ TOTP/app_pass)."""
+    query = update.callback_query
+    if query.from_user.id != OWNER_ID:
+        await query.answer("🚫", show_alert=True)
+        return
+    # data format: rec_all:un|all:old|new
+    _, scope, acc_type = query.data.split(":")
+    rows = _all_recovery_records(acc_type, scope == "un")
+    title = f"{'غير المستخرج' if scope == 'un' else 'الجميع'} — {'جديد' if acc_type == 'new' else 'قديم'}"
+    back = ("🔙 بريد الاسترداد", "recovery_accounts_menu")
+    if not rows:
+        await query.edit_message_text(f"📋 {title}\n\nلا توجد حسابات.", reply_markup=kb_single(*back))
+        return
+    lines = [f"📋 <b>{title}</b> ({len(rows)})", "الصيغة: إيميل:باسورد:رمز_المصادقة:بريد_الاسترداد", ""]
+    for i, a in enumerate(rows[:10], 1):
+        flag = "✅" if a.get("extracted_recovery_all") else "🆕"
+        kind = "📮" if a.get("recovery_finish") else "🟢"
+        lines.append(
+            f"{i}. {flag}{kind} <code>"
+            f"{tg_html_escape(a.get('email', ''))}:{tg_html_escape(a.get('password', ''))}:"
+            f"{tg_html_escape(a.get('totp', ''))}:{tg_html_escape(a.get('recovery_mail', ''))}</code>"
+        )
+    if len(rows) > 10:
+        lines.append(f"… و{len(rows) - 10} آخرين (يظهرون في التصدير)")
+    buttons = [(f"📥 تصدير {title}", f"rec_all_export:{scope}:{acc_type}"), back]
+    await query.edit_message_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
+
+
+async def recovery_all_accounts_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تصدير جميع الايميلات مع بريد الاسترداد بصيغة 4 خانات: إيميل:باسورد:رمز:بريد_استرداد."""
+    query = update.callback_query
+    if query.from_user.id != OWNER_ID:
+        await query.answer("🚫", show_alert=True)
+        return
+    _, scope, acc_type = query.data.split(":")
+    rows = _all_recovery_records(acc_type, scope == "un")
+    back = kb_single("🔙 بريد الاسترداد", "recovery_accounts_menu")
+    if not rows:
+        await query.edit_message_text("لا توجد حسابات للتصدير.", reply_markup=back)
+        return
+    name = f"all_recovery_{scope}_{acc_type}.txt"
+    await context.bot.send_document(
+        chat_id=OWNER_ID,
+        document=io.BytesIO(build_all_recovery_export(rows)),
+        filename=name,
+        caption=f"📋 {len(rows)} حساب (إيميل:باسورد:رمز_المصادقة:بريد_الاسترداد)")
+    if scope == "un":
+        wanted = {(r["user_id"], normalize_email(r.get("email", ""))) for r in rows}
+        for uid_str, enc in load_json(USERS_DB).items():
+            data = decrypt_user_data(enc)
+            changed = False
+            for acc in data.get("approved_accounts", []) or []:
+                key = (uid_str, normalize_email(acc.get("email", "")))
+                if acc.get("recovery_mail") and key in wanted and not acc.get("extracted_recovery_all"):
+                    acc["extracted_recovery_all"] = True
                     changed = True
             if changed:
                 save_user(int(uid_str), data)

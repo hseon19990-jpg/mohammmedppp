@@ -506,6 +506,10 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await recovery_accounts_list(update, context)
     elif data.startswith("rec_export:"):
         await recovery_accounts_export(update, context)
+    elif data.startswith("rec_all:"):
+        await recovery_all_accounts_list(update, context)
+    elif data.startswith("rec_all_export:"):
+        await recovery_all_accounts_export(update, context)
     elif data.startswith("recovery_perm_menu:"):
         await recovery_perm_menu(update, context)
     elif data.startswith("recovery_perm_toggle:"):
