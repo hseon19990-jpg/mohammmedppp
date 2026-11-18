@@ -3754,12 +3754,12 @@ RECOVERY_FINISH_ADMIN_BONUS = 0.02   # مكافأة المشرف عند «إنه
 
 def recovery_perms(admin_id: int) -> dict:
     """صلاحيات مشرف بريد الاسترداد (يحددها المالك): الإكمال (2FA+App Password) والإنهاء (بريد استرداد فقط).
-    الافتراضي: الإكمال مسموح (السلوك القديم)، والإنهاء ممنوع حتى يفعّله المالك."""
+    الافتراضي: الإكمال والتخطي مسموحان، والإنهاء ممنوع حتى يفعّله المالك."""
     cfg = load_config().get("recovery_perms") or {}
     p = cfg.get(str(admin_id)) if isinstance(cfg, dict) else None
     p = p if isinstance(p, dict) else {}
     return {"complete": bool(p.get("complete", True)), "finish": bool(p.get("finish", False)),
-            "skip": bool(p.get("skip", False))}
+            "skip": bool(p.get("skip", True))}
 
 
 def recovery_can_complete(admin_id: int) -> bool:
