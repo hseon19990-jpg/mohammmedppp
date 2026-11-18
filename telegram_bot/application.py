@@ -494,6 +494,8 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await admin_recovery_check(update, context)
     elif data.startswith("admin_recovery_reset:"):
         await admin_recovery_reset(update, context)
+    elif data.startswith("admin_recovery_skip:"):
+        await admin_recovery_skip(update, context)
     elif data.startswith("admin_recovery_own:"):
         await admin_recovery_own(update, context)
     elif data.startswith("admin_recovery_finish_ok:"):

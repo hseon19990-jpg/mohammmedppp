@@ -250,10 +250,15 @@ async def admin_request_detail(update: Update, context: ContextTypes.DEFAULT_TYP
         buttons.append((t(uid, "appr_show_code"), f"admin_show_code:{target_uid}:{account_callback_token(email)}"))
 
     # يمكن للأدمن إكمال الإيميل (قديم أو جديد) إذا كان ناقصاً
+    _needs_complete = (not has_totp) or (not has_app_pass)
     if not has_totp:
         buttons.append((t(uid, "appr_complete_both"), f"admin_complete_start:{target_uid}:{account_callback_token(email)}"))
     elif not has_app_pass:
         buttons.append((t(uid, "appr_complete_app"), f"admin_complete_start:{target_uid}:{account_callback_token(email)}"))
+    # زر «إنهاء» بجانب زر الإكمال (بعد التحقق من بريد الاسترداد، ولمن منحه المالك الصلاحية)
+    if (_needs_complete and recovery_can_finish(uid) and request.get("recovery_verified")
+            and (request.get("recovery") or {}).get("email")):
+        buttons.append(_finish_button(target_uid, account_callback_token(email)))
 
     buttons.append((t(uid, "appr_reject"), f"reject_request:{target_uid}:{account_callback_token(email)}"))
     buttons.append((t(uid, "appr_btn_requests"), "admin_requests:0"))
@@ -361,7 +366,8 @@ async def admin_complete_start(update: Update, context: ContextTypes.DEFAULT_TYP
 
     def _with_finish(cancel_cb: str):
         rows = []
-        if recovery_can_finish(uid) and request.get("recovery_verified"):
+        if (recovery_can_finish(uid) and request.get("recovery_verified")
+                and (request.get("recovery") or {}).get("email")):
             rows.append(_finish_button(target_uid, _tok))
         rows.append((t(uid, "btn_cancel"), cancel_cb))
         return kb_vertical(rows)
@@ -711,6 +717,8 @@ async def admin_verify_and_store(update: Update, context: ContextTypes.DEFAULT_T
     _req_rec = request.get("recovery") or {}
     if request.get("recovery_verified") and _req_rec.get("email"):
         account_record["recovery_mail"] = _req_rec["email"]
+    if request.get("recovery_skipped"):
+        account_record["recovery_skipped"] = True
 
     user_data.setdefault("approved_accounts", []).append(account_record)
     user_data["pending_balance"] = clamp_money(float(user_data.get("pending_balance", 0.0)) - original_amount)
@@ -2905,7 +2913,7 @@ async def unfreeze_do(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==================== REJECTED SECTION (موحّد للمالك والأدمن) ====================
 # مفاتيح تخص مرحلة الرفض/القبول السابقة وتُزال عند إعادة الطلب إلى المنتظرة
 _REVIVE_DROP_KEYS = (
-    "recovery_verified", "recovery_verified_at", "recovery",
+    "recovery_verified", "recovery_verified_at", "recovery", "recovery_skipped",
     "reject_reason", "reject_reason_text", "rejected_by", "rejected_by_name",
     "rejected_by_username", "rejected_at", "rejected_from_approved", "rejected_at_24h",
     "final_rejected", "final_rejected_by", "final_rejected_at", "superseded",
@@ -3390,7 +3398,7 @@ async def admin_recovery_finish_ok(update: Update, context: ContextTypes.DEFAULT
     admin_username = admin_user.username or "None"
 
     record = {k: v for k, v in request.items()
-              if k not in ("recovery", "recovery_verified", "recovery_verified_at", "rejected_by_admins")}
+              if k not in ("recovery", "recovery_verified", "recovery_verified_at", "recovery_skipped", "rejected_by_admins")}
     record.update({
         "amount": amount, "admin_bonus": bonus,
         "completed_by_admin": admin_id, "completed_by_admin_name": admin_name,
@@ -3514,6 +3522,10 @@ def _all_recovery_records(acc_type: str, only_unextracted: bool) -> list:
     return sort_records_newest_first(out)
 
 
+def _acc_type_label(acc_type: str) -> str:
+    return {"new": "جديد", "old": "قديم"}.get(acc_type, "جديد + قديم")
+
+
 def build_all_recovery_export(accounts: list) -> bytes:
     """4 خانات: إيميل:باسورد:رمز_المصادقة:بريد_الاسترداد
     (رمز المصادقة فارغ لحسابات recovery_finish التي لا تملكه)."""
@@ -3529,24 +3541,22 @@ async def recovery_accounts_menu(update: Update, context: ContextTypes.DEFAULT_T
         await query.answer("🚫", show_alert=True)
         return
     c = {(sc, ty): len(_recovery_records(ty, sc == "un")) for sc in ("un", "all") for ty in ("old", "new")}
-    ca = {(sc, ty): len(_all_recovery_records(ty, sc == "un")) for sc in ("un", "all") for ty in ("old", "new")}
+    ca = {sc: len(_all_recovery_records("all", sc == "un")) for sc in ("un", "all")}
     buttons = [
         # ─── القسم الأول: إيميل استرداد فقط (بدون TOTP/app_pass) ───
         (f"📮 استرداد فقط — قديم غير مستخرج ({c[('un', 'old')]})", "rec_acc:un:old"),
         (f"📮 استرداد فقط — جديد غير مستخرج ({c[('un', 'new')]})", "rec_acc:un:new"),
         (f"📮 استرداد فقط — جميع قديم ({c[('all', 'old')]})", "rec_acc:all:old"),
         (f"📮 استرداد فقط — جميع جديد ({c[('all', 'new')]})", "rec_acc:all:new"),
-        # ─── القسم الثاني: جميع الايميلات مع بريد استرداد (بما فيها المكتملة) ───
-        (f"📋 كل الايميلات+استرداد — قديم غير مستخرج ({ca[('un', 'old')]})", "rec_all:un:old"),
-        (f"📋 كل الايميلات+استرداد — جديد غير مستخرج ({ca[('un', 'new')]})", "rec_all:un:new"),
-        (f"📋 كل الايميلات+استرداد — جميع قديم ({ca[('all', 'old')]})", "rec_all:all:old"),
-        (f"📋 كل الايميلات+استرداد — جميع جديد ({ca[('all', 'new')]})", "rec_all:all:new"),
+        # ─── استخراج الايميلات مع بريد الاسترداد (الجديد والقديم مدموجان) ───
+        (f"📋 استخراج الكل: إيميل+استرداد ({ca['all']})", "rec_all:all:all"),
+        (f"📋 استخراج غير المستخرج: إيميل+استرداد ({ca['un']})", "rec_all:un:all"),
         ("🔙 إدارة الحسابات", "all_accounts_section"),
     ]
     await query.edit_message_text(
         "📮 <b>بريد الاسترداد</b>\n\n"
         "▪️ <b>استرداد فقط</b>: إيميل:باسورد:بريد_الاسترداد\n"
-        "▪️ <b>كل الايميلات+استرداد</b>: إيميل:باسورد:رمز_المصادقة:بريد_الاسترداد",
+        "▪️ <b>استخراج الكل / غير المستخرج</b> (جديد + قديم معاً): إيميل:باسورد:رمز_المصادقة:بريد_الاسترداد",
         parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
 
 
@@ -3612,7 +3622,7 @@ async def recovery_all_accounts_list(update: Update, context: ContextTypes.DEFAU
     # data format: rec_all:un|all:old|new
     _, scope, acc_type = query.data.split(":")
     rows = _all_recovery_records(acc_type, scope == "un")
-    title = f"{'غير المستخرج' if scope == 'un' else 'الجميع'} — {'جديد' if acc_type == 'new' else 'قديم'}"
+    title = f"{'غير المستخرج' if scope == 'un' else 'الجميع'} — {_acc_type_label(acc_type)}"
     back = ("🔙 بريد الاسترداد", "recovery_accounts_menu")
     if not rows:
         await query.edit_message_text(f"📋 {title}\n\nلا توجد حسابات.", reply_markup=kb_single(*back))
@@ -3679,13 +3689,15 @@ async def recovery_perm_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
     buttons = [
         (f"{'✅' if perms['complete'] else '⬜'} حق الإكمال (2FA + كلمة مرور التطبيق)", f"recovery_perm_toggle:{admin_id}:complete"),
         (f"{'✅' if perms['finish'] else '⬜'} حق الإنهاء (بريد استرداد فقط)", f"recovery_perm_toggle:{admin_id}:finish"),
+        (f"{'✅' if perms['skip'] else '⬜'} حق التخطي (بدون بريد استرداد)", f"recovery_perm_toggle:{admin_id}:skip"),
         ("🔙 شرط بريد الاسترداد", "recovery_admins_menu"),
     ]
     await query.edit_message_text(
         f"⚙️ <b>صلاحيات المشرف</b> <code>{admin_id}</code>\n\n"
         "بعد التحقق من بريد الاسترداد يظهر للمشرف:\n"
         "• <b>إكمال</b>: يضيف رمز المصادقة وكلمة مرور التطبيق.\n"
-        "• <b>إنهاء</b>: ينهي الإيميل ببريد الاسترداد فقط (يذهب لقسم بريد الاسترداد).",
+        "• <b>إنهاء</b>: ينهي الإيميل ببريد الاسترداد فقط (يذهب لقسم بريد الاسترداد).\n"
+        "• <b>تخطي</b>: يتجاوز بريد الاسترداد ويكمل الإيميل عادياً (يحتاج حق الإكمال أيضاً).",
         parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
 
 
@@ -3699,7 +3711,7 @@ async def recovery_perm_toggle(update: Update, context: ContextTypes.DEFAULT_TYP
         admin_id = int(admin_raw)
     except ValueError:
         return
-    if key not in ("complete", "finish"):
+    if key not in ("complete", "finish", "skip"):
         return
     config = dict(load_config())
     cfg = dict(config.get("recovery_perms") or {})
@@ -3746,7 +3758,8 @@ def recovery_perms(admin_id: int) -> dict:
     cfg = load_config().get("recovery_perms") or {}
     p = cfg.get(str(admin_id)) if isinstance(cfg, dict) else None
     p = p if isinstance(p, dict) else {}
-    return {"complete": bool(p.get("complete", True)), "finish": bool(p.get("finish", False))}
+    return {"complete": bool(p.get("complete", True)), "finish": bool(p.get("finish", False)),
+            "skip": bool(p.get("skip", False))}
 
 
 def recovery_can_complete(admin_id: int) -> bool:
@@ -3755,6 +3768,18 @@ def recovery_can_complete(admin_id: int) -> bool:
 
 def recovery_can_finish(admin_id: int) -> bool:
     return recovery_check_applies(admin_id) and recovery_perms(admin_id)["finish"]
+
+
+def recovery_can_skip(admin_id: int) -> bool:
+    """تخطي بريد الاسترداد (يكمل الإيميل عادياً بدون بريد استرداد). يحتاج صلاحية الإكمال أيضاً وإلا يعلق المشرف."""
+    if not recovery_check_applies(admin_id):
+        return False
+    p = recovery_perms(admin_id)
+    return bool(p["skip"] and p["complete"])
+
+
+def _skip_button(target_uid: int, token: str) -> tuple:
+    return ("⏭ تخطي بريد الاسترداد", f"admin_recovery_skip:{target_uid}:{token}")
 
 
 def _recovery_candidates(exclude_email: str) -> list:
@@ -4014,6 +4039,7 @@ async def admin_recovery_step(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data["admin_completing_uid"] = target_uid
     context.user_data["admin_completing_index"] = index
     context.user_data["admin_completing_token"] = token
+    _can_skip = recovery_can_skip(update.effective_user.id)
     rec = request.get("recovery") or {}
     note = ""
     if not (rec.get("email") and rec.get("app_pass")):
@@ -4043,6 +4069,8 @@ async def admin_recovery_step(update: Update, context: ContextTypes.DEFAULT_TYPE
         buttons = [("🔎 وضعته — تحقق الآن", f"admin_recovery_check:{target_uid}:{token}"),
                    ("📮 بريد استرداد موجود مسبقاً / من عندي", f"admin_recovery_own:{target_uid}:{token}"),
                    ("🔄 بريد آخر من البوت", f"admin_recovery_reset:{target_uid}:{token}")]
+        if _can_skip:
+            buttons.append(_skip_button(target_uid, token))
         await _recovery_show(update, text, _recovery_kb(target_uid, token, buttons))
         return
     context.user_data["admin_approval_step"] = "waiting_recovery_email"
@@ -4052,7 +4080,7 @@ async def admin_recovery_step(update: Update, context: ContextTypes.DEFAULT_TYPE
         f"{_recovery_creds_block(request)}\n\n"
         "➡️ أرسل لي هنا <b>بريد الاسترداد</b> الموضوع على الحساب.\n"
         "⚠️ يجب أن يكون من الحسابات التي يملكها البوت (له IMAP يعمل)، ولم يُستعمل من قبل كبريد استرداد لأي إيميل.",
-        _recovery_kb(target_uid, token))
+        _recovery_kb(target_uid, token, [_skip_button(target_uid, token)] if _can_skip else None))
 
 
 async def admin_recovery_own(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4176,6 +4204,8 @@ async def _recovery_check_core(target_uid: int, token: str, admin_id: Optional[i
     retry = [("🔄 افحص مرة أخرى", f"admin_recovery_check:{target_uid}:{token}"),
              ("📮 بريد استرداد موجود مسبقاً / من عندي", f"admin_recovery_own:{target_uid}:{token}"),
              ("🔄 بريد آخر من البوت", f"admin_recovery_reset:{target_uid}:{token}")]
+    if admin_id is not None and recovery_can_skip(admin_id):
+        retry.append(_skip_button(target_uid, token))
     try:
         since = datetime.fromisoformat(rec.get("assigned_at") or datetime.now(timezone.utc).isoformat()) - timedelta(
             minutes=int(rec.get("lookback_min", 60) or 60))
@@ -4234,6 +4264,44 @@ async def admin_recovery_check(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.edit_message_text("🔎 جاري فحص صندوق وارد بريد الاسترداد... قد يستغرق بضع ثوانٍ.")
     body, markup = await _recovery_check_core(target_uid, token, query.from_user.id)
     await query.edit_message_text(body, parse_mode=ParseMode.HTML, reply_markup=markup)
+
+
+async def admin_recovery_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تخطي بريد الاسترداد: يعتبر شرط الاسترداد منتهياً بدون بريد، ويكمل المشرف (2FA + App Password) كالمعتاد."""
+    query = update.callback_query
+    uid = query.from_user.id
+    if not recovery_can_skip(uid):
+        await query.answer("🚫 المالك لم يمنحك صلاحية «التخطي».", show_alert=True)
+        return
+    parts = query.data.split(":")
+    target_uid, token = int(parts[1]), parts[2]
+    user_data = get_user(target_uid)
+    match = find_pending_request(user_data, token)
+    if match is None:
+        await query.edit_message_text("⚠️ الطلب غير موجود.", reply_markup=kb_single("🔙 الطلبات", "admin_requests:0"))
+        return
+    index, _ = match
+    pending = user_data.get("pending_requests", [])
+    old = pending[index].pop("recovery", None) or {}
+    if old.get("email"):
+        _RECOVERY_RESERVED.pop(normalize_email(old["email"]), None)
+    pending[index]["recovery_verified"] = True
+    pending[index]["recovery_skipped"] = True
+    pending[index]["recovery_verified_at"] = datetime.now(timezone.utc).isoformat()
+    user_data["pending_requests"] = pending
+    save_user(target_uid, user_data)
+    request = pending[index]
+    token = account_callback_token(request.get("email", ""))
+    context.user_data["admin_completing_uid"] = target_uid
+    context.user_data["admin_completing_index"] = index
+    context.user_data["admin_completing_token"] = token
+    context.user_data.pop("admin_approval_step", None)
+    complete = all(request.get(f) for f in ("totp", "app_pass"))
+    nxt = (("➡️ متابعة التحقق", f"admin_accept_auto:{target_uid}:{token}") if complete
+           else ("➡️ إكمال (إضافة 2FA وكلمة مرور التطبيق)", f"admin_complete_start:{target_uid}:{token}"))
+    await query.edit_message_text(
+        "⏭ تم تخطي بريد الاسترداد لهذا الحساب.\nتابع الإكمال بدون بريد استرداد.",
+        reply_markup=_recovery_kb(target_uid, token, [nxt]))
 
 
 async def admin_recovery_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
