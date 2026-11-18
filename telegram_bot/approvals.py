@@ -250,15 +250,10 @@ async def admin_request_detail(update: Update, context: ContextTypes.DEFAULT_TYP
         buttons.append((t(uid, "appr_show_code"), f"admin_show_code:{target_uid}:{account_callback_token(email)}"))
 
     # يمكن للأدمن إكمال الإيميل (قديم أو جديد) إذا كان ناقصاً
-    _needs_complete = (not has_totp) or (not has_app_pass)
     if not has_totp:
-        buttons.append((t(uid, "appr_complete_both"), f"admin_complete_start:{target_uid}:{account_callback_token(email)}"))
+        buttons.append((t(uid, "appr_complete_both"), f"admin_complete_start:{target_uid}:{account_callback_token(email)}:fresh"))
     elif not has_app_pass:
-        buttons.append((t(uid, "appr_complete_app"), f"admin_complete_start:{target_uid}:{account_callback_token(email)}"))
-    # زر «إنهاء» بجانب زر الإكمال (بعد التحقق من بريد الاسترداد، ولمن منحه المالك الصلاحية)
-    if (_needs_complete and recovery_can_finish(uid) and request.get("recovery_verified")
-            and (request.get("recovery") or {}).get("email")):
-        buttons.append(_finish_button(target_uid, account_callback_token(email)))
+        buttons.append((t(uid, "appr_complete_app"), f"admin_complete_start:{target_uid}:{account_callback_token(email)}:fresh"))
 
     buttons.append((t(uid, "appr_reject"), f"reject_request:{target_uid}:{account_callback_token(email)}"))
     buttons.append((t(uid, "appr_btn_requests"), "admin_requests:0"))
@@ -329,6 +324,15 @@ async def admin_show_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]))
 
 
+def _reset_recovery_state(request: dict) -> None:
+    """يمسح أي حالة استرداد سابقة (تحقق/تخطي/بريد) ليُعاد الأمر من الصفر كأنه لم يُضف شيء."""
+    old = request.pop("recovery", None) or {}
+    if old.get("email"):
+        _RECOVERY_RESERVED.pop(normalize_email(old["email"]), None)
+    for k in ("recovery_verified", "recovery_verified_at", "recovery_skipped"):
+        request.pop(k, None)
+
+
 async def admin_complete_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     uid = query.from_user.id
@@ -345,6 +349,14 @@ async def admin_complete_start(update: Update, context: ContextTypes.DEFAULT_TYP
                                       reply_markup=kb_single(t(uid, "appr_btn_requests"), "admin_requests:0"))
         return
     index, request = match
+
+    # الدخول من شاشة الطلب (وليس من شاشة المتابعة بعد التحقق) = عملية جديدة: تُعاد خطوة الاسترداد من الصفر
+    if recovery_check_applies(uid) and len(parts) > 3 and parts[3] == "fresh" and request.get("recovery_verified"):
+        _reset_recovery_state(request)
+        pending_list = user_data.get("pending_requests", [])
+        pending_list[index] = request
+        user_data["pending_requests"] = pending_list
+        save_user(target_uid, user_data)
 
     if recovery_check_applies(uid) and not request.get("recovery_verified"):
         await admin_recovery_step(update, context, target_uid, token)
@@ -2298,6 +2310,7 @@ async def _apply_admin_rejection(update, context, actor_id, target_uid, index,
         "rejected_at": datetime.now(timezone.utc).isoformat(),
     })
     request["rejected_by_admins"] = rejected_by_admins
+    _reset_recovery_state(request)   # بعد الرفض تُعاد عملية الاسترداد من الصفر
     pending[index] = request
     user_data["pending_requests"] = pending
 
@@ -4161,7 +4174,9 @@ async def handle_admin_recovery_input(update: Update, context: ContextTypes.DEFA
             reply_markup=again)
         return
     used = _recovery_used_map()
-    if key in used:
+    _u = used.get(key)
+    _same_account = isinstance(_u, dict) and _u.get("last_for") == normalize_email(request.get("email", ""))
+    if key in used and not _same_account:
         await update.message.reply_text(
             "❌ هذا البريد استُعمل من قبل كبريد استرداد لإيميل آخر. اختر بريداً لم يُستعمل أبداً.", reply_markup=again)
         return
