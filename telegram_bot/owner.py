@@ -415,6 +415,8 @@ def _build_email_record_report(match: dict, position: int, total: int) -> str:
 
     acc_type = rec.get("account_type", "old")
     type_text = "🆕 جديد" if acc_type == "new" else "📝 قديم"
+    if rec.get("acceptance_mode") == "recovery_only":
+        type_text = "📮 بريد الاسترداد"
     lines.append(f"<b>نوع الإيميل:</b> {type_text}")
 
     display_name = rec.get("user_name") or user_data.get("user_name") or "غير معروف"
@@ -508,7 +510,7 @@ def _build_email_record_report(match: dict, position: int, total: int) -> str:
         if rec.get("completed_at"):
             lines.append(f"  • وقت الإكمال: <code>{tg_html_escape(_format_iso_time(rec.get('completed_at')))}</code>")
         if rec.get("acceptance_mode"):
-            mode_map = {"leave_video": "📹 مع فيديو المغادرة", "automatic": "✅ تلقائي"}
+            mode_map = {"leave_video": "📹 مع فيديو المغادرة", "automatic": "✅ تلقائي", "recovery_only": "📮 ببريد الاسترداد فقط"}
             lines.append(f"  • طريقة القبول: {mode_map.get(rec.get('acceptance_mode'), rec.get('acceptance_mode'))}")
         if rec.get("admin_bonus") is not None:
             try:
@@ -781,6 +783,7 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         maintenance_toggle_button(),
         ("🔗 رابط الدعم", "support_link_settings"),
         ("👥 الإدارية", "admin_management"),
+        ("💵 مكافأة بريد الاسترداد", "recovery_reward_set"),
         ("🙋 التطوع للأدمن", "volunteer_settings"),
         ("🔑 إدارة APIs", "apis_menu"),
         ("🤖 الذكاء الاصطناعي", "ai_settings"),

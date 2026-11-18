@@ -206,6 +206,11 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ أرسل رقماً.")
         return
 
+    # ═══ 15b. مكافأة المشرف عن القبول ببريد الاسترداد ═══
+    if mode == "set_recovery_reward":
+        if user_id != OWNER_ID: return
+        await handle_recovery_reward_input(update, context, text); return
+
     # ═══ 16. Referral bonus ═══
     if mode == "set_referral_bonus":
         if user_id != OWNER_ID: return
@@ -452,6 +457,8 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await admin_management(update, context)
     elif data == "recovery_admins_menu":
         await recovery_admins_menu(update, context)
+    elif data == "recovery_reward_set":
+        await recovery_reward_start(update, context)
     elif data.startswith("recovery_admin_toggle:"):
         await recovery_admin_toggle(update, context)
     elif data == "add_admin":
@@ -484,6 +491,10 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await rej_delete(update, context)
     elif data.startswith("admin_rejected:"):
         await admin_rejected_requests(update, context)
+    elif data.startswith("admin_rejected_old:"):
+        await admin_rejected_old_requests(update, context)
+    elif data.startswith("admin_rejected_new:"):
+        await admin_rejected_new_requests(update, context)
     elif data.startswith("admin_recovery_start:"):
         await admin_recovery_start(update, context)
     elif data.startswith("admin_recovery_check:"):
@@ -697,6 +708,10 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await unextracted_accounts(update, context, "old")
     elif data == "unextracted_new":
         await unextracted_accounts(update, context, "new")
+    elif data == "all_recovery":
+        await all_accounts(update, context, "recovery")
+    elif data == "unextracted_recovery":
+        await unextracted_accounts(update, context, "recovery")
     elif data.startswith("export_all_"):
         acc_type = data.replace("export_all_", "")
         await export_all_accounts(update, context, acc_type)
@@ -832,6 +847,7 @@ async def owner_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = [maintenance_toggle_button(),
                ("🔗 رابط الدعم", "support_link_settings"),
                ("👥 الإدارية", "admin_management"),
+               ("💵 مكافأة بريد الاسترداد", "recovery_reward_set"),
                ("🙋 التطوع للأدمن", "volunteer_settings"),
                ("🔑 إدارة APIs", "apis_menu"),
                ("🚫 إدارة الحظر", "bans_menu"),
