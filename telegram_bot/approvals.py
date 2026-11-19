@@ -3370,15 +3370,15 @@ async def admin_recovery_finish(update: Update, context: ContextTypes.DEFAULT_TY
         await query.answer(err, show_alert=True)
         return
     rec = request["recovery"]
-    amount = cents_to_money(money_to_cents(request.get("amount", 0.0)))
-    bonus = RECOVERY_FINISH_ADMIN_BONUS if uid != OWNER_ID else 0.0
+    amount = recovery_finish_member_amount(request)
+    bonus = recovery_finish_bonus() if uid != OWNER_ID else 0.0
     token = account_callback_token(request.get("email", ""))
     await query.edit_message_text(
         "🏁 <b>تأكيد إنهاء الإيميل ببريد استرداد فقط</b>\n\n"
         f"📧 <code>{tg_html_escape(request.get('email', ''))}</code>\n"
         f"🔑 <code>{tg_html_escape(request.get('password', ''))}</code>\n"
         f"📮 بريد الاسترداد: <code>{tg_html_escape(rec.get('email', ''))}</code>\n\n"
-        f"💰 سعر العضو: <b>${amount:.2f}</b> (يُحجز 24 ساعة ثم يتحرر تلقائياً بدون فحص ثانٍ)\n"
+        f"💰 سعر العضو: <b>${amount:.2f}</b> (خطوتان فقط، يُحجز 24 ساعة ثم يتحرر تلقائياً بدون فحص ثانٍ)\n"
         f"👮 مكافأتك: <b>${bonus:.2f}</b>\n\n"
         "سيذهب الإيميل إلى قسم «بريد الاسترداد» عند المالك بصيغة إيميل:باسورد:بريد_الاسترداد.",
         parse_mode=ParseMode.HTML,
@@ -3403,8 +3403,9 @@ async def admin_recovery_finish_ok(update: Update, context: ContextTypes.DEFAULT
     pending = user_data.get("pending_requests", [])
     rec = request.get("recovery") or {}
     email = request.get("email", "")
-    amount = cents_to_money(money_to_cents(request.get("amount", 0.0)))
-    bonus = RECOVERY_FINISH_ADMIN_BONUS if admin_id != OWNER_ID else 0.0
+    req_amount = cents_to_money(money_to_cents(request.get("amount", 0.0)))   # ما كان محجوزاً بانتظار الطلب
+    amount = recovery_finish_member_amount(request)                            # ما يستحقه العضو فعلاً (خطوتان)
+    bonus = recovery_finish_bonus() if admin_id != OWNER_ID else 0.0
     now = datetime.now(timezone.utc)
     admin_user = update.effective_user
     admin_name = admin_user.full_name or "Unknown"
@@ -3433,7 +3434,7 @@ async def admin_recovery_finish_ok(update: Update, context: ContextTypes.DEFAULT
                          "verified_at": now.isoformat(), "verified_by": "recovery_finish", "admin_id": admin_id},
     })
     user_data.setdefault("approved_accounts", []).append(record)
-    user_data["pending_balance"] = clamp_money(float(user_data.get("pending_balance", 0.0)) - amount)
+    user_data["pending_balance"] = clamp_money(float(user_data.get("pending_balance", 0.0)) - req_amount)
     user_data["hold_balance"] = clamp_money(float(user_data.get("hold_balance", 0.0)) + amount)
     user_data["total_credited_balance"] = clamp_money(float(user_data.get("total_credited_balance", 0.0) or 0.0) + amount)
     user_data["total_approved_emails"] = int(user_data.get("total_approved_emails", 0)) + 1
@@ -3540,10 +3541,9 @@ def _acc_type_label(acc_type: str) -> str:
 
 
 def build_all_recovery_export(accounts: list) -> bytes:
-    """4 خانات: إيميل:باسورد:رمز_المصادقة:بريد_الاسترداد
-    (رمز المصادقة فارغ لحسابات recovery_finish التي لا تملكه)."""
+    """3 خانات دائماً: إيميل:باسورد:بريد_الاسترداد"""
     return "\n".join(
-        f"{a.get('email', '')}:{a.get('password', '')}:{a.get('totp', '')}:{a.get('recovery_mail', '')}"
+        f"{a.get('email', '')}:{a.get('password', '')}:{a.get('recovery_mail', '')}"
         for a in accounts
     ).encode("utf-8")
 
@@ -3553,23 +3553,16 @@ async def recovery_accounts_menu(update: Update, context: ContextTypes.DEFAULT_T
     if query.from_user.id != OWNER_ID:
         await query.answer("🚫", show_alert=True)
         return
-    c = {(sc, ty): len(_recovery_records(ty, sc == "un")) for sc in ("un", "all") for ty in ("old", "new")}
     ca = {sc: len(_all_recovery_records("all", sc == "un")) for sc in ("un", "all")}
     buttons = [
-        # ─── القسم الأول: إيميل استرداد فقط (بدون TOTP/app_pass) ───
-        (f"📮 استرداد فقط — قديم غير مستخرج ({c[('un', 'old')]})", "rec_acc:un:old"),
-        (f"📮 استرداد فقط — جديد غير مستخرج ({c[('un', 'new')]})", "rec_acc:un:new"),
-        (f"📮 استرداد فقط — جميع قديم ({c[('all', 'old')]})", "rec_acc:all:old"),
-        (f"📮 استرداد فقط — جميع جديد ({c[('all', 'new')]})", "rec_acc:all:new"),
-        # ─── استخراج الايميلات مع بريد الاسترداد (الجديد والقديم مدموجان) ───
-        (f"📋 استخراج الكل: إيميل+استرداد ({ca['all']})", "rec_all:all:all"),
-        (f"📋 استخراج غير المستخرج: إيميل+استرداد ({ca['un']})", "rec_all:un:all"),
+        (f"📥 استخراج غير المستخرج ({ca['un']})", "rec_all:un:all"),
+        (f"📥 استخراج الجميع ({ca['all']})", "rec_all:all:all"),
         ("🔙 إدارة الحسابات", "all_accounts_section"),
     ]
     await query.edit_message_text(
         "📮 <b>بريد الاسترداد</b>\n\n"
-        "▪️ <b>استرداد فقط</b>: إيميل:باسورد:بريد_الاسترداد\n"
-        "▪️ <b>استخراج الكل / غير المستخرج</b> (جديد + قديم معاً): إيميل:باسورد:رمز_المصادقة:بريد_الاسترداد",
+        "الصيغة دائماً: إيميل:باسورد:بريد_الاسترداد\n"
+        "(الجديد والقديم معاً)",
         parse_mode=ParseMode.HTML, reply_markup=kb_vertical(buttons))
 
 
@@ -3640,14 +3633,14 @@ async def recovery_all_accounts_list(update: Update, context: ContextTypes.DEFAU
     if not rows:
         await query.edit_message_text(f"📋 {title}\n\nلا توجد حسابات.", reply_markup=kb_single(*back))
         return
-    lines = [f"📋 <b>{title}</b> ({len(rows)})", "الصيغة: إيميل:باسورد:رمز_المصادقة:بريد_الاسترداد", ""]
+    lines = [f"📋 <b>{title}</b> ({len(rows)})", "الصيغة: إيميل:باسورد:بريد_الاسترداد", ""]
     for i, a in enumerate(rows[:10], 1):
         flag = "✅" if a.get("extracted_recovery_all") else "🆕"
         kind = "📮" if a.get("recovery_finish") else "🟢"
         lines.append(
             f"{i}. {flag}{kind} <code>"
             f"{tg_html_escape(a.get('email', ''))}:{tg_html_escape(a.get('password', ''))}:"
-            f"{tg_html_escape(a.get('totp', ''))}:{tg_html_escape(a.get('recovery_mail', ''))}</code>"
+            f"{tg_html_escape(a.get('recovery_mail', ''))}</code>"
         )
     if len(rows) > 10:
         lines.append(f"… و{len(rows) - 10} آخرين (يظهرون في التصدير)")
@@ -3672,7 +3665,7 @@ async def recovery_all_accounts_export(update: Update, context: ContextTypes.DEF
         chat_id=OWNER_ID,
         document=io.BytesIO(build_all_recovery_export(rows)),
         filename=name,
-        caption=f"📋 {len(rows)} حساب (إيميل:باسورد:رمز_المصادقة:بريد_الاسترداد)")
+        caption=f"📋 {len(rows)} حساب (إيميل:باسورد:بريد_الاسترداد)")
     if scope == "un":
         wanted = {(r["user_id"], normalize_email(r.get("email", ""))) for r in rows}
         for uid_str, enc in load_json(USERS_DB).items():
@@ -3762,7 +3755,24 @@ def recovery_check_applies(admin_id: int) -> bool:
     return admin_id != OWNER_ID and int(admin_id) in recovery_check_admins()
 
 
-RECOVERY_FINISH_ADMIN_BONUS = 0.02   # مكافأة المشرف عند «إنهاء» إيميل ببريد استرداد فقط
+RECOVERY_FINISH_ADMIN_BONUS = 0.02   # مكافأة المشرف الافتراضية عند «إنهاء» إيميل ببريد استرداد فقط
+
+
+def recovery_finish_bonus() -> float:
+    """مكافأة المشرف عند الإنهاء. الافتراضي 0.02 ويغيّرها المالك بالأمر /recovery_bonus."""
+    try:
+        return max(0.0, round(float(load_config().get("recovery_finish_admin_bonus", RECOVERY_FINISH_ADMIN_BONUS)), 4))
+    except (TypeError, ValueError):
+        return RECOVERY_FINISH_ADMIN_BONUS
+
+
+def recovery_finish_member_amount(request: dict) -> float:
+    """نقاط العضو عند الإنهاء ببريد الاسترداد: خطوتان فقط (إيميل + باسورد) = السعر الأول،
+    حتى لو باع العضو بثلاث خطوات. لا تتجاوز أبداً ما طلبه العضو."""
+    acc_type = "new" if request.get("account_type") == "new" else "old"
+    tier1 = get_tier_prices(acc_type)["tier_1"]
+    req_amount = float(request.get("amount", 0.0) or 0.0)
+    return cents_to_money(min(money_to_cents(req_amount), money_to_cents(tier1)))
 
 
 def recovery_perms(admin_id: int) -> dict:
@@ -4410,6 +4420,26 @@ async def recovery_admin_toggle(update: Update, context: ContextTypes.DEFAULT_TY
         await query.message.reply_text(f"⚠️ تعذر حفظ الإعداد: {exc}")
         return
     await recovery_admins_menu(update, context)
+
+
+async def recovery_bonus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/recovery_bonus [المبلغ] — للمالك: عرض أو تغيير مكافأة المشرف عند الإنهاء ببريد الاسترداد (الافتراضي 0.02)."""
+    if update.effective_user.id != OWNER_ID:
+        return
+    if context.args:
+        try:
+            val = round(float(context.args[0].replace(",", ".")), 4)
+            if val < 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("⚠️ أرسل رقماً صحيحاً، مثال: /recovery_bonus 0.03")
+            return
+        config = load_config()
+        config["recovery_finish_admin_bonus"] = val
+        save_config(config)
+    await update.message.reply_text(
+        f"👮 مكافأة المشرف عند الإنهاء ببريد الاسترداد: ${recovery_finish_bonus():.2f}\n"
+        "لتغييرها: /recovery_bonus 0.03")
 
 
 async def recovery_check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):

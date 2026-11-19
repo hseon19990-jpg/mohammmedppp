@@ -947,6 +947,7 @@ def main():
     app.add_handler(CommandHandler("backup", backup_command))
     app.add_handler(CommandHandler("cleanup_recovery", cleanup_recovery_command))
     app.add_handler(CommandHandler("recovery_check", recovery_check_command))
+    app.add_handler(CommandHandler("recovery_bonus", recovery_bonus_command))
     app.add_handler(CallbackQueryHandler(router))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_input))
     app.add_handler(MessageHandler(filters.VIDEO, handle_video_upload))
