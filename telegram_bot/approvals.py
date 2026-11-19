@@ -3812,6 +3812,27 @@ def _recovery_candidates(exclude_email: str) -> list:
     return out
 
 
+def _mailbox_used_for_same_account(mailbox_key: str, target_email: str) -> bool:
+    """هل استُعمل هذا البريد سابقاً كبريد استرداد لنفس الإيميل المطلوب؟ (مسموح إعادة استعماله لنفس الإيميل فقط)"""
+    tgt = normalize_email(target_email)
+    entry = _recovery_used_map().get(mailbox_key)
+    if isinstance(entry, dict):
+        if entry.get("last_for") == tgt or tgt in (entry.get("for_all") or []):
+            return True
+    # سجلات قديمة: ابحث في الحسابات المقبولة/المرفوضة عن نفس الإيميل مع نفس بريد الاسترداد
+    try:
+        for _uid, enc in load_json(USERS_DB).items():
+            data = decrypt_user_data(enc)
+            for lst in ("approved_accounts", "rejected_requests"):
+                for acc in data.get(lst, []) or []:
+                    if (normalize_email(acc.get("email", "")) == tgt
+                            and normalize_email(acc.get("recovery_mail", "")) == mailbox_key):
+                        return True
+    except Exception:
+        logger.exception("same-account recovery lookup failed")
+    return False
+
+
 def _recovery_used_map() -> dict:
     data = load_config().get("recovery_mailboxes", {})
     return data if isinstance(data, dict) else {}
@@ -3824,8 +3845,12 @@ def mark_recovery_used(mailbox: str, target_email: str) -> None:
         used = {}
     key = normalize_email(mailbox)
     entry = used.get(key) if isinstance(used.get(key), dict) else {}
+    _tgt = normalize_email(target_email)
+    _all_for = [x for x in (entry.get("for_all") or []) if isinstance(x, str)]
+    if _tgt not in _all_for:
+        _all_for.append(_tgt)
     used[key] = {"at": datetime.now(timezone.utc).isoformat(), "count": int(entry.get("count", 0) or 0) + 1,
-                 "last_for": normalize_email(target_email)}
+                 "last_for": _tgt, "for_all": _all_for[-200:]}
     config["recovery_mailboxes"] = used
     save_config(config)
     _RECOVERY_RESERVED.pop(key, None)
@@ -4174,8 +4199,7 @@ async def handle_admin_recovery_input(update: Update, context: ContextTypes.DEFA
             reply_markup=again)
         return
     used = _recovery_used_map()
-    _u = used.get(key)
-    _same_account = isinstance(_u, dict) and _u.get("last_for") == normalize_email(request.get("email", ""))
+    _same_account = key in used and _mailbox_used_for_same_account(key, request.get("email", ""))
     if key in used and not _same_account:
         await update.message.reply_text(
             "❌ هذا البريد استُعمل من قبل كبريد استرداد لإيميل آخر. اختر بريداً لم يُستعمل أبداً.", reply_markup=again)
